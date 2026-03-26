@@ -207,6 +207,7 @@ func Defaults() *Config {
 				TerminalStatuses: []string{"resolved", "wontfix", "archived"},
 				DirectoryMap: map[string]string{
 					"open":     "issues",
+					"active":   "issues",
 					"resolved": "archive",
 					"wontfix":  "archive",
 				},

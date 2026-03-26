@@ -10,13 +10,7 @@ import (
 	"github.com/jfinlinson/agent-state/internal/store"
 )
 
-func Start(s *store.Store, cfg *config.Config, args []string) int {
-	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: as start <id>")
-		return 2
-	}
-
-	id := args[0]
+func Start(s *store.Store, cfg *config.Config, id string) int {
 	item, ok := s.Get(id)
 	if !ok {
 		fmt.Fprintf(os.Stderr, "not found: %s\n", id)

@@ -1,7 +1,6 @@
 package command
 
 import (
-	"flag"
 	"fmt"
 	"os"
 	"time"
@@ -10,21 +9,12 @@ import (
 	"github.com/jfinlinson/agent-state/internal/store"
 )
 
-func Close(s *store.Store, cfg *config.Config, args []string) int {
-	fs := flag.NewFlagSet("close", flag.ContinueOnError)
-	reason := fs.String("reason", "", "reason for abandonment")
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
+// CloseOpts holds flags for the close command.
+type CloseOpts struct {
+	Reason string
+}
 
-	if fs.NArg() < 2 {
-		fmt.Fprintln(os.Stderr, "usage: as close <id> <resolution> [--reason \"...\"]")
-		return 2
-	}
-
-	id := fs.Arg(0)
-	resolution := fs.Arg(1)
-
+func Close(s *store.Store, cfg *config.Config, id, resolution string, opts CloseOpts) int {
 	item, ok := s.Get(id)
 	if !ok {
 		fmt.Fprintf(os.Stderr, "not found: %s\n", id)
@@ -58,7 +48,7 @@ func Close(s *store.Store, cfg *config.Config, args []string) int {
 
 	// If abandoning, require reason
 	if resolution == "abandoned" || resolution == "wontfix" || resolution == "declined" {
-		if *reason == "" {
+		if opts.Reason == "" {
 			fmt.Fprintln(os.Stderr, "--reason is required when abandoning")
 			return 2
 		}
@@ -76,8 +66,8 @@ func Close(s *store.Store, cfg *config.Config, args []string) int {
 	item.Doc.SetField("completed", nowStr)
 	item.Doc.SetField("last_touched", nowStr)
 
-	if *reason != "" {
-		item.Doc.SetField("resolution", *reason)
+	if opts.Reason != "" {
+		item.Doc.SetField("resolution", opts.Reason)
 	}
 
 	if err := s.Write(item); err != nil {

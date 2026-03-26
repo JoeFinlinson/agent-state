@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
+	"strings"
 
 	"github.com/jfinlinson/agent-state/internal/command"
 	"github.com/jfinlinson/agent-state/internal/config"
@@ -65,6 +67,40 @@ func init() {
 	rootCmd.AddCommand(syncCmd)
 	rootCmd.AddCommand(indexCmd)
 	rootCmd.AddCommand(versionCmd)
+
+	// Flags: show
+	showCmd.Flags().BoolP("brief", "b", false, "compact one-line output")
+	showCmd.Flags().StringP("field", "f", "", "show single field value")
+
+	// Flags: list
+	listCmd.Flags().StringP("type", "T", "", "filter by type (task, issue, idea)")
+	listCmd.Flags().StringP("status", "s", "", "filter by status")
+	listCmd.Flags().String("tag", "", "filter by tag")
+	listCmd.Flags().String("assigned", "", "filter by agent assignment")
+
+	// Flags: create
+	createCmd.Flags().IntP("priority", "p", 2, "priority (0=highest, 4=lowest)")
+	createCmd.Flags().String("tag", "", "tag to add")
+	createCmd.Flags().String("depends", "", "depends on item ID")
+
+	// Flags: update
+	updateCmd.Flags().Bool("stdin", false, "read value from stdin (for multiline)")
+
+	// Flags: check
+	checkCmd.Flags().BoolP("quiet", "q", false, "exit code only, no output")
+
+	// Flags: close
+	closeCmd.Flags().String("reason", "", "reason for abandonment/wontfix")
+
+	// Flags: ready
+	readyCmd.Flags().StringP("type", "T", "", "filter by type")
+	readyCmd.Flags().String("tag", "", "filter by tag")
+	readyCmd.Flags().IntP("limit", "n", 0, "max items to show")
+
+	// Flags: finish
+	finishCmd.Flags().Bool("dry-run", false, "preview without deleting")
+	finishCmd.Flags().Bool("force", false, "remove even with uncommitted changes")
+	finishCmd.Flags().BoolP("list", "l", false, "list all active worktrees")
 }
 
 // --- State ---
@@ -72,48 +108,74 @@ func init() {
 var showCmd = &cobra.Command{
 	Use:   "show <id>",
 	Short: "Show item detail",
-	Args:  cobra.MinimumNArgs(1),
-	DisableFlagParsing: true,
+	Args:  cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		os.Exit(command.Show(s, args))
+		brief, _ := cmd.Flags().GetBool("brief")
+		field, _ := cmd.Flags().GetString("field")
+		os.Exit(command.Show(s, args[0], command.ShowOpts{Brief: brief, Field: field}))
 	},
 }
 
 var listCmd = &cobra.Command{
-	Use:                "list",
-	Aliases:            []string{"ls"},
-	Short:              "List items",
-	DisableFlagParsing: true,
+	Use:     "list",
+	Aliases: []string{"ls"},
+	Short:   "List items",
 	Run: func(cmd *cobra.Command, args []string) {
-		os.Exit(command.List(s, cfg, args))
+		typeF, _ := cmd.Flags().GetString("type")
+		statusF, _ := cmd.Flags().GetString("status")
+		tagF, _ := cmd.Flags().GetString("tag")
+		assignedF, _ := cmd.Flags().GetString("assigned")
+		os.Exit(command.List(s, cfg, command.ListOpts{
+			Type: typeF, Status: statusF, Tag: tagF, Assigned: assignedF,
+		}))
 	},
 }
 
 var createCmd = &cobra.Command{
-	Use:                "create <type> <title>",
-	Aliases:            []string{"new"},
-	Short:              "Create new item",
-	DisableFlagParsing: true,
+	Use:     "create <type> <title>",
+	Aliases: []string{"new"},
+	Short:   "Create new item",
+	Args:    cobra.ExactArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
-		os.Exit(command.Create(s, cfg, args))
+		priority, _ := cmd.Flags().GetInt("priority")
+		tag, _ := cmd.Flags().GetString("tag")
+		depends, _ := cmd.Flags().GetString("depends")
+		os.Exit(command.Create(s, cfg, args[0], args[1], command.CreateOpts{
+			Priority: priority, Tag: tag, Depends: depends,
+		}))
 	},
 }
 
 var updateCmd = &cobra.Command{
-	Use:                "update <id> <field> [value]",
-	Short:              "Update a field on an item",
-	DisableFlagParsing: true,
+	Use:   "update <id> <field> [value]",
+	Short: "Update a field on an item",
+	Args:  cobra.RangeArgs(2, 3),
 	Run: func(cmd *cobra.Command, args []string) {
-		os.Exit(command.Update(s, args))
+		stdinFlag, _ := cmd.Flags().GetBool("stdin")
+		var value string
+		if stdinFlag {
+			data, err := io.ReadAll(os.Stdin)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "reading stdin: %v\n", err)
+				os.Exit(1)
+			}
+			value = strings.TrimRight(string(data), "\n")
+		} else if len(args) >= 3 {
+			value = args[2]
+		} else {
+			fmt.Fprintln(os.Stderr, "usage: as update <id> <field> <value> or --stdin")
+			os.Exit(2)
+		}
+		os.Exit(command.Update(s, args[0], args[1], value))
 	},
 }
 
 var checkCmd = &cobra.Command{
-	Use:                "check",
-	Short:              "Validate all item files",
-	DisableFlagParsing: true,
+	Use:   "check",
+	Short: "Validate all item files",
 	Run: func(cmd *cobra.Command, args []string) {
-		os.Exit(command.Check(s, cfg, args))
+		quiet, _ := cmd.Flags().GetBool("quiet")
+		os.Exit(command.Check(s, cfg, quiet))
 	},
 }
 
@@ -124,34 +186,50 @@ var startCmd = &cobra.Command{
 	Short: "Claim and activate an item",
 	Args:  cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		os.Exit(command.Start(s, cfg, args))
+		os.Exit(command.Start(s, cfg, args[0]))
 	},
 }
 
 var closeCmd = &cobra.Command{
-	Use:                "close <id> <resolution>",
-	Short:              "Close an item (enforces gates)",
-	DisableFlagParsing: true,
+	Use:   "close <id> <resolution>",
+	Short: "Close an item (enforces gates)",
+	Args:  cobra.ExactArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
-		os.Exit(command.Close(s, cfg, args))
+		reason, _ := cmd.Flags().GetString("reason")
+		os.Exit(command.Close(s, cfg, args[0], args[1], command.CloseOpts{Reason: reason}))
 	},
 }
 
 var readyCmd = &cobra.Command{
-	Use:                "ready",
-	Short:              "Show unblocked items sorted by priority",
-	DisableFlagParsing: true,
+	Use:   "ready",
+	Short: "Show unblocked items sorted by priority",
 	Run: func(cmd *cobra.Command, args []string) {
-		os.Exit(command.Ready(s, cfg, args))
+		typeF, _ := cmd.Flags().GetString("type")
+		tagF, _ := cmd.Flags().GetString("tag")
+		limit, _ := cmd.Flags().GetInt("limit")
+		os.Exit(command.Ready(s, cfg, command.ReadyOpts{Type: typeF, Tag: tagF, Limit: limit}))
 	},
 }
 
 var finishCmd = &cobra.Command{
-	Use:                "finish <id>",
-	Short:              "Clean up worktrees after merge",
-	DisableFlagParsing: true,
+	Use:   "finish [id]",
+	Short: "Clean up worktrees after merge",
+	Args:  cobra.MaximumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		os.Exit(command.Finish(s, cfg, args))
+		listAll, _ := cmd.Flags().GetBool("list")
+		dryRun, _ := cmd.Flags().GetBool("dry-run")
+		force, _ := cmd.Flags().GetBool("force")
+		id := ""
+		if len(args) > 0 {
+			id = args[0]
+		}
+		if !listAll && id == "" {
+			cmd.Usage()
+			os.Exit(2)
+		}
+		os.Exit(command.Finish(s, cfg, id, command.FinishOpts{
+			DryRun: dryRun, Force: force, ListAll: listAll,
+		}))
 	},
 }
 
@@ -160,8 +238,13 @@ var finishCmd = &cobra.Command{
 var syncCmd = &cobra.Command{
 	Use:   "sync [message]",
 	Short: "Git commit and push agent-state changes",
+	Args:  cobra.MaximumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		os.Exit(command.Sync(s, args))
+		msg := ""
+		if len(args) > 0 {
+			msg = args[0]
+		}
+		os.Exit(command.Sync(s, msg))
 	},
 }
 
@@ -169,7 +252,7 @@ var indexCmd = &cobra.Command{
 	Use:   "index",
 	Short: "Regenerate index.md from item state",
 	Run: func(cmd *cobra.Command, args []string) {
-		os.Exit(command.Index(s, cfg, args))
+		os.Exit(command.Index(s, cfg))
 	},
 }
 
@@ -177,6 +260,6 @@ var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Print version",
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("as 0.1.0")
+		fmt.Println("as 0.2.0")
 	},
 }

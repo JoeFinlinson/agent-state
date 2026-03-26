@@ -117,7 +117,7 @@ func writeFile(t *testing.T, path, content string) {
 
 func TestShowHappy(t *testing.T) {
 	s, _ := setupTestEnv(t)
-	code := Show(s, []string{"T-001"})
+	code := Show(s, "T-001", ShowOpts{})
 	if code != 0 {
 		t.Errorf("Show T-001 returned %d, want 0", code)
 	}
@@ -125,25 +125,33 @@ func TestShowHappy(t *testing.T) {
 
 func TestShowBrief(t *testing.T) {
 	s, _ := setupTestEnv(t)
-	code := Show(s, []string{"T-001", "--brief"})
+	code := Show(s, "T-001", ShowOpts{Brief: true})
 	if code != 0 {
 		t.Errorf("Show --brief returned %d, want 0", code)
 	}
 }
 
-func TestShowNotFound(t *testing.T) {
+func TestShowField(t *testing.T) {
 	s, _ := setupTestEnv(t)
-	code := Show(s, []string{"T-999"})
-	if code != 1 {
-		t.Errorf("Show T-999 returned %d, want 1", code)
+	code := Show(s, "T-001", ShowOpts{Field: "status"})
+	if code != 0 {
+		t.Errorf("Show --field returned %d, want 0", code)
 	}
 }
 
-func TestShowNoArgs(t *testing.T) {
+func TestShowFieldNotFound(t *testing.T) {
 	s, _ := setupTestEnv(t)
-	code := Show(s, []string{})
-	if code != 2 {
-		t.Errorf("Show no args returned %d, want 2", code)
+	code := Show(s, "T-001", ShowOpts{Field: "nonexistent"})
+	if code != 1 {
+		t.Errorf("Show --field nonexistent returned %d, want 1", code)
+	}
+}
+
+func TestShowNotFound(t *testing.T) {
+	s, _ := setupTestEnv(t)
+	code := Show(s, "T-999", ShowOpts{})
+	if code != 1 {
+		t.Errorf("Show T-999 returned %d, want 1", code)
 	}
 }
 
@@ -151,7 +159,7 @@ func TestShowNoArgs(t *testing.T) {
 
 func TestListAll(t *testing.T) {
 	s, cfg := setupTestEnv(t)
-	code := List(s, cfg, []string{})
+	code := List(s, cfg, ListOpts{})
 	if code != 0 {
 		t.Errorf("List returned %d, want 0", code)
 	}
@@ -159,9 +167,25 @@ func TestListAll(t *testing.T) {
 
 func TestListByType(t *testing.T) {
 	s, cfg := setupTestEnv(t)
-	code := List(s, cfg, []string{"--type", "issue"})
+	code := List(s, cfg, ListOpts{Type: "issue"})
 	if code != 0 {
 		t.Errorf("List --type issue returned %d, want 0", code)
+	}
+}
+
+func TestListByStatus(t *testing.T) {
+	s, cfg := setupTestEnv(t)
+	code := List(s, cfg, ListOpts{Status: "active"})
+	if code != 0 {
+		t.Errorf("List --status active returned %d, want 0", code)
+	}
+}
+
+func TestListByAssigned(t *testing.T) {
+	s, cfg := setupTestEnv(t)
+	code := List(s, cfg, ListOpts{Assigned: "agent-a"})
+	if code != 0 {
+		t.Errorf("List --assigned agent-a returned %d, want 0", code)
 	}
 }
 
@@ -169,19 +193,40 @@ func TestListByType(t *testing.T) {
 
 func TestCheckClean(t *testing.T) {
 	s, cfg := setupTestEnv(t)
-	code := Check(s, cfg, []string{"--quiet"})
-	// May have reciprocal dep issues (T-002 depends T-001, T-001 doesn't block T-002)
-	// That's expected — check should catch it
-	_ = code // just verify it doesn't crash
+	code := Check(s, cfg, true)
+	// May have reciprocal dep issues — just verify it doesn't crash
+	_ = code
+}
+
+func TestCheckVerbose(t *testing.T) {
+	s, cfg := setupTestEnv(t)
+	code := Check(s, cfg, false)
+	_ = code
 }
 
 // --- Ready ---
 
 func TestReady(t *testing.T) {
 	s, cfg := setupTestEnv(t)
-	code := Ready(s, cfg, []string{})
+	code := Ready(s, cfg, ReadyOpts{})
 	if code != 0 {
 		t.Errorf("Ready returned %d, want 0", code)
+	}
+}
+
+func TestReadyWithLimit(t *testing.T) {
+	s, cfg := setupTestEnv(t)
+	code := Ready(s, cfg, ReadyOpts{Limit: 1})
+	if code != 0 {
+		t.Errorf("Ready --limit 1 returned %d, want 0", code)
+	}
+}
+
+func TestReadyByType(t *testing.T) {
+	s, cfg := setupTestEnv(t)
+	code := Ready(s, cfg, ReadyOpts{Type: "task"})
+	if code != 0 {
+		t.Errorf("Ready --type task returned %d, want 0", code)
 	}
 }
 
@@ -189,7 +234,7 @@ func TestReady(t *testing.T) {
 
 func TestCreateHappy(t *testing.T) {
 	s, cfg := setupTestEnv(t)
-	code := Create(s, cfg, []string{"task", "New task"})
+	code := Create(s, cfg, "task", "New task", CreateOpts{Priority: 2})
 	if code != 0 {
 		t.Errorf("Create returned %d, want 0", code)
 	}
@@ -206,17 +251,25 @@ func TestCreateHappy(t *testing.T) {
 
 func TestCreateBadType(t *testing.T) {
 	s, cfg := setupTestEnv(t)
-	code := Create(s, cfg, []string{"banana", "Bad type"})
+	code := Create(s, cfg, "banana", "Bad type", CreateOpts{Priority: 2})
 	if code != 2 {
 		t.Errorf("Create bad type returned %d, want 2", code)
 	}
 }
 
-func TestCreateNoArgs(t *testing.T) {
+func TestCreateWithDeps(t *testing.T) {
 	s, cfg := setupTestEnv(t)
-	code := Create(s, cfg, []string{"task"})
-	if code != 2 {
-		t.Errorf("Create no title returned %d, want 2", code)
+	code := Create(s, cfg, "task", "Dep task", CreateOpts{Priority: 1, Depends: "T-001"})
+	if code != 0 {
+		t.Errorf("Create with deps returned %d, want 0", code)
+	}
+}
+
+func TestCreateWithTag(t *testing.T) {
+	s, cfg := setupTestEnv(t)
+	code := Create(s, cfg, "task", "Tagged task", CreateOpts{Priority: 2, Tag: "infra"})
+	if code != 0 {
+		t.Errorf("Create with tag returned %d, want 0", code)
 	}
 }
 
@@ -224,7 +277,7 @@ func TestCreateNoArgs(t *testing.T) {
 
 func TestStartHappy(t *testing.T) {
 	s, cfg := setupTestEnv(t)
-	code := Start(s, cfg, []string{"T-001"})
+	code := Start(s, cfg, "T-001")
 	if code != 0 {
 		t.Errorf("Start T-001 returned %d, want 0", code)
 	}
@@ -238,7 +291,7 @@ func TestStartHappy(t *testing.T) {
 func TestStartBlocked(t *testing.T) {
 	s, cfg := setupTestEnv(t)
 	// T-002 depends on T-001 which is queued — should block
-	code := Start(s, cfg, []string{"T-002"})
+	code := Start(s, cfg, "T-002")
 	if code != 1 {
 		t.Errorf("Start blocked item returned %d, want 1", code)
 	}
@@ -246,7 +299,7 @@ func TestStartBlocked(t *testing.T) {
 
 func TestStartAlreadyActive(t *testing.T) {
 	s, cfg := setupTestEnv(t)
-	code := Start(s, cfg, []string{"T-003"})
+	code := Start(s, cfg, "T-003")
 	if code != 1 {
 		t.Errorf("Start already-active returned %d, want 1", code)
 	}
@@ -258,15 +311,21 @@ func TestStartAssignedToOther(t *testing.T) {
 	os.Setenv("AS_AGENT_ID", "agent-b")
 	defer os.Unsetenv("AS_AGENT_ID")
 
-	// T-003 is assigned to agent-a — agent-b can't start it
-	// But T-003 is active, not queued, so it fails on status check first
-	// Let's test with T-001 after assigning it to agent-a
+	// T-001 is queued and unassigned, but let's assign it first
 	item, _ := s.Get("T-001")
 	item.AssignedTo = "agent-a"
 
-	code := Start(s, cfg, []string{"T-001"})
+	code := Start(s, cfg, "T-001")
 	if code != 1 {
 		t.Errorf("Start assigned-to-other returned %d, want 1", code)
+	}
+}
+
+func TestStartNotFound(t *testing.T) {
+	s, cfg := setupTestEnv(t)
+	code := Start(s, cfg, "T-999")
+	if code != 1 {
+		t.Errorf("Start not found returned %d, want 1", code)
 	}
 }
 
@@ -274,7 +333,7 @@ func TestStartAssignedToOther(t *testing.T) {
 
 func TestCloseHappy(t *testing.T) {
 	s, cfg := setupTestEnv(t)
-	code := Close(s, cfg, []string{"T-003", "completed"})
+	code := Close(s, cfg, "T-003", "completed", CloseOpts{})
 	if code != 0 {
 		t.Errorf("Close T-003 returned %d, want 0", code)
 	}
@@ -287,17 +346,33 @@ func TestCloseHappy(t *testing.T) {
 
 func TestCloseAbandonedRequiresReason(t *testing.T) {
 	s, cfg := setupTestEnv(t)
-	code := Close(s, cfg, []string{"T-003", "abandoned"})
+	code := Close(s, cfg, "T-003", "abandoned", CloseOpts{})
 	if code != 2 {
 		t.Errorf("Close abandoned without reason returned %d, want 2", code)
 	}
 }
 
+func TestCloseAbandonedWithReason(t *testing.T) {
+	s, cfg := setupTestEnv(t)
+	code := Close(s, cfg, "T-003", "abandoned", CloseOpts{Reason: "no longer needed"})
+	if code != 0 {
+		t.Errorf("Close abandoned with reason returned %d, want 0", code)
+	}
+}
+
 func TestCloseInvalidResolution(t *testing.T) {
 	s, cfg := setupTestEnv(t)
-	code := Close(s, cfg, []string{"T-003", "flying"})
+	code := Close(s, cfg, "T-003", "flying", CloseOpts{})
 	if code != 2 {
 		t.Errorf("Close invalid resolution returned %d, want 2", code)
+	}
+}
+
+func TestCloseNotFound(t *testing.T) {
+	s, cfg := setupTestEnv(t)
+	code := Close(s, cfg, "T-999", "completed", CloseOpts{})
+	if code != 1 {
+		t.Errorf("Close not found returned %d, want 1", code)
 	}
 }
 
@@ -305,7 +380,7 @@ func TestCloseInvalidResolution(t *testing.T) {
 
 func TestUpdateHappy(t *testing.T) {
 	s, _ := setupTestEnv(t)
-	code := Update(s, []string{"T-001", "title", "Updated title"})
+	code := Update(s, "T-001", "title", "Updated title")
 	if code != 0 {
 		t.Errorf("Update returned %d, want 0", code)
 	}
@@ -313,16 +388,30 @@ func TestUpdateHappy(t *testing.T) {
 
 func TestUpdateNotFound(t *testing.T) {
 	s, _ := setupTestEnv(t)
-	code := Update(s, []string{"T-999", "title", "nope"})
+	code := Update(s, "T-999", "title", "nope")
 	if code != 1 {
 		t.Errorf("Update nonexistent returned %d, want 1", code)
 	}
 }
 
-func TestUpdateNoArgs(t *testing.T) {
+// --- Sync ---
+
+func TestSyncNoGit(t *testing.T) {
 	s, _ := setupTestEnv(t)
-	code := Update(s, []string{"T-001"})
-	if code != 2 {
-		t.Errorf("Update no field returned %d, want 2", code)
+	// No git repo in temp dir — should handle gracefully
+	code := Sync(s, "test sync")
+	// Will fail because no git repo, but shouldn't panic
+	_ = code
+}
+
+// --- Index ---
+
+func TestIndex(t *testing.T) {
+	s, cfg := setupTestEnv(t)
+	// Create index.md path
+	os.WriteFile(cfg.IndexPath(), []byte(""), 0644)
+	code := Index(s, cfg)
+	if code != 0 {
+		t.Errorf("Index returned %d, want 0", code)
 	}
 }

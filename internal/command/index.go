@@ -12,7 +12,7 @@ import (
 	"github.com/jfinlinson/agent-state/internal/store"
 )
 
-func Index(s *store.Store, cfg *config.Config, args []string) int {
+func Index(s *store.Store, cfg *config.Config) int {
 	g := deps.Build(s.All(), cfg)
 
 	var b strings.Builder

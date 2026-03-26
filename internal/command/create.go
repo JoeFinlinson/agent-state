@@ -1,7 +1,6 @@
 package command
 
 import (
-	"flag"
 	"fmt"
 	"os"
 	"strings"
@@ -12,23 +11,14 @@ import (
 	"github.com/jfinlinson/agent-state/internal/store"
 )
 
-func Create(s *store.Store, cfg *config.Config, args []string) int {
-	fs := flag.NewFlagSet("create", flag.ContinueOnError)
-	priority := fs.Int("priority", 2, "priority (0-4)")
-	tag := fs.String("tag", "", "tag to add")
-	depends := fs.String("depends", "", "depends on ID")
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
+// CreateOpts holds flags for the create command.
+type CreateOpts struct {
+	Priority int
+	Tag      string
+	Depends  string
+}
 
-	if fs.NArg() < 2 {
-		fmt.Fprintln(os.Stderr, "usage: as create <type> \"<title>\" [--priority N] [--tag TAG] [--depends ID]")
-		return 2
-	}
-
-	itemType := fs.Arg(0)
-	title := fs.Arg(1)
-
+func Create(s *store.Store, cfg *config.Config, itemType, title string, opts CreateOpts) int {
 	tc, ok := cfg.Types[itemType]
 	if !ok {
 		fmt.Fprintf(os.Stderr, "unknown type: %s\n", itemType)
@@ -67,19 +57,19 @@ func Create(s *store.Store, cfg *config.Config, args []string) int {
 
 	// Priority
 	lines = append(lines, model.Line{
-		Raw: fmt.Sprintf("priority: %d", *priority), Key: "priority", Value: fmt.Sprintf("%d", *priority),
+		Raw: fmt.Sprintf("priority: %d", opts.Priority), Key: "priority", Value: fmt.Sprintf("%d", opts.Priority),
 	})
 
 	// Tags
-	if *tag != "" {
-		lines = append(lines, model.Line{Raw: fmt.Sprintf("tags: [%s]", *tag)})
+	if opts.Tag != "" {
+		lines = append(lines, model.Line{Raw: fmt.Sprintf("tags: [%s]", opts.Tag)})
 	}
 	lines = append(lines, model.Line{Raw: ""})
 
 	// Dependencies
-	if *depends != "" {
+	if opts.Depends != "" {
 		lines = append(lines, model.Line{Raw: "depends_on:", Key: "depends_on"})
-		lines = append(lines, model.Line{Raw: "- " + *depends, IsList: true})
+		lines = append(lines, model.Line{Raw: "- " + opts.Depends, IsList: true})
 	} else {
 		lines = append(lines, model.Line{Raw: "depends_on:", Key: "depends_on"})
 		lines = append(lines, model.Line{Raw: "- []", IsList: true})
@@ -99,15 +89,15 @@ func Create(s *store.Store, cfg *config.Config, args []string) int {
 		Title:       title,
 		Created:     now,
 		LastTouched: now,
-		Priority:    priority,
+		Priority:    &opts.Priority,
 		Doc:         doc,
 	}
 
-	if *depends != "" {
-		item.DependsOn = []string{*depends}
+	if opts.Depends != "" {
+		item.DependsOn = []string{opts.Depends}
 	}
-	if *tag != "" {
-		item.Tags = []string{*tag}
+	if opts.Tag != "" {
+		item.Tags = []string{opts.Tag}
 	}
 
 	item.WorkTracking = make(map[string]interface{})

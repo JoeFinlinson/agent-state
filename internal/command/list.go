@@ -1,7 +1,6 @@
 package command
 
 import (
-	"flag"
 	"fmt"
 	"os"
 
@@ -9,32 +8,31 @@ import (
 	"github.com/jfinlinson/agent-state/internal/store"
 )
 
-func List(s *store.Store, cfg *config.Config, args []string) int {
-	fs := flag.NewFlagSet("list", flag.ContinueOnError)
-	typeF := fs.String("type", "", "filter by type")
-	statusF := fs.String("status", "", "filter by status")
-	tagF := fs.String("tag", "", "filter by tag")
-	assignedF := fs.String("assigned", "", "filter by assignment")
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
+// ListOpts holds flags for the list command.
+type ListOpts struct {
+	Type     string
+	Status   string
+	Tag      string
+	Assigned string
+}
 
+func List(s *store.Store, cfg *config.Config, opts ListOpts) int {
 	var filters []store.Filter
-	if *typeF != "" {
-		filters = append(filters, store.TypeFilter(*typeF))
+	if opts.Type != "" {
+		filters = append(filters, store.TypeFilter(opts.Type))
 	}
-	if *statusF != "" {
-		filters = append(filters, store.StatusFilter(*statusF))
+	if opts.Status != "" {
+		filters = append(filters, store.StatusFilter(opts.Status))
 	}
-	if *tagF != "" {
-		filters = append(filters, store.TagFilter(*tagF))
+	if opts.Tag != "" {
+		filters = append(filters, store.TagFilter(opts.Tag))
 	}
-	if *assignedF != "" {
-		filters = append(filters, store.AssignedFilter(*assignedF))
+	if opts.Assigned != "" {
+		filters = append(filters, store.AssignedFilter(opts.Assigned))
 	}
 
 	// Default: show non-terminal items
-	if *typeF == "" && *statusF == "" && *tagF == "" && *assignedF == "" {
+	if opts.Type == "" && opts.Status == "" && opts.Tag == "" && opts.Assigned == "" {
 		filters = append(filters, store.NonTerminalFilter(cfg))
 	}
 

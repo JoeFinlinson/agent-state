@@ -7,13 +7,12 @@ import (
 	"github.com/jfinlinson/agent-state/internal/store"
 )
 
-func Sync(s *store.Store, args []string) int {
-	msg := "as: sync agent-state"
-	if len(args) > 0 {
-		msg = args[0]
+func Sync(s *store.Store, message string) int {
+	if message == "" {
+		message = "as: sync agent-state"
 	}
 
-	if err := s.GitSync(msg); err != nil {
+	if err := s.GitSync(message); err != nil {
 		fmt.Fprintf(os.Stderr, "sync: %v\n", err)
 		return 1
 	}

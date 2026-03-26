@@ -1,7 +1,6 @@
 package command
 
 import (
-	"flag"
 	"fmt"
 
 	"github.com/jfinlinson/agent-state/internal/config"
@@ -10,30 +9,31 @@ import (
 	"github.com/jfinlinson/agent-state/internal/store"
 )
 
-func Ready(s *store.Store, cfg *config.Config, args []string) int {
-	fs := flag.NewFlagSet("ready", flag.ContinueOnError)
-	typeF := fs.String("type", "", "filter by type")
-	tagF := fs.String("tag", "", "filter by tag")
-	limit := fs.Int("limit", 0, "max items to show")
-	fs.Parse(args)
+// ReadyOpts holds flags for the ready command.
+type ReadyOpts struct {
+	Type  string
+	Tag   string
+	Limit int
+}
 
+func Ready(s *store.Store, cfg *config.Config, opts ReadyOpts) int {
 	g := deps.Build(s.All(), cfg)
 	items := g.Ready()
 
 	// Apply additional filters
 	var filtered []*model.Item
 	for _, item := range items {
-		if *typeF != "" && item.Type != *typeF {
+		if opts.Type != "" && item.Type != opts.Type {
 			continue
 		}
-		if *tagF != "" && !hasTag(item, *tagF) {
+		if opts.Tag != "" && !hasTag(item, opts.Tag) {
 			continue
 		}
 		filtered = append(filtered, item)
 	}
 
-	if *limit > 0 && len(filtered) > *limit {
-		filtered = filtered[:*limit]
+	if opts.Limit > 0 && len(filtered) > opts.Limit {
+		filtered = filtered[:opts.Limit]
 	}
 
 	if len(filtered) == 0 {

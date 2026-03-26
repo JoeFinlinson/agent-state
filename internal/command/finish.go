@@ -1,7 +1,6 @@
 package command
 
 import (
-	"flag"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,15 +11,14 @@ import (
 	"github.com/jfinlinson/agent-state/internal/store"
 )
 
-func Finish(s *store.Store, cfg *config.Config, args []string) int {
-	fs := flag.NewFlagSet("finish", flag.ContinueOnError)
-	dryRun := fs.Bool("dry-run", false, "preview without deleting")
-	force := fs.Bool("force", false, "remove even with uncommitted changes")
-	listAll := fs.Bool("list", false, "list all active worktrees")
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
+// FinishOpts holds flags for the finish command.
+type FinishOpts struct {
+	DryRun  bool
+	Force   bool
+	ListAll bool
+}
 
+func Finish(s *store.Store, cfg *config.Config, id string, opts FinishOpts) int {
 	if cfg.Worktree == nil || !cfg.Worktree.Enabled {
 		fmt.Fprintln(os.Stderr, "worktree integration not enabled in config")
 		return 1
@@ -28,16 +26,15 @@ func Finish(s *store.Store, cfg *config.Config, args []string) int {
 
 	baseDir := filepath.Join(cfg.Root(), cfg.Worktree.BaseDir)
 
-	if *listAll {
+	if opts.ListAll {
 		return listWorktrees(baseDir)
 	}
 
-	if fs.NArg() < 1 {
+	if id == "" {
 		fmt.Fprintln(os.Stderr, "usage: as finish <id> [--dry-run] [--force] [--list]")
 		return 2
 	}
 
-	id := fs.Arg(0)
 	wtDir := filepath.Join(baseDir, id)
 
 	if _, err := os.Stat(wtDir); os.IsNotExist(err) {
@@ -53,7 +50,7 @@ func Finish(s *store.Store, cfg *config.Config, args []string) int {
 		}
 
 		// Check for uncommitted changes
-		if !*force {
+		if !opts.Force {
 			out, err := gitOutputDir(repoDir, "status", "--porcelain")
 			if err == nil && strings.TrimSpace(out) != "" {
 				fmt.Fprintf(os.Stderr, "%s has uncommitted changes in %s\n", id, repo)
@@ -70,7 +67,7 @@ func Finish(s *store.Store, cfg *config.Config, args []string) int {
 			}
 		}
 
-		if *dryRun {
+		if opts.DryRun {
 			fmt.Printf("[dry-run] would remove worktree: %s\n", repoDir)
 			continue
 		}
@@ -84,7 +81,7 @@ func Finish(s *store.Store, cfg *config.Config, args []string) int {
 		if err := gitCmdDir(mainRepoDir, "worktree", "remove", repoDir); err != nil {
 			fmt.Fprintf(os.Stderr, "removing worktree %s: %v\n", repoDir, err)
 			// Try force remove
-			if *force {
+			if opts.Force {
 				gitCmdDir(mainRepoDir, "worktree", "remove", "--force", repoDir)
 			}
 		}
@@ -97,7 +94,7 @@ func Finish(s *store.Store, cfg *config.Config, args []string) int {
 		fmt.Printf("Removed worktree: %s/%s (branch: %s)\n", id, repo, branch)
 	}
 
-	if !*dryRun {
+	if !opts.DryRun {
 		// Remove the worktree directory
 		os.RemoveAll(wtDir)
 		fmt.Printf("Finished %s — worktrees cleaned up\n", id)

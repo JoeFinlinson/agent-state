@@ -1,46 +1,38 @@
 package command
 
 import (
-	"flag"
 	"fmt"
 	"os"
 
 	"github.com/jfinlinson/agent-state/internal/store"
 )
 
-func Show(s *store.Store, args []string) int {
-	fs := flag.NewFlagSet("show", flag.ContinueOnError)
-	brief := fs.Bool("brief", false, "compact output")
-	field := fs.String("field", "", "show single field value")
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
+// ShowOpts holds flags for the show command.
+type ShowOpts struct {
+	Brief bool
+	Field string
+}
 
-	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: as show <id> [--brief] [--field <name>]")
-		return 2
-	}
-
-	id := fs.Arg(0)
+func Show(s *store.Store, id string, opts ShowOpts) int {
 	item, ok := s.Get(id)
 	if !ok {
 		fmt.Fprintf(os.Stderr, "not found: %s\n", id)
 		return 1
 	}
 
-	if *field != "" {
+	if opts.Field != "" {
 		if item.Doc != nil {
-			val, ok := item.Doc.GetField(*field)
+			val, ok := item.Doc.GetField(opts.Field)
 			if ok {
 				fmt.Println(val)
 				return 0
 			}
 		}
-		fmt.Fprintf(os.Stderr, "field %q not found on %s\n", *field, id)
+		fmt.Fprintf(os.Stderr, "field %q not found on %s\n", opts.Field, id)
 		return 1
 	}
 
-	if *brief {
+	if opts.Brief {
 		stage := ""
 		if s, ok := item.Delivery["stage"]; ok {
 			if str, ok := s.(string); ok && str != "" {
