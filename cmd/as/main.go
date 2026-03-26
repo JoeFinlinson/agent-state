@@ -67,6 +67,12 @@ func run() int {
 		return command.Start(s, cfg, args)
 	case "close":
 		return command.Close(s, cfg, args)
+	case "update":
+		return command.Update(s, args)
+	case "sync":
+		return command.Sync(s, args)
+	case "index":
+		return command.Index(s, cfg, args)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", cmd)
 		printUsage()
