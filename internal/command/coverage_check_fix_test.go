@@ -410,8 +410,9 @@ delivery:
 	}
 	execGitNoOutput = func(dir string, args ...string) error { return nil }
 
+	// Auto-fix now stamps legacy archived items as uat_approved
 	code := Check(s, cfg, false, false)
-	if code != 1 {
-		t.Error("expected code 1 for delivery gate violation")
+	if code != 0 {
+		t.Errorf("expected code 0 after auto-fix, got %d", code)
 	}
 }

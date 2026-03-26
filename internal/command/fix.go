@@ -18,6 +18,9 @@ func Fix(s *store.Store, cfg *config.Config) int {
 
 	fixed += fixRequiredFields(s, cfg)
 	fixed += fixStaleDeps(s, cfg)
+	fixed += fixReciprocalDeps(s, cfg)
+	fixed += fixDanglingDeps(s, cfg)
+	fixed += fixDeliveryGate(s, cfg)
 	fixed += fixIndex(s, cfg)
 
 	return fixed
@@ -68,7 +71,6 @@ func fixRequiredFields(s *store.Store, cfg *config.Config) int {
 }
 
 // fixStaleDeps normalizes slug-format dependency IDs to bare IDs.
-// e.g., T-013-subscription-billing-implementation → T-013
 func fixStaleDeps(s *store.Store, cfg *config.Config) int {
 	var fixed int
 	for _, item := range s.All() {
@@ -103,8 +105,147 @@ func fixStaleDeps(s *store.Store, cfg *config.Config) int {
 	return fixed
 }
 
+// fixReciprocalDeps fixes "A depends on B, but B doesn't list A in blocks" by
+// adding the missing blocks entry. Iterates until stable since adding one
+// reciprocal entry can reveal another missing one.
+func fixReciprocalDeps(s *store.Store, cfg *config.Config) int {
+	var totalFixed int
+
+	for pass := 0; pass < 5; pass++ {
+		fixed := 0
+		items := s.All()
+		dirty := map[string]bool{}
+
+		for id, item := range items {
+			for _, depID := range item.DependsOn {
+				dep, ok := items[depID]
+				if !ok {
+					continue
+				}
+				if !sliceContains(dep.Blocks, id) {
+					dep.Blocks = append(dep.Blocks, id)
+					if dep.Doc != nil {
+						dep.Doc.SetList("blocks", dep.Blocks)
+					}
+					dirty[depID] = true
+					fixed++
+					fmt.Printf("  \033[33m⟳\033[0m %s: added %s to blocks (reciprocal of depends_on)\n", depID, id)
+				}
+			}
+
+			for _, blockID := range item.Blocks {
+				blocked, ok := items[blockID]
+				if !ok {
+					continue
+				}
+				if !sliceContains(blocked.DependsOn, id) {
+					blocked.DependsOn = append(blocked.DependsOn, id)
+					if blocked.Doc != nil {
+						blocked.Doc.SetList("depends_on", blocked.DependsOn)
+					}
+					dirty[blockID] = true
+					fixed++
+					fmt.Printf("  \033[33m⟳\033[0m %s: added %s to depends_on (reciprocal of blocks)\n", blockID, id)
+				}
+			}
+		}
+
+		for id := range dirty {
+			item := items[id]
+			if err := s.Write(item); err != nil {
+				fmt.Fprintf(os.Stderr, "  error writing %s: %v\n", id, err)
+			}
+		}
+
+		totalFixed += fixed
+		if fixed == 0 {
+			break
+		}
+	}
+
+	return totalFixed
+}
+
+// fixDanglingDeps removes depends_on references to items that don't exist.
+func fixDanglingDeps(s *store.Store, cfg *config.Config) int {
+	var fixed int
+	items := s.All()
+
+	for id, item := range items {
+		if item.Doc == nil {
+			continue
+		}
+
+		var cleanDeps []string
+		removed := false
+		for _, depID := range item.DependsOn {
+			if _, ok := items[depID]; ok {
+				cleanDeps = append(cleanDeps, depID)
+			} else {
+				removed = true
+				fixed++
+				fmt.Printf("  \033[33m⟳\033[0m %s: removed dangling depends_on ref %s\n", id, depID)
+			}
+		}
+
+		if removed {
+			item.DependsOn = cleanDeps
+			if len(cleanDeps) == 0 {
+				item.Doc.SetList("depends_on", []string{})
+			} else {
+				item.Doc.SetList("depends_on", cleanDeps)
+			}
+			if err := s.Write(item); err != nil {
+				fmt.Fprintf(os.Stderr, "  error writing %s: %v\n", id, err)
+			}
+		}
+	}
+
+	return fixed
+}
+
+// fixDeliveryGate stamps archived items that have a delivery block but haven't
+// reached uat_approved. These are legacy items that predate the gate policy.
+func fixDeliveryGate(s *store.Store, cfg *config.Config) int {
+	if cfg.Delivery == nil || cfg.Delivery.ArchiveGate == "" {
+		return 0
+	}
+
+	var fixed int
+	for _, item := range s.All() {
+		if !cfg.IsTerminalStatus(item.Type, item.Status) {
+			continue
+		}
+		if item.Type != "task" && item.Type != "issue" {
+			continue
+		}
+		if item.Delivery == nil || len(item.Delivery) == 0 {
+			continue
+		}
+
+		stage, _ := item.Delivery["stage"].(string)
+		if cfg.StageReached(stage, cfg.Delivery.ArchiveGate) {
+			continue
+		}
+
+		// Auto-fix: stamp as uat_approved (legacy item, already archived)
+		setNestedField(item, "delivery", "stage", cfg.Delivery.ArchiveGate)
+		if err := s.Write(item); err != nil {
+			fmt.Fprintf(os.Stderr, "  error writing %s: %v\n", item.ID, err)
+			continue
+		}
+		fixed++
+		if stage == "" {
+			stage = "null"
+		}
+		fmt.Printf("  \033[33m⟳\033[0m %s: delivery_stage %s → %s (legacy archived item)\n",
+			item.ID, stage, cfg.Delivery.ArchiveGate)
+	}
+
+	return fixed
+}
+
 // normalizeDeps converts slug-format IDs to bare IDs.
-// Returns the new list and whether any changes were made.
 func normalizeDeps(deps []string) ([]string, bool) {
 	if len(deps) == 0 {
 		return deps, false
@@ -127,13 +268,11 @@ func fixIndex(s *store.Store, cfg *config.Config) int {
 	indexPath := cfg.IndexPath()
 	indexContent, err := os.ReadFile(indexPath)
 	if err != nil {
-		// If no index file, definitely regenerate
 		fmt.Printf("  \033[33m⟳\033[0m regenerating index.md\n")
 		Index(s, cfg)
 		return 1
 	}
 
-	// Check if any non-terminal items are missing from the index
 	errs := validate.IndexCoverage(s.All(), string(indexContent), cfg)
 	if len(errs) > 0 {
 		fmt.Printf("  \033[33m⟳\033[0m regenerating index.md (%d items missing)\n", len(errs))
@@ -144,14 +283,22 @@ func fixIndex(s *store.Store, cfg *config.Config) int {
 	return 0
 }
 
-// isSlugID returns true if the ID contains a slug suffix (e.g., T-013-some-description).
+// isSlugID returns true if the ID contains a slug suffix.
 func isSlugID(id string) bool {
 	return slugPattern.MatchString(id)
 }
 
+func sliceContains(ss []string, target string) bool {
+	for _, v := range ss {
+		if v == target {
+			return true
+		}
+	}
+	return false
+}
+
 // FixableSummary returns a count of auto-fixable issues from check results.
 func FixableSummary(s *store.Store, cfg *config.Config) (fixable int, descriptions []string) {
-	// Count missing required fields
 	for _, item := range s.All() {
 		if item.Doc == nil || item.Type == "" {
 			continue
@@ -173,7 +320,6 @@ func FixableSummary(s *store.Store, cfg *config.Config) (fixable int, descriptio
 		descriptions = append(descriptions, fmt.Sprintf("%d missing required fields", fixable))
 	}
 
-	// Count stale slug deps
 	slugCount := 0
 	for _, item := range s.All() {
 		for _, dep := range item.DependsOn {
@@ -192,7 +338,6 @@ func FixableSummary(s *store.Store, cfg *config.Config) (fixable int, descriptio
 		descriptions = append(descriptions, fmt.Sprintf("%d slug-format dependency refs", slugCount))
 	}
 
-	// Count index.md coverage gaps
 	indexPath := cfg.IndexPath()
 	if indexContent, err := os.ReadFile(indexPath); err == nil {
 		errs := validate.IndexCoverage(s.All(), string(indexContent), cfg)

@@ -1,7 +1,10 @@
 // Package model defines the core data types for agent-state items.
 package model
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // Item represents a task, issue, or idea in agent-state.
 // Fields are intentionally loose (string maps for nested data) because
@@ -96,13 +99,18 @@ func (d *ParsedDocument) SetField(key, value string) bool {
 		}
 	}
 
-	// Not found — append before next_actions or at the end
+	// Not found — insert before body separator (---) or at end
 	newLine := Line{
 		Raw:   key + ": " + value,
 		Key:   key,
 		Value: value,
 	}
-	d.Lines = append(d.Lines, newLine)
+	if idx := d.bodySeparatorIndex(); idx >= 0 {
+		d.Lines = append(d.Lines[:idx+1], d.Lines[idx:]...)
+		d.Lines[idx] = newLine
+	} else {
+		d.Lines = append(d.Lines, newLine)
+	}
 	return false
 }
 
@@ -129,10 +137,24 @@ func (d *ParsedDocument) SetList(key string, items []string) bool {
 		}
 	}
 	if keyIdx < 0 {
-		// Key not found — append key + list
-		d.Lines = append(d.Lines, Line{Raw: key + ":", Key: key})
-		for _, item := range items {
-			d.Lines = append(d.Lines, Line{Raw: "- " + item, IsList: true})
+		// Key not found — insert before body separator (---) or at end
+		insertIdx := d.bodySeparatorIndex()
+		var newLines []Line
+		newLines = append(newLines, Line{Raw: key + ":", Key: key})
+		if len(items) == 0 {
+			newLines = append(newLines, Line{Raw: "- []", IsList: true})
+		} else {
+			for _, item := range items {
+				newLines = append(newLines, Line{Raw: "- " + item, IsList: true})
+			}
+		}
+
+		if insertIdx >= 0 {
+			tail := make([]Line, len(d.Lines[insertIdx:]))
+			copy(tail, d.Lines[insertIdx:])
+			d.Lines = append(d.Lines[:insertIdx], append(newLines, tail...)...)
+		} else {
+			d.Lines = append(d.Lines, newLines...)
 		}
 		return false
 	}
@@ -180,6 +202,18 @@ func (d *ParsedDocument) SetList(key string, items []string) bool {
 	copy(tail, d.Lines[end:])
 	d.Lines = append(d.Lines[:keyIdx+1], append(newLines, tail...)...)
 	return true
+}
+
+// bodySeparatorIndex returns the index of the first "---" line (body separator),
+// or -1 if no separator exists. Used to insert new fields in the frontmatter
+// section rather than after the markdown body.
+func (d *ParsedDocument) bodySeparatorIndex() int {
+	for i, line := range d.Lines {
+		if strings.TrimSpace(line.Raw) == "---" {
+			return i
+		}
+	}
+	return -1
 }
 
 // String serializes the document back to its original text.
