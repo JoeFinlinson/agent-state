@@ -116,6 +116,7 @@ type GitConfig struct {
 }
 
 type WorktreeConfig struct {
+	Enabled bool
 	BaseDir string
 	Repos   []string
 }

@@ -59,6 +59,7 @@ func init() {
 	rootCmd.AddCommand(startCmd)
 	rootCmd.AddCommand(closeCmd)
 	rootCmd.AddCommand(readyCmd)
+	rootCmd.AddCommand(finishCmd)
 
 	// Maintenance commands
 	rootCmd.AddCommand(syncCmd)
@@ -142,6 +143,15 @@ var readyCmd = &cobra.Command{
 	DisableFlagParsing: true,
 	Run: func(cmd *cobra.Command, args []string) {
 		os.Exit(command.Ready(s, cfg, args))
+	},
+}
+
+var finishCmd = &cobra.Command{
+	Use:                "finish <id>",
+	Short:              "Clean up worktrees after merge",
+	DisableFlagParsing: true,
+	Run: func(cmd *cobra.Command, args []string) {
+		os.Exit(command.Finish(s, cfg, args))
 	},
 }
 
