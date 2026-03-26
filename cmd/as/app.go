@@ -28,7 +28,9 @@ func newApp(cwd string) *cobra.Command {
 Auto-fixes consistency issues, enforces delivery gates, and generates
 context for LLM agents. Works standalone or with CI/hooks.`,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			if cmd.Name() == "version" {
+			// Commands that don't need config/store
+			switch cmd.Name() {
+			case "version", "init":
 				return nil
 			}
 			dir := cwd
@@ -43,6 +45,9 @@ context for LLM agents. Works standalone or with CI/hooks.`,
 			appCfg, err = config.Load(dir)
 			if err != nil {
 				return fmt.Errorf("config: %w", err)
+			}
+			if !appCfg.Discovered {
+				return fmt.Errorf("no st project found (looked up from %s)\n\n  Run `st init` to create one, or set $ST_ROOT", dir)
 			}
 			appStore, err = store.New(appCfg)
 			if err != nil {
@@ -533,6 +538,19 @@ context for LLM agents. Works standalone or with CI/hooks.`,
 		},
 	}
 	root.AddCommand(versionCmd)
+
+	initCmd := &cobra.Command{
+		Use:   "init",
+		Short: "Initialize a new st project in the current directory",
+		Run: func(cmd *cobra.Command, args []string) {
+			dir := cwd
+			if dir == "" {
+				dir, _ = os.Getwd()
+			}
+			exitCode = command.Init(dir)
+		},
+	}
+	root.AddCommand(initCmd)
 
 	return root
 }

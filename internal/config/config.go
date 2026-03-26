@@ -55,6 +55,9 @@ type Config struct {
 
 	// Root directory (where .as/ lives, or CWD)
 	root string
+
+	// Discovered is true when a .as/config.yaml was found (vs using defaults)
+	Discovered bool
 }
 
 type ProjectConfig struct {
@@ -335,6 +338,7 @@ func Load(startDir string) (*Config, error) {
 			return nil, fmt.Errorf("loading %s: %w", configPath, err)
 		}
 		cfg.root = filepath.Dir(filepath.Dir(configPath)) // .as/config.yaml -> project root
+		cfg.Discovered = true
 	} else {
 		cfg.root = startDir
 	}
