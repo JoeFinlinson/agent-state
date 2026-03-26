@@ -105,7 +105,7 @@ func TestInProcess_Version(t *testing.T) {
 	if code != 0 {
 		t.Errorf("version exit %d", code)
 	}
-	if !strings.Contains(stdout, "as") {
+	if !strings.Contains(stdout, "st") {
 		t.Errorf("version: %q", stdout)
 	}
 }

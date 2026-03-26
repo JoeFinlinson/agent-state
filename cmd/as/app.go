@@ -21,9 +21,12 @@ func newApp(cwd string) *cobra.Command {
 	var appStore *store.Store
 
 	root := &cobra.Command{
-		Use:   "as",
-		Short: "agent-state orchestrator",
-		Long:  "as — a CLI agent orchestrator for tracking tasks, enforcing gates, and coordinating work.",
+		Use:   "st",
+		Short: "State tracker for AI agent workflows",
+		Long: `st — track tasks, issues, and dependencies with config-driven validation.
+
+Auto-fixes consistency issues, enforces delivery gates, and generates
+context for LLM agents. Works standalone or with CI/hooks.`,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			if cmd.Name() == "version" {
 				return nil
@@ -53,8 +56,9 @@ func newApp(cwd string) *cobra.Command {
 	// --- State commands ---
 
 	showCmd := &cobra.Command{
-		Use:  "show <id>",
-		Args: cobra.ExactArgs(1),
+		Use:   "show <id>",
+		Short: "Display item details",
+		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			brief, _ := cmd.Flags().GetBool("brief")
 			field, _ := cmd.Flags().GetString("field")
@@ -67,6 +71,7 @@ func newApp(cwd string) *cobra.Command {
 
 	listCmd := &cobra.Command{
 		Use:     "list",
+		Short:   "List items with optional filters",
 		Aliases: []string{"ls"},
 		Run: func(cmd *cobra.Command, args []string) {
 			typeF, _ := cmd.Flags().GetString("type")
@@ -76,14 +81,15 @@ func newApp(cwd string) *cobra.Command {
 			exitCode = command.List(appStore, appCfg, command.ListOpts{Type: typeF, Status: statusF, Tag: tagF, Assigned: assignedF})
 		},
 	}
-	listCmd.Flags().StringP("type", "T", "", "filter by type")
+	listCmd.Flags().StringP("type", "T", "", "filter by type (task, issue, idea)")
 	listCmd.Flags().StringP("status", "s", "", "filter by status")
 	listCmd.Flags().String("tag", "", "filter by tag")
-	listCmd.Flags().String("assigned", "", "filter by agent")
+	listCmd.Flags().String("assigned", "", "filter by assigned agent")
 	root.AddCommand(listCmd)
 
 	createCmd := &cobra.Command{
 		Use:     "create <type> <title>",
+		Short:   "Create a new task, issue, or idea",
 		Aliases: []string{"new"},
 		Args:    cobra.ExactArgs(2),
 		Run: func(cmd *cobra.Command, args []string) {
@@ -96,15 +102,16 @@ func newApp(cwd string) *cobra.Command {
 			})
 		},
 	}
-	createCmd.Flags().IntP("priority", "p", 2, "priority 0-4")
-	createCmd.Flags().String("severity", "", "severity")
-	createCmd.Flags().String("tag", "", "tag")
-	createCmd.Flags().String("depends", "", "depends on")
+	createCmd.Flags().IntP("priority", "p", 2, "priority 0-4 (0=highest)")
+	createCmd.Flags().String("severity", "", "issue severity (critical, high, medium, low)")
+	createCmd.Flags().String("tag", "", "initial tag")
+	createCmd.Flags().String("depends", "", "depends on item ID")
 	root.AddCommand(createCmd)
 
 	updateCmd := &cobra.Command{
-		Use:  "update <id> <field> [value]",
-		Args: cobra.RangeArgs(2, 3),
+		Use:   "update <id> <field> [value]",
+		Short: "Update a field on an item",
+		Args:  cobra.RangeArgs(2, 3),
 		Run: func(cmd *cobra.Command, args []string) {
 			stdinFlag, _ := cmd.Flags().GetBool("stdin")
 			var value string
@@ -114,7 +121,7 @@ func newApp(cwd string) *cobra.Command {
 			} else if len(args) >= 3 {
 				value = args[2]
 			} else {
-				fmt.Fprintln(os.Stderr, "usage: as update <id> <field> <value> or --stdin")
+				fmt.Fprintln(os.Stderr, "usage: st update <id> <field> <value> or --stdin")
 				exitCode = 2
 				return
 			}
@@ -125,20 +132,22 @@ func newApp(cwd string) *cobra.Command {
 	root.AddCommand(updateCmd)
 
 	checkCmd := &cobra.Command{
-		Use: "check",
+		Use:   "check",
+		Short: "Validate all items and auto-fix consistency issues",
 		Run: func(cmd *cobra.Command, args []string) {
 			quiet, _ := cmd.Flags().GetBool("quiet")
 			fix, _ := cmd.Flags().GetBool("fix")
 			exitCode = command.Check(appStore, appCfg, quiet, fix)
 		},
 	}
-	checkCmd.Flags().BoolP("quiet", "q", false, "exit code only")
-	checkCmd.Flags().Bool("fix", false, "auto-repair fixable issues")
+	checkCmd.Flags().BoolP("quiet", "q", false, "exit code only, no output (for CI/hooks)")
+	checkCmd.Flags().Bool("fix", false, "auto-repair fixable issues (default when not quiet)")
 	root.AddCommand(checkCmd)
 
 	tagCmd := &cobra.Command{
-		Use:  "tag <id> <add|rm> <tag>",
-		Args: cobra.ExactArgs(3),
+		Use:   "tag <id> <add|rm> <tag>",
+		Short: "Add or remove a tag",
+		Args:  cobra.ExactArgs(3),
 		Run: func(cmd *cobra.Command, args []string) {
 			exitCode = command.Tag(appStore, appCfg, args[0], args[1], args[2])
 		},
@@ -148,33 +157,36 @@ func newApp(cwd string) *cobra.Command {
 	// --- Workflow commands ---
 
 	startCmd := &cobra.Command{
-		Use:  "start <id>",
-		Args: cobra.ExactArgs(1),
+		Use:   "start <id>",
+		Short: "Activate an item and create worktree branches",
+		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			slug, _ := cmd.Flags().GetString("slug")
 			repos, _ := cmd.Flags().GetStringSlice("repos")
 			exitCode = command.Start(appStore, appCfg, args[0], command.StartOpts{Slug: slug, Repos: repos})
 		},
 	}
-	startCmd.Flags().String("slug", "", "branch slug")
-	startCmd.Flags().StringSlice("repos", nil, "repos")
+	startCmd.Flags().String("slug", "", "branch name slug")
+	startCmd.Flags().StringSlice("repos", nil, "repos to create worktrees for")
 	root.AddCommand(startCmd)
 
 	closeCmd := &cobra.Command{
-		Use:  "close <id> <resolution>",
-		Args: cobra.ExactArgs(2),
+		Use:   "close <id> <resolution>",
+		Short: "Close an item with gate enforcement",
+		Args:  cobra.ExactArgs(2),
 		Run: func(cmd *cobra.Command, args []string) {
 			reason, _ := cmd.Flags().GetString("reason")
 			force, _ := cmd.Flags().GetBool("force")
 			exitCode = command.Close(appStore, appCfg, args[0], args[1], command.CloseOpts{Reason: reason, Force: force})
 		},
 	}
-	closeCmd.Flags().String("reason", "", "reason")
-	closeCmd.Flags().Bool("force", false, "bypass gates")
+	closeCmd.Flags().String("reason", "", "reason for closing (required for abandon)")
+	closeCmd.Flags().Bool("force", false, "bypass gate checks")
 	root.AddCommand(closeCmd)
 
 	readyCmd := &cobra.Command{
-		Use: "ready",
+		Use:   "ready",
+		Short: "Show unblocked items ready to start",
 		Run: func(cmd *cobra.Command, args []string) {
 			typeF, _ := cmd.Flags().GetString("type")
 			tagF, _ := cmd.Flags().GetString("tag")
@@ -182,14 +194,15 @@ func newApp(cwd string) *cobra.Command {
 			exitCode = command.Ready(appStore, appCfg, command.ReadyOpts{Type: typeF, Tag: tagF, Limit: limit})
 		},
 	}
-	readyCmd.Flags().StringP("type", "T", "", "")
-	readyCmd.Flags().String("tag", "", "")
-	readyCmd.Flags().IntP("limit", "n", 0, "")
+	readyCmd.Flags().StringP("type", "T", "", "filter by type")
+	readyCmd.Flags().String("tag", "", "filter by tag")
+	readyCmd.Flags().IntP("limit", "n", 0, "max items to show")
 	root.AddCommand(readyCmd)
 
 	finishCmd := &cobra.Command{
-		Use:  "finish [id]",
-		Args: cobra.MaximumNArgs(1),
+		Use:   "finish [id]",
+		Short: "Clean up worktrees after merge",
+		Args:  cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			listAll, _ := cmd.Flags().GetBool("list")
 			dryRun, _ := cmd.Flags().GetBool("dry-run")
@@ -206,14 +219,15 @@ func newApp(cwd string) *cobra.Command {
 			exitCode = command.Finish(appStore, appCfg, id, command.FinishOpts{DryRun: dryRun, Force: force, ListAll: listAll})
 		},
 	}
-	finishCmd.Flags().Bool("dry-run", false, "")
-	finishCmd.Flags().Bool("force", false, "")
-	finishCmd.Flags().BoolP("list", "l", false, "")
+	finishCmd.Flags().Bool("dry-run", false, "show what would be cleaned up")
+	finishCmd.Flags().Bool("force", false, "force cleanup even with uncommitted changes")
+	finishCmd.Flags().BoolP("list", "l", false, "list active worktrees")
 	root.AddCommand(finishCmd)
 
 	releaseCmd := &cobra.Command{
-		Use:  "release <id>",
-		Args: cobra.ExactArgs(1),
+		Use:   "release <id>",
+		Short: "Unassign an item from the current agent",
+		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			exitCode = command.Release(appStore, appCfg, args[0])
 		},
@@ -221,8 +235,9 @@ func newApp(cwd string) *cobra.Command {
 	root.AddCommand(releaseCmd)
 
 	commitCmd := &cobra.Command{
-		Use:  "commit <id> <message>",
-		Args: cobra.ExactArgs(2),
+		Use:   "commit <id> <message>",
+		Short: "Record a commit against an item",
+		Args:  cobra.ExactArgs(2),
 		Run: func(cmd *cobra.Command, args []string) {
 			exitCode = command.Commit(appStore, appCfg, args[0], args[1])
 		},
@@ -230,8 +245,9 @@ func newApp(cwd string) *cobra.Command {
 	root.AddCommand(commitCmd)
 
 	editCmd := &cobra.Command{
-		Use:  "edit <id> <field>",
-		Args: cobra.ExactArgs(2),
+		Use:   "edit <id> <field>",
+		Short: "Edit a field interactively in $EDITOR",
+		Args:  cobra.ExactArgs(2),
 		Run: func(cmd *cobra.Command, args []string) {
 			exitCode = command.Edit(appStore, appCfg, args[0], args[1])
 		},
@@ -241,8 +257,9 @@ func newApp(cwd string) *cobra.Command {
 	// --- Read/query commands ---
 
 	statusCmd := &cobra.Command{
-		Use:  "status [id]",
-		Args: cobra.MaximumNArgs(1),
+		Use:   "status [id]",
+		Short: "Dashboard overview or single-item detail",
+		Args:  cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			id := ""
 			if len(args) > 0 {
@@ -260,54 +277,62 @@ func newApp(cwd string) *cobra.Command {
 			})
 		},
 	}
-	statusCmd.Flags().BoolP("issues", "i", false, "")
-	statusCmd.Flags().BoolP("tasks", "t", false, "")
-	statusCmd.Flags().BoolP("recent", "r", false, "")
-	statusCmd.Flags().BoolP("all", "a", false, "")
-	statusCmd.Flags().BoolP("completed", "d", false, "")
-	statusCmd.Flags().BoolP("check", "c", false, "")
+	statusCmd.Flags().BoolP("issues", "i", false, "show open issues")
+	statusCmd.Flags().BoolP("tasks", "t", false, "show queued tasks")
+	statusCmd.Flags().BoolP("recent", "r", false, "show recently closed")
+	statusCmd.Flags().BoolP("all", "a", false, "show all sections")
+	statusCmd.Flags().BoolP("completed", "d", false, "show completed items")
+	statusCmd.Flags().BoolP("check", "c", false, "run validation checks")
 	root.AddCommand(statusCmd)
 
 	statsCmd := &cobra.Command{
-		Use: "stats",
+		Use:   "stats",
+		Short: "Show item statistics and counts",
 		Run: func(cmd *cobra.Command, args []string) {
 			jsonF, _ := cmd.Flags().GetBool("json")
 			timeF, _ := cmd.Flags().GetBool("time")
 			exitCode = command.Stats(appStore, appCfg, command.StatsOpts{JSON: jsonF, Time: timeF})
 		},
 	}
-	statsCmd.Flags().Bool("json", false, "")
-	statsCmd.Flags().Bool("time", false, "")
+	statsCmd.Flags().Bool("json", false, "output as JSON")
+	statsCmd.Flags().Bool("time", false, "include time tracking")
 	root.AddCommand(statsCmd)
 
-	depCmd := &cobra.Command{Use: "dep"}
+	depCmd := &cobra.Command{
+		Use:   "dep",
+		Short: "Manage dependencies between items",
+	}
 	depTreeCmd := &cobra.Command{
-		Use:  "tree <id>",
-		Args: cobra.ExactArgs(1),
+		Use:   "tree <id>",
+		Short: "Show dependency tree for an item",
+		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			depth, _ := cmd.Flags().GetInt("depth")
 			exitCode = command.DepTree(appStore, appCfg, args[0], command.DepTreeOpts{Depth: depth})
 		},
 	}
-	depTreeCmd.Flags().IntP("depth", "d", 10, "")
+	depTreeCmd.Flags().IntP("depth", "d", 10, "max tree depth")
 	depGraphCmd := &cobra.Command{
-		Use: "graph",
+		Use:   "graph",
+		Short: "Show full dependency graph",
 		Run: func(cmd *cobra.Command, args []string) {
 			jsonF, _ := cmd.Flags().GetBool("json")
 			exitCode = command.DepGraph(appStore, appCfg, command.DepGraphOpts{JSON: jsonF})
 		},
 	}
-	depGraphCmd.Flags().Bool("json", false, "")
+	depGraphCmd.Flags().Bool("json", false, "output as JSON")
 	depAddCmd := &cobra.Command{
-		Use:  "add <id> <dep-id>",
-		Args: cobra.ExactArgs(2),
+		Use:   "add <id> <dep-id>",
+		Short: "Add a dependency (id depends on dep-id)",
+		Args:  cobra.ExactArgs(2),
 		Run: func(cmd *cobra.Command, args []string) {
 			exitCode = command.DepAdd(appStore, appCfg, args[0], args[1])
 		},
 	}
 	depRmCmd := &cobra.Command{
-		Use:  "rm <id> <dep-id>",
-		Args: cobra.ExactArgs(2),
+		Use:   "rm <id> <dep-id>",
+		Short: "Remove a dependency",
+		Args:  cobra.ExactArgs(2),
 		Run: func(cmd *cobra.Command, args []string) {
 			exitCode = command.DepRm(appStore, appCfg, args[0], args[1])
 		},
@@ -316,20 +341,22 @@ func newApp(cwd string) *cobra.Command {
 	root.AddCommand(depCmd)
 
 	primeCmd := &cobra.Command{
-		Use: "prime",
+		Use:   "prime",
+		Short: "Export context for LLM consumption",
 		Run: func(cmd *cobra.Command, args []string) {
 			format, _ := cmd.Flags().GetString("format")
 			compact, _ := cmd.Flags().GetBool("compact")
 			exitCode = command.Prime(appStore, appCfg, command.PrimeOpts{Format: format, Compact: compact})
 		},
 	}
-	primeCmd.Flags().String("format", "markdown", "")
-	primeCmd.Flags().Bool("compact", false, "")
+	primeCmd.Flags().String("format", "markdown", "output format (markdown, json)")
+	primeCmd.Flags().Bool("compact", false, "minimal output for hook injection")
 	root.AddCommand(primeCmd)
 
 	logCmd := &cobra.Command{
-		Use:  "log [id]",
-		Args: cobra.MaximumNArgs(1),
+		Use:   "log [id]",
+		Short: "View changelog for an item or all items",
+		Args:  cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			id := ""
 			if len(args) > 0 {
@@ -339,21 +366,26 @@ func newApp(cwd string) *cobra.Command {
 			exitCode = command.Log(appStore, appCfg, id, command.LogOpts{Limit: limit})
 		},
 	}
-	logCmd.Flags().IntP("limit", "n", 0, "")
+	logCmd.Flags().IntP("limit", "n", 0, "max entries to show")
 	root.AddCommand(logCmd)
 
 	// --- Epic/Sprint/Note ---
 
-	epicCmd := &cobra.Command{Use: "epic"}
+	epicCmd := &cobra.Command{
+		Use:   "epic",
+		Short: "Manage epics",
+	}
 	epicCmd.AddCommand(&cobra.Command{
-		Use:  "create <title>",
-		Args: cobra.ExactArgs(1),
+		Use:   "create <title>",
+		Short: "Create a new epic",
+		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			exitCode = command.EpicCreate(appCfg, args[0])
 		},
 	})
 	epicCmd.AddCommand(&cobra.Command{
 		Use:     "list",
+		Short:   "List all epics",
 		Aliases: []string{"ls"},
 		Run: func(cmd *cobra.Command, args []string) {
 			exitCode = command.EpicList(appStore, appCfg)
@@ -361,16 +393,21 @@ func newApp(cwd string) *cobra.Command {
 	})
 	root.AddCommand(epicCmd)
 
-	sprintCmd := &cobra.Command{Use: "sprint"}
+	sprintCmd := &cobra.Command{
+		Use:   "sprint",
+		Short: "Manage sprints within epics",
+	}
 	sprintCreateCmd := &cobra.Command{
-		Use:  "create <epic-id> <title>",
-		Args: cobra.ExactArgs(2),
+		Use:   "create <epic-id> <title>",
+		Short: "Create a sprint under an epic",
+		Args:  cobra.ExactArgs(2),
 		Run: func(cmd *cobra.Command, args []string) {
 			exitCode = command.SprintCreate(appCfg, args[0], args[1])
 		},
 	}
 	sprintListCmd := &cobra.Command{
 		Use:     "list [epic-id]",
+		Short:   "List sprints",
 		Aliases: []string{"ls"},
 		Run: func(cmd *cobra.Command, args []string) {
 			epicID, _ := cmd.Flags().GetString("epic")
@@ -380,31 +417,37 @@ func newApp(cwd string) *cobra.Command {
 			exitCode = command.SprintList(appCfg, epicID)
 		},
 	}
-	sprintListCmd.Flags().String("epic", "", "")
+	sprintListCmd.Flags().String("epic", "", "filter by epic ID")
 	sprintCmd.AddCommand(sprintCreateCmd, sprintListCmd)
 	root.AddCommand(sprintCmd)
 
-	noteCmd := &cobra.Command{Use: "note"}
+	noteCmd := &cobra.Command{
+		Use:   "note",
+		Short: "Manage session notes",
+	}
 	noteCmd.AddCommand(&cobra.Command{
-		Use:  "add <message>",
-		Args: cobra.ExactArgs(1),
+		Use:   "add <message>",
+		Short: "Add a note",
+		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			exitCode = command.NoteAdd(appCfg, args[0])
 		},
 	})
 	noteListCmd := &cobra.Command{
 		Use:     "list",
+		Short:   "List recent notes",
 		Aliases: []string{"ls"},
 		Run: func(cmd *cobra.Command, args []string) {
 			limit, _ := cmd.Flags().GetInt("limit")
 			exitCode = command.NoteList(appCfg, limit)
 		},
 	}
-	noteListCmd.Flags().IntP("limit", "n", 10, "")
+	noteListCmd.Flags().IntP("limit", "n", 10, "max notes to show")
 	noteCmd.AddCommand(noteListCmd)
 	noteEditCmd := &cobra.Command{
-		Use:  "edit <id> [message]",
-		Args: cobra.RangeArgs(1, 2),
+		Use:   "edit <id> [message]",
+		Short: "Update a note's message",
+		Args:  cobra.RangeArgs(1, 2),
 		Run: func(cmd *cobra.Command, args []string) {
 			stdinFlag, _ := cmd.Flags().GetBool("stdin")
 			var message string
@@ -420,11 +463,12 @@ func newApp(cwd string) *cobra.Command {
 			exitCode = command.NoteEdit(appCfg, args[0], message)
 		},
 	}
-	noteEditCmd.Flags().Bool("stdin", false, "")
+	noteEditCmd.Flags().Bool("stdin", false, "read message from stdin")
 	noteCmd.AddCommand(noteEditCmd)
 	noteCmd.AddCommand(&cobra.Command{
-		Use:  "rm <id>",
-		Args: cobra.ExactArgs(1),
+		Use:   "rm <id>",
+		Short: "Delete a note",
+		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			exitCode = command.NoteRm(appCfg, args[0])
 		},
@@ -434,8 +478,9 @@ func newApp(cwd string) *cobra.Command {
 	// --- Maintenance ---
 
 	syncCmd := &cobra.Command{
-		Use:  "sync [message]",
-		Args: cobra.MaximumNArgs(1),
+		Use:   "sync [message]",
+		Short: "Git commit and push agent-state changes",
+		Args:  cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			msg := ""
 			if len(args) > 0 {
@@ -447,7 +492,8 @@ func newApp(cwd string) *cobra.Command {
 	root.AddCommand(syncCmd)
 
 	indexCmd := &cobra.Command{
-		Use: "index",
+		Use:   "index",
+		Short: "Regenerate index.md from current items",
 		Run: func(cmd *cobra.Command, args []string) {
 			exitCode = command.Index(appStore, appCfg)
 		},
@@ -455,31 +501,34 @@ func newApp(cwd string) *cobra.Command {
 	root.AddCommand(indexCmd)
 
 	migrateCmd := &cobra.Command{
-		Use: "migrate",
+		Use:   "migrate",
+		Short: "Normalize item file format",
 		Run: func(cmd *cobra.Command, args []string) {
 			dryRun, _ := cmd.Flags().GetBool("dry-run")
 			scope, _ := cmd.Flags().GetString("scope")
 			exitCode = command.Migrate(appStore, appCfg, command.MigrateOpts{DryRun: dryRun, Scope: scope})
 		},
 	}
-	migrateCmd.Flags().Bool("dry-run", false, "")
+	migrateCmd.Flags().Bool("dry-run", false, "show changes without applying")
 	migrateCmd.Flags().String("scope", "", "scope: archive, active, or empty for all")
 	root.AddCommand(migrateCmd)
 
 	reconcileCmd := &cobra.Command{
-		Use: "reconcile",
+		Use:   "reconcile",
+		Short: "Sync delivery stages with GitHub and AWS",
 		Run: func(cmd *cobra.Command, args []string) {
 			dryRun, _ := cmd.Flags().GetBool("dry-run")
 			exitCode = command.Reconcile(appStore, appCfg, command.ReconcileOpts{DryRun: dryRun})
 		},
 	}
-	reconcileCmd.Flags().Bool("dry-run", false, "")
+	reconcileCmd.Flags().Bool("dry-run", false, "show updates without applying")
 	root.AddCommand(reconcileCmd)
 
 	versionCmd := &cobra.Command{
-		Use: "version",
+		Use:   "version",
+		Short: "Print version",
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Println("as 0.4.0")
+			fmt.Println("st 0.5.0")
 			exitCode = 0
 		},
 	}

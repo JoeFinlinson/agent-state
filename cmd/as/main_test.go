@@ -142,8 +142,8 @@ func TestVersion(t *testing.T) {
 	if code != 0 {
 		t.Errorf("exit code = %d, want 0", code)
 	}
-	if !strings.Contains(stdout, "as") {
-		t.Errorf("version output = %q, expected to contain 'as'", stdout)
+	if !strings.Contains(stdout, "st") {
+		t.Errorf("version output = %q, expected to contain 'st'", stdout)
 	}
 }
 
