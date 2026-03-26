@@ -26,7 +26,11 @@ const (
 	cMagenta = "\033[35m"
 	cCyan   = "\033[36m"
 	cWhite  = "\033[37m"
+	cBlue   = "\033[34m"
 	cBoldW  = "\033[1m\033[37m"
+	cBoldC  = "\033[1m\033[36m"
+	cBoldM  = "\033[1m\033[35m"
+	cBoldB  = "\033[1m\033[34m"
 )
 
 // StatusOpts holds flags for the status command.
@@ -232,25 +236,28 @@ func printQueuedTasks(s *store.Store, cfg *config.Config, g *deps.Graph) {
 	// Try to load epics registry for grouping
 	reg, _ := registry.Load(cfg.EpicsPath())
 
-	// Group by epic → tag
+	// Group by epic → sprint → tag
 	type group struct {
-		epic   string
-		eTitle string
-		tag    string
-		items  []*model.Item
+		epic    string
+		eTitle  string
+		sprint  string
+		sTitle  string
+		tag     string
+		items   []*model.Item
 	}
-	type gkey struct{ epic, tag string }
+	type gkey struct{ epic, sprint, tag string }
 
 	groupMap := map[gkey]*group{}
 	var keys []gkey
 
 	for _, item := range queuedTasks {
 		epic := item.Epic
+		sprint := item.Sprint
 		tag := "uncategorized"
 		if len(item.Tags) > 0 {
 			tag = item.Tags[0]
 		}
-		k := gkey{epic, tag}
+		k := gkey{epic, sprint, tag}
 		if _, ok := groupMap[k]; !ok {
 			eTitle := ""
 			if epic != "" && reg != nil {
@@ -258,20 +265,32 @@ func printQueuedTasks(s *store.Store, cfg *config.Config, g *deps.Graph) {
 					eTitle = e.Title
 				}
 			}
-			groupMap[k] = &group{epic: epic, eTitle: eTitle, tag: tag}
+			sTitle := ""
+			if sprint != "" && reg != nil {
+				if sp, ok := reg.GetSprint(sprint); ok {
+					sTitle = sp.Title
+				}
+			}
+			groupMap[k] = &group{epic: epic, eTitle: eTitle, sprint: sprint, sTitle: sTitle, tag: tag}
 			keys = append(keys, k)
 		}
 		groupMap[k].items = append(groupMap[k].items, item)
 	}
 
-	// Sort groups: epic first, then tag; "uncategorized" last
+	// Sort groups: epic first, then sprint, then tag; "uncategorized" last
 	sort.SliceStable(keys, func(i, j int) bool {
 		gi, gj := groupMap[keys[i]], groupMap[keys[j]]
 		if (gi.epic != "") != (gj.epic != "") {
 			return gi.epic != ""
 		}
-		if gi.epic != gj.epic {
+		if gi.eTitle != gj.eTitle {
 			return gi.eTitle < gj.eTitle
+		}
+		if (gi.sprint != "") != (gj.sprint != "") {
+			return gi.sprint != ""
+		}
+		if gi.sTitle != gj.sTitle {
+			return gi.sTitle < gj.sTitle
 		}
 		if gi.tag == "uncategorized" {
 			return false
@@ -297,20 +316,30 @@ func printQueuedTasks(s *store.Store, cfg *config.Config, g *deps.Graph) {
 	fmt.Printf("  %s%d queued%s\n\n", cBold, len(queuedTasks), cReset)
 
 	currentEpic := ""
+	currentSprint := ""
 	for _, k := range keys {
 		grp := groupMap[k]
 
-		// Epic header
+		// Epic header (bold magenta)
 		if grp.epic != currentEpic {
 			currentEpic = grp.epic
+			currentSprint = ""
 			if grp.epic != "" {
-				fmt.Printf("  %s── %s — %s ──%s\n", cCyan, grp.epic, grp.eTitle, cReset)
+				fmt.Printf("\n  %s◆ %s — %s%s\n", cBoldM, grp.epic, grp.eTitle, cReset)
 			}
 		}
 
-		// Tag subheader (skip if uncategorized and no epic)
+		// Sprint header (bold cyan)
+		if grp.sprint != currentSprint {
+			currentSprint = grp.sprint
+			if grp.sprint != "" {
+				fmt.Printf("   %s▸ %s — %s%s\n", cBoldC, grp.sprint, grp.sTitle, cReset)
+			}
+		}
+
+		// Tag subheader (blue with icon)
 		if grp.tag != "uncategorized" || grp.epic != "" {
-			fmt.Printf("    %s[%s]%s\n", cDim, grp.tag, cReset)
+			fmt.Printf("    %s◇ %s%s\n", cBoldB, grp.tag, cReset)
 		}
 
 		for _, item := range grp.items {
@@ -319,7 +348,7 @@ func printQueuedTasks(s *store.Store, cfg *config.Config, g *deps.Graph) {
 			blockedBy := ""
 			if g.IsBlocked(item.ID) {
 				unresolved := g.UnresolvedDeps(item.ID)
-				blockedBy = fmt.Sprintf("  %s⊘ blocked by %s%s", cDim, strings.Join(unresolved, ", "), cReset)
+				blockedBy = fmt.Sprintf("  %s⊘ blocked by %s%s", cRed, strings.Join(unresolved, ", "), cReset)
 			}
 			blocksStr := ""
 			if len(blocksItems) > 0 {
