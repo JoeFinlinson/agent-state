@@ -316,6 +316,56 @@ func TestConfigEvidenceSection(t *testing.T) {
 	}
 }
 
+func TestConfigSuiteArtifacts(t *testing.T) {
+	root := t.TempDir()
+	asDir := filepath.Join(root, ".as")
+	os.MkdirAll(asDir, 0755)
+	configContent := `testing:
+  required_suites:
+    api_unit:
+      command: make test-unit
+      artifacts: [cover.out]
+  scope_suites:
+    web_e2e:
+      command: make e2e
+      artifacts: [test-results/**, playwright-report/**]
+    api_integration: make integration
+`
+	os.WriteFile(filepath.Join(asDir, "config.yaml"), []byte(configContent), 0644)
+
+	cfg, err := Load(root)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	// Nested required suite
+	apiUnit := cfg.Testing.RequiredSuites["api_unit"]
+	if apiUnit.Command != "make test-unit" {
+		t.Errorf("api_unit command = %q", apiUnit.Command)
+	}
+	if len(apiUnit.Artifacts) != 1 || apiUnit.Artifacts[0] != "cover.out" {
+		t.Errorf("api_unit artifacts = %v", apiUnit.Artifacts)
+	}
+
+	// Nested scope suite with artifacts
+	webE2e := cfg.Testing.ScopeSuites["web_e2e"]
+	if webE2e.Command != "make e2e" {
+		t.Errorf("web_e2e command = %q", webE2e.Command)
+	}
+	if len(webE2e.Artifacts) != 2 {
+		t.Errorf("web_e2e artifacts = %v", webE2e.Artifacts)
+	}
+
+	// Simple scope suite (backward compat)
+	apiInt := cfg.Testing.ScopeSuites["api_integration"]
+	if apiInt.Command != "make integration" {
+		t.Errorf("api_integration command = %q", apiInt.Command)
+	}
+	if len(apiInt.Artifacts) != 0 {
+		t.Errorf("api_integration artifacts = %v (should be empty)", apiInt.Artifacts)
+	}
+}
+
 func TestConfigCoverageThresholds(t *testing.T) {
 	root := t.TempDir()
 	asDir := filepath.Join(root, ".as")
