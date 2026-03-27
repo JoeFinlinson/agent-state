@@ -252,6 +252,32 @@ context for LLM agents. Works standalone or with CI/hooks.`,
 	}
 	root.AddCommand(commitCmd)
 
+	prCmd := &cobra.Command{
+		Use:   "pr <id>",
+		Short: "Record PR manifest with file analysis",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			repo, _ := cmd.Flags().GetString("repo")
+			prNum, _ := cmd.Flags().GetInt("pr")
+			exitCode = command.PR(appStore, appCfg, args[0], command.PROpts{Repo: repo, PRNumber: prNum})
+		},
+	}
+	prCmd.Flags().String("repo", "", "short repo name (e.g. api, web)")
+	prCmd.Flags().Int("pr", 0, "PR number")
+	_ = prCmd.MarkFlagRequired("repo")
+	_ = prCmd.MarkFlagRequired("pr")
+	root.AddCommand(prCmd)
+
+	testRecordCmd := &cobra.Command{
+		Use:   "test <id> <suite>",
+		Short: "Record test suite pass for an item",
+		Args:  cobra.ExactArgs(2),
+		Run: func(cmd *cobra.Command, args []string) {
+			exitCode = command.TestRecord(appStore, appCfg, args[0], args[1], command.TestRecordOpts{})
+		},
+	}
+	root.AddCommand(testRecordCmd)
+
 	editCmd := &cobra.Command{
 		Use:   "edit <id> <field>",
 		Short: "Edit a field interactively in $EDITOR",
@@ -536,7 +562,7 @@ context for LLM agents. Works standalone or with CI/hooks.`,
 		Use:   "version",
 		Short: "Print version",
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Println("st 0.5.0")
+			fmt.Println("st 0.6.0")
 			exitCode = 0
 		},
 	}

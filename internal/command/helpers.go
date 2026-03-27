@@ -86,6 +86,9 @@ func nestedMap(item *model.Item, parent string) map[string]interface{} {
 		}
 		return item.TimeTracking
 	case "manifest":
+		if item.Manifest == nil {
+			item.Manifest = make(map[string]interface{})
+		}
 		return item.Manifest
 	default:
 		return nil

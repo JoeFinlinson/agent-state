@@ -184,6 +184,11 @@ func (c *Config) NotesPath() string {
 	return filepath.Join(c.root, ".as", "notes.yaml")
 }
 
+// ManifestDir returns the absolute path to manifest sidecar files.
+func (c *Config) ManifestDir() string {
+	return filepath.Join(c.root, c.Paths.Root, ".manifest")
+}
+
 // SessionID returns the current Claude Code session ID from $AS_SESSION_ID.
 func (c *Config) SessionID() string {
 	return os.Getenv("AS_SESSION_ID")

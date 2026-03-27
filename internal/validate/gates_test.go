@@ -202,8 +202,9 @@ func TestGateStageReachedNoStage(t *testing.T) {
 	}
 }
 
-func TestGateTestingCompleteStub(t *testing.T) {
+func TestGateTestingCompleteNoConfig(t *testing.T) {
 	cfg := testConfig()
+	cfg.Testing = nil
 	cfg.Gates = map[string][]config.GateConfig{
 		"close": {{Type: "testing_complete"}},
 	}
@@ -213,7 +214,111 @@ func TestGateTestingCompleteStub(t *testing.T) {
 
 	results := EvaluateGates(item, "close", cfg, allItems)
 	if !GatesPassed(results) {
-		t.Error("testing_complete stub should pass (until evidence system ships)")
+		t.Error("testing_complete should pass when no testing config")
+	}
+}
+
+func TestGateTestingCompleteAllPassing(t *testing.T) {
+	cfg := testConfig()
+	cfg.Testing = &config.TestingConfig{
+		RequiredSuites: map[string]config.SuiteConfig{
+			"api_unit": {Command: "make test-unit"},
+			"api_lint": {Command: "make lint"},
+		},
+		ScopeSuites: map[string]config.ScopeSuiteConfig{
+			"api_integration": {},
+		},
+	}
+	cfg.Gates = map[string][]config.GateConfig{
+		"close": {{Type: "testing_complete"}},
+	}
+
+	item := testItem("T-001", "active")
+	item.TestingEvidence = map[string]interface{}{
+		"api_unit":        "pass abc1234 2026-03-26T10:00:00-06:00",
+		"api_lint":        "pass abc1234 2026-03-26T10:00:00-06:00",
+		"api_integration": "pass abc1234 2026-03-26T10:00:00-06:00",
+	}
+	allItems := map[string]*model.Item{"T-001": item}
+
+	results := EvaluateGates(item, "close", cfg, allItems)
+	if !GatesPassed(results) {
+		f := FirstFailure(results)
+		t.Errorf("testing_complete should pass, got: %s", f.Message)
+	}
+}
+
+func TestGateTestingCompleteMissingRequired(t *testing.T) {
+	cfg := testConfig()
+	cfg.Testing = &config.TestingConfig{
+		RequiredSuites: map[string]config.SuiteConfig{
+			"api_unit": {},
+			"api_lint": {},
+		},
+	}
+	cfg.Gates = map[string][]config.GateConfig{
+		"close": {{Type: "testing_complete"}},
+	}
+
+	item := testItem("T-001", "active")
+	item.TestingEvidence = map[string]interface{}{
+		"api_unit": "pass abc1234 2026-03-26T10:00:00-06:00",
+		// api_lint missing
+	}
+	allItems := map[string]*model.Item{"T-001": item}
+
+	results := EvaluateGates(item, "close", cfg, allItems)
+	if GatesPassed(results) {
+		t.Error("testing_complete should fail when required suite missing")
+	}
+}
+
+func TestGateTestingCompleteScopeRequired(t *testing.T) {
+	cfg := testConfig()
+	cfg.Testing = &config.TestingConfig{
+		RequiredSuites: map[string]config.SuiteConfig{},
+		ScopeSuites: map[string]config.ScopeSuiteConfig{
+			"api_integration": {},
+		},
+	}
+	cfg.Gates = map[string][]config.GateConfig{
+		"close": {{Type: "testing_complete"}},
+	}
+
+	item := testItem("T-001", "active")
+	item.TestingEvidence = map[string]interface{}{
+		"api_integration": "required", // triggered by st pr but not recorded
+	}
+	allItems := map[string]*model.Item{"T-001": item}
+
+	results := EvaluateGates(item, "close", cfg, allItems)
+	if GatesPassed(results) {
+		t.Error("testing_complete should fail when scope suite required but not recorded")
+	}
+}
+
+func TestGateTestingCompleteScopeNotTriggered(t *testing.T) {
+	cfg := testConfig()
+	cfg.Testing = &config.TestingConfig{
+		RequiredSuites: map[string]config.SuiteConfig{},
+		ScopeSuites: map[string]config.ScopeSuiteConfig{
+			"api_integration": {},
+			"web_e2e":         {},
+		},
+	}
+	cfg.Gates = map[string][]config.GateConfig{
+		"close": {{Type: "testing_complete"}},
+	}
+
+	item := testItem("T-001", "active")
+	item.TestingEvidence = map[string]interface{}{
+		// Neither scope suite triggered — should pass
+	}
+	allItems := map[string]*model.Item{"T-001": item}
+
+	results := EvaluateGates(item, "close", cfg, allItems)
+	if !GatesPassed(results) {
+		t.Error("testing_complete should pass when scope suites not triggered")
 	}
 }
 

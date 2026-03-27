@@ -2,6 +2,7 @@ package validate
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/jfinlinson/agent-state/internal/config"
 	"github.com/jfinlinson/agent-state/internal/model"
@@ -62,7 +63,7 @@ func evaluateGate(item *model.Item, gate config.GateConfig, cfg *config.Config, 
 	case "stage_reached":
 		return evalStageReached(item, gate, cfg)
 	case "testing_complete":
-		return evalTestingComplete(item)
+		return evalTestingComplete(item, cfg)
 	case "agent_assigned":
 		return evalAgentAssigned(item, cfg)
 	case "manifest_exists":
@@ -151,12 +152,51 @@ func evalStageReached(item *model.Item, gate config.GateConfig, cfg *config.Conf
 	return GateResult{Passed: true, Gate: "stage_reached"}
 }
 
-func evalTestingComplete(item *model.Item) GateResult {
-	// Stub: testing evidence commands (as test) don't exist yet.
-	// Pass by default until evidence system is built.
-	// This is intentional — the gate framework is in place, and when
-	// `as test` ships it will populate the evidence that this gate checks.
+func evalTestingComplete(item *model.Item, cfg *config.Config) GateResult {
+	if cfg.Testing == nil {
+		return GateResult{Passed: true, Gate: "testing_complete"}
+	}
+
+	// Check required suites: every configured required suite must have a "pass" record
+	for name := range cfg.Testing.RequiredSuites {
+		val := getTestingEvidence(item, name)
+		if val == "" || val == "null" {
+			return GateResult{Passed: false, Gate: "testing_complete",
+				Message: fmt.Sprintf("required suite %q not recorded — run `st test %s %s`", name, item.ID, name)}
+		}
+		if !strings.HasPrefix(val, "pass") {
+			return GateResult{Passed: false, Gate: "testing_complete",
+				Message: fmt.Sprintf("required suite %q did not pass: %s", name, val)}
+		}
+	}
+
+	// Check scope suites: only those marked "required" (by st pr) must pass
+	for name := range cfg.Testing.ScopeSuites {
+		val := getTestingEvidence(item, name)
+		if val == "required" {
+			return GateResult{Passed: false, Gate: "testing_complete",
+				Message: fmt.Sprintf("scope suite %q required but not recorded — run `st test %s %s`", name, item.ID, name)}
+		}
+	}
+
 	return GateResult{Passed: true, Gate: "testing_complete"}
+}
+
+// getTestingEvidence reads a suite value from the item's TestingEvidence map.
+// The parser stores these flat: TestingEvidence["api_unit"] not TestingEvidence["required_suites"]["api_unit"].
+func getTestingEvidence(item *model.Item, suite string) string {
+	if item.TestingEvidence == nil {
+		return ""
+	}
+	v, ok := item.TestingEvidence[suite]
+	if !ok {
+		return ""
+	}
+	s, ok := v.(string)
+	if !ok {
+		return ""
+	}
+	return s
 }
 
 func evalAgentAssigned(item *model.Item, cfg *config.Config) GateResult {
