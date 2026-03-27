@@ -1,24 +1,45 @@
 package command
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/jfinlinson/agent-state/internal/changelog"
 	"github.com/jfinlinson/agent-state/internal/config"
+	"github.com/jfinlinson/agent-state/internal/coverage"
+	"github.com/jfinlinson/agent-state/internal/evidence"
+	"github.com/jfinlinson/agent-state/internal/manifest"
+	"github.com/jfinlinson/agent-state/internal/model"
 	"github.com/jfinlinson/agent-state/internal/store"
 )
 
-// TestRecordOpts holds injectable functions for the test command.
+// TestRecordOpts holds flags and injectable functions for the test command.
 type TestRecordOpts struct {
-	// Injectable for testing (nil = use real git)
+	Run      bool // execute the suite command (--run)
+	Coverage bool // enforce per-file coverage (--coverage, requires --run)
+	// Injectable for testing (nil = use real implementations)
 	GitHeadSHA func(repoDir string) (string, error)
+	RunCmd     func(command string) (output []byte, exitCode int, err error)
+	ReadFile   func(path string) ([]byte, error)
+	Backend    evidence.Backend
 }
 
-// TestRecord records a test suite pass for an item.
-// Named TestRecord (not Test) to avoid Go test function naming collision.
+// testSummary is the structured result written as summary.json.
+type testSummary struct {
+	Status     string `json:"status"` // "pass" or "fail"
+	Suite      string `json:"suite"`
+	SHA        string `json:"sha"`
+	ExitCode   int    `json:"exit_code"`
+	DurationMs int64  `json:"duration_ms"`
+	RecordedAt string `json:"recorded_at"`
+}
+
+// TestRecord records or executes a test suite for an item.
 func TestRecord(s *store.Store, cfg *config.Config, id, suite string, opts TestRecordOpts) int {
 	item, ok := s.Get(id)
 	if !ok {
@@ -31,19 +52,22 @@ func TestRecord(s *store.Store, cfg *config.Config, id, suite string, opts TestR
 		return 1
 	}
 
-	// Validate suite exists in config
 	if cfg.Testing == nil {
 		fmt.Fprintln(os.Stderr, "no testing configuration found")
 		return 1
 	}
 
+	// Look up suite
+	suiteCmd := ""
 	isRequired := false
 	isScope := false
-	if _, ok := cfg.Testing.RequiredSuites[suite]; ok {
+	if sc, ok := cfg.Testing.RequiredSuites[suite]; ok {
 		isRequired = true
+		suiteCmd = sc.Command
 	}
-	if _, ok := cfg.Testing.ScopeSuites[suite]; ok {
+	if sc, ok := cfg.Testing.ScopeSuites[suite]; ok {
 		isScope = true
+		suiteCmd = sc.Command
 	}
 	if !isRequired && !isScope {
 		fmt.Fprintf(os.Stderr, "unknown suite %q — not in required_suites or scope_suites\n", suite)
@@ -53,12 +77,253 @@ func TestRecord(s *store.Store, cfg *config.Config, id, suite string, opts TestR
 	// For scope suites, warn if not triggered by st pr
 	if isScope {
 		current, _ := getNestedField(item, "testing_evidence", suite)
-		if current != "required" && !strings.HasPrefix(current, "pass") {
+		if current != "required" && !strings.HasPrefix(current, "pass") && !strings.HasPrefix(current, "fail") {
 			fmt.Fprintf(os.Stderr, "warning: scope suite %q was not triggered by `st pr` — recording anyway\n", suite)
 		}
 	}
 
-	// Get HEAD SHA
+	sha := getSHA(opts)
+
+	if opts.Run {
+		return testRunMode(s, cfg, id, suite, suiteCmd, sha, item, opts)
+	}
+	return testRecordOnly(s, cfg, id, suite, sha, item)
+}
+
+// testRecordOnly is the original record-only path (no --run).
+func testRecordOnly(s *store.Store, cfg *config.Config, id, suite, sha string, item *model.Item) int {
+	now := time.Now()
+	ev := fmt.Sprintf("pass %s %s", sha, now.Format(time.RFC3339))
+
+	setNestedField(item, "testing_evidence", suite, ev)
+	item.Doc.SetField("last_touched", now.Format(time.RFC3339))
+
+	if err := s.Write(item); err != nil {
+		fmt.Fprintf(os.Stderr, "writing %s: %v\n", id, err)
+		return 1
+	}
+
+	changelog.Append(cfg, id, changelog.Entry{
+		Op: "test_recorded", Field: "testing_evidence." + suite, NewValue: ev,
+	})
+
+	fmt.Printf("Recorded %s pass on %s (sha:%s)\n", suite, id, sha)
+	return 0
+}
+
+// testRunMode executes the suite, captures output, uploads evidence, records result.
+func testRunMode(s *store.Store, cfg *config.Config, id, suite, suiteCmd, sha string, item *model.Item, opts TestRecordOpts) int {
+	if suiteCmd == "" {
+		fmt.Fprintf(os.Stderr, "suite %q has no command configured\n", suite)
+		return 1
+	}
+
+	fmt.Printf("Running %s: %s\n", suite, suiteCmd)
+	start := time.Now()
+
+	// Execute suite command
+	var output []byte
+	var exitCode int
+	var runErr error
+	if opts.RunCmd != nil {
+		output, exitCode, runErr = opts.RunCmd(suiteCmd)
+	} else {
+		output, exitCode, runErr = defaultRunCmd(suiteCmd)
+	}
+	duration := time.Since(start)
+
+	if runErr != nil && exitCode == 0 {
+		// runErr with exit 0 means execution failed (not the test)
+		fmt.Fprintf(os.Stderr, "failed to execute command: %v\n", runErr)
+		return 1
+	}
+
+	now := time.Now()
+	status := "pass"
+	if exitCode != 0 {
+		status = "fail"
+	}
+
+	// Build summary
+	summary := testSummary{
+		Status:     status,
+		Suite:      suite,
+		SHA:        sha,
+		ExitCode:   exitCode,
+		DurationMs: duration.Milliseconds(),
+		RecordedAt: now.Format(time.RFC3339),
+	}
+
+	// Upload evidence
+	backend := opts.Backend
+	if backend == nil {
+		var err error
+		backend, err = evidence.New(evidenceConfigFromCfg(cfg))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "creating evidence backend: %v\n", err)
+			return 1
+		}
+	}
+
+	ts := now.Format("20060102T150405")
+	keyPrefix := fmt.Sprintf("%s/%s/%s/%s", id, suite, sha, ts)
+
+	// Upload log.txt
+	logURI, err := backend.Upload(keyPrefix+"/log.txt", bytes.NewReader(output))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "uploading log.txt: %v\n", err)
+		return 1
+	}
+
+	// Upload summary.json
+	summaryJSON, _ := json.MarshalIndent(summary, "", "  ")
+	if _, err := backend.Upload(keyPrefix+"/summary.json", bytes.NewReader(summaryJSON)); err != nil {
+		fmt.Fprintf(os.Stderr, "uploading summary.json: %v\n", err)
+		return 1
+	}
+
+	// If test failed, record failure and stop
+	if exitCode != 0 {
+		ev := fmt.Sprintf("fail %s %s evidence:%s", sha, now.Format(time.RFC3339), logURI)
+		setNestedField(item, "testing_evidence", suite, ev)
+		item.Doc.SetField("last_touched", now.Format(time.RFC3339))
+		s.Write(item)
+
+		changelog.Append(cfg, id, changelog.Entry{
+			Op: "test_failed", Field: "testing_evidence." + suite, NewValue: ev,
+		})
+
+		fmt.Printf("FAIL %s on %s (exit %d, %dms)\n", suite, id, exitCode, duration.Milliseconds())
+		return 1
+	}
+
+	// Coverage enforcement (only when --coverage and test passed)
+	if opts.Coverage {
+		if code := enforceCoverage(cfg, id, suite, sha, keyPrefix, item, opts, backend); code != 0 {
+			return code
+		}
+	}
+
+	// Record pass
+	ev := fmt.Sprintf("pass %s %s evidence:%s", sha, now.Format(time.RFC3339), logURI)
+	setNestedField(item, "testing_evidence", suite, ev)
+	item.Doc.SetField("last_touched", now.Format(time.RFC3339))
+
+	if err := s.Write(item); err != nil {
+		fmt.Fprintf(os.Stderr, "writing %s: %v\n", id, err)
+		return 1
+	}
+
+	changelog.Append(cfg, id, changelog.Entry{
+		Op: "test_executed", Field: "testing_evidence." + suite, NewValue: ev,
+	})
+
+	fmt.Printf("PASS %s on %s (%dms) evidence:%s\n", suite, id, duration.Milliseconds(), logURI)
+	return 0
+}
+
+// enforceCoverage parses coverage reports and checks thresholds against manifest files.
+func enforceCoverage(cfg *config.Config, id, suite, sha, keyPrefix string, item *model.Item, opts TestRecordOpts, backend evidence.Backend) int {
+	// Determine coverage format from suite prefix
+	isGo := strings.HasPrefix(suite, "api_")
+	readFile := opts.ReadFile
+	if readFile == nil {
+		readFile = os.ReadFile
+	}
+
+	var fileCov map[string]coverage.FileCoverage
+	var covErr error
+
+	if isGo {
+		// Look for cover.out in the repo directory
+		data, err := readFile("cover.out")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: --coverage specified but cover.out not found: %v\n", err)
+			return 0 // non-fatal: coverage file might not exist
+		}
+		// Upload raw coverage
+		backend.Upload(keyPrefix+"/cover.out", bytes.NewReader(data))
+
+		// Determine module path from go.mod
+		modPath := ""
+		if modData, err := readFile("go.mod"); err == nil {
+			for _, line := range strings.Split(string(modData), "\n") {
+				if strings.HasPrefix(line, "module ") {
+					modPath = strings.TrimPrefix(line, "module ") + "/"
+					break
+				}
+			}
+		}
+		fileCov, covErr = coverage.ParseGoCoverprofile(bytes.NewReader(data), modPath)
+	} else {
+		// Vitest JSON summary
+		data, err := readFile("coverage/coverage-summary.json")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: --coverage specified but coverage-summary.json not found: %v\n", err)
+			return 0
+		}
+		backend.Upload(keyPrefix+"/coverage-summary.json", bytes.NewReader(data))
+		fileCov, covErr = coverage.ParseVitestSummary(bytes.NewReader(data))
+	}
+
+	if covErr != nil {
+		fmt.Fprintf(os.Stderr, "parsing coverage: %v\n", covErr)
+		return 1
+	}
+
+	// Upload parsed coverage as JSON
+	covJSON, _ := json.MarshalIndent(fileCov, "", "  ")
+	backend.Upload(keyPrefix+"/coverage.json", bytes.NewReader(covJSON))
+
+	// Load manifest to get changed app files
+	m, err := manifest.Load(cfg.ManifestDir(), id)
+	if err != nil || len(m.PRs) == 0 {
+		fmt.Fprintln(os.Stderr, "warning: no manifest found — skipping per-file coverage check")
+		return 0
+	}
+
+	// Collect app files from the repo matching this suite
+	repo := strings.Split(suite, "_")[0]
+	var appFiles []string
+	for _, pr := range m.PRs {
+		if pr.Repo != repo {
+			continue
+		}
+		for _, f := range pr.Files {
+			if f.Type == "app" {
+				appFiles = append(appFiles, f.Path)
+			}
+		}
+	}
+
+	if len(appFiles) == 0 {
+		return 0
+	}
+
+	// Check thresholds
+	thresh := coverage.DefaultThresholds()
+	if cfg.Testing != nil && cfg.Testing.CoverageThresholds != nil {
+		thresh = coverage.Thresholds{
+			Lines:     cfg.Testing.CoverageThresholds.Lines,
+			Branches:  cfg.Testing.CoverageThresholds.Branches,
+			Functions: cfg.Testing.CoverageThresholds.Functions,
+		}
+	}
+
+	violations := coverage.CheckThresholds(fileCov, appFiles, thresh)
+	if len(violations) > 0 {
+		fmt.Fprintf(os.Stderr, "coverage violations on changed files (%d):\n", len(violations))
+		for _, v := range violations {
+			fmt.Fprintf(os.Stderr, "  %s\n", v)
+		}
+		return 1
+	}
+
+	fmt.Printf("  coverage: %d changed files meet thresholds\n", len(appFiles))
+	return 0
+}
+
+func getSHA(opts TestRecordOpts) string {
 	sha := "unknown"
 	if opts.GitHeadSHA != nil {
 		out, err := opts.GitHeadSHA(".")
@@ -74,26 +339,35 @@ func TestRecord(s *store.Store, cfg *config.Config, id, suite string, opts TestR
 	if len(sha) > 7 {
 		sha = sha[:7]
 	}
+	return sha
+}
 
-	// Build evidence string
-	now := time.Now()
-	evidence := fmt.Sprintf("pass %s %s", sha, now.Format(time.RFC3339))
-
-	// Record in testing_evidence
-	setNestedField(item, "testing_evidence", suite, evidence)
-	item.Doc.SetField("last_touched", now.Format(time.RFC3339))
-
-	if err := s.Write(item); err != nil {
-		fmt.Fprintf(os.Stderr, "writing %s: %v\n", id, err)
-		return 1
+func defaultRunCmd(command string) ([]byte, int, error) {
+	cmd := exec.Command("sh", "-c", command)
+	output, err := cmd.CombinedOutput()
+	exitCode := 0
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		} else {
+			return output, 0, err // non-exit error (e.g., command not found)
+		}
 	}
+	return output, exitCode, nil
+}
 
-	changelog.Append(cfg, id, changelog.Entry{
-		Op:       "test_recorded",
-		Field:    "testing_evidence." + suite,
-		NewValue: evidence,
-	})
-
-	fmt.Printf("Recorded %s pass on %s (sha:%s)\n", suite, id, sha)
-	return 0
+func evidenceConfigFromCfg(cfg *config.Config) evidence.Config {
+	if cfg.Evidence != nil {
+		return evidence.Config{
+			Backend:  cfg.Evidence.Backend,
+			LocalDir: cfg.EvidenceDir(),
+			S3Bucket: cfg.Evidence.S3Bucket,
+			S3Region: cfg.Evidence.S3Region,
+			S3Prefix: cfg.Evidence.S3Prefix,
+		}
+	}
+	return evidence.Config{
+		Backend:  "local",
+		LocalDir: cfg.EvidenceDir(),
+	}
 }

@@ -1,8 +1,16 @@
 package command
 
 import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/jfinlinson/agent-state/internal/config"
+	"github.com/jfinlinson/agent-state/internal/evidence"
+	"github.com/jfinlinson/agent-state/internal/manifest"
 )
 
 func testRecordOpts() TestRecordOpts {
@@ -13,6 +21,8 @@ func testRecordOpts() TestRecordOpts {
 	}
 }
 
+// --- Record-only mode (existing) ---
+
 func TestTestRecordRequiredSuite(t *testing.T) {
 	s, cfg := setupPRTestEnv(t)
 	opts := testRecordOpts()
@@ -22,7 +32,6 @@ func TestTestRecordRequiredSuite(t *testing.T) {
 		t.Fatalf("TestRecord returned %d, want 0", code)
 	}
 
-	// Verify evidence recorded
 	item, _ := s.Get("T-003")
 	ev, ok := getNestedField(item, "testing_evidence", "api_unit")
 	if !ok || !strings.HasPrefix(ev, "pass abc1234") {
@@ -34,7 +43,6 @@ func TestTestRecordScopeSuite(t *testing.T) {
 	s, cfg := setupPRTestEnv(t)
 	opts := testRecordOpts()
 
-	// First mark scope suite as required (as st pr would)
 	item, _ := s.Get("T-003")
 	setNestedField(item, "testing_evidence", "api_integration", "required")
 	s.Write(item)
@@ -44,7 +52,6 @@ func TestTestRecordScopeSuite(t *testing.T) {
 		t.Fatalf("TestRecord returned %d, want 0", code)
 	}
 
-	// Verify evidence replaced "required"
 	item, _ = s.Get("T-003")
 	ev, ok := getNestedField(item, "testing_evidence", "api_integration")
 	if !ok || !strings.HasPrefix(ev, "pass") {
@@ -54,43 +61,34 @@ func TestTestRecordScopeSuite(t *testing.T) {
 
 func TestTestRecordInvalidSuite(t *testing.T) {
 	s, cfg := setupPRTestEnv(t)
-	opts := testRecordOpts()
-
-	code := TestRecord(s, cfg, "T-003", "nonexistent_suite", opts)
+	code := TestRecord(s, cfg, "T-003", "nonexistent_suite", testRecordOpts())
 	if code != 1 {
-		t.Errorf("TestRecord returned %d, want 1", code)
+		t.Errorf("returned %d, want 1", code)
 	}
 }
 
 func TestTestRecordItemNotFound(t *testing.T) {
 	s, cfg := setupPRTestEnv(t)
-	opts := testRecordOpts()
-
-	code := TestRecord(s, cfg, "T-999", "api_unit", opts)
+	code := TestRecord(s, cfg, "T-999", "api_unit", testRecordOpts())
 	if code != 1 {
-		t.Errorf("TestRecord returned %d, want 1", code)
+		t.Errorf("returned %d, want 1", code)
 	}
 }
 
 func TestTestRecordItemNotActive(t *testing.T) {
 	s, cfg := setupPRTestEnv(t)
-	opts := testRecordOpts()
-
-	// T-001 is queued
-	code := TestRecord(s, cfg, "T-001", "api_unit", opts)
+	code := TestRecord(s, cfg, "T-001", "api_unit", testRecordOpts())
 	if code != 1 {
-		t.Errorf("TestRecord returned %d, want 1", code)
+		t.Errorf("returned %d, want 1", code)
 	}
 }
 
 func TestTestRecordNoTestingConfig(t *testing.T) {
 	s, cfg := setupPRTestEnv(t)
 	cfg.Testing = nil
-	opts := testRecordOpts()
-
-	code := TestRecord(s, cfg, "T-003", "api_unit", opts)
+	code := TestRecord(s, cfg, "T-003", "api_unit", testRecordOpts())
 	if code != 1 {
-		t.Errorf("TestRecord returned %d, want 1", code)
+		t.Errorf("returned %d, want 1", code)
 	}
 }
 
@@ -104,7 +102,7 @@ func TestTestRecordSHATruncation(t *testing.T) {
 
 	code := TestRecord(s, cfg, "T-003", "api_unit", opts)
 	if code != 0 {
-		t.Fatalf("TestRecord returned %d", code)
+		t.Fatalf("returned %d", code)
 	}
 
 	item, _ := s.Get("T-003")
@@ -112,8 +110,347 @@ func TestTestRecordSHATruncation(t *testing.T) {
 	if !strings.Contains(ev, "abcdef1") {
 		t.Errorf("evidence = %q, want truncated SHA", ev)
 	}
-	// Should not contain the full 40-char SHA
 	if strings.Contains(ev, "abcdef1234567890") {
 		t.Errorf("evidence = %q, SHA not truncated", ev)
 	}
 }
+
+// --- Run mode ---
+
+func TestTestRunPass(t *testing.T) {
+	s, cfg := setupPRTestEnv(t)
+	evDir := t.TempDir()
+
+	opts := TestRecordOpts{
+		Run: true,
+		GitHeadSHA: func(dir string) (string, error) {
+			return "abc1234567890", nil
+		},
+		RunCmd: func(command string) ([]byte, int, error) {
+			return []byte("PASS\nok  tests 0.5s\n"), 0, nil
+		},
+		Backend: &evidence.LocalBackend{Dir: evDir},
+	}
+
+	code := TestRecord(s, cfg, "T-003", "api_unit", opts)
+	if code != 0 {
+		t.Fatalf("returned %d, want 0", code)
+	}
+
+	// Verify evidence uploaded
+	keys, _ := opts.Backend.List("T-003/api_unit/")
+	if len(keys) < 2 {
+		t.Errorf("uploaded %d files, want >= 2 (log.txt + summary.json)", len(keys))
+	}
+
+	// Verify summary.json content
+	for _, k := range keys {
+		if strings.HasSuffix(k, "summary.json") {
+			var buf strings.Builder
+			opts.Backend.Download(k, &buf)
+			var summary testSummary
+			json.Unmarshal([]byte(buf.String()), &summary)
+			if summary.Status != "pass" || summary.ExitCode != 0 {
+				t.Errorf("summary = %+v", summary)
+			}
+		}
+	}
+
+	// Verify item updated with evidence URI
+	item, _ := s.Get("T-003")
+	ev, _ := getNestedField(item, "testing_evidence", "api_unit")
+	if !strings.HasPrefix(ev, "pass") || !strings.Contains(ev, "evidence:") {
+		t.Errorf("evidence = %q", ev)
+	}
+}
+
+func TestTestRunFail(t *testing.T) {
+	s, cfg := setupPRTestEnv(t)
+	evDir := t.TempDir()
+
+	opts := TestRecordOpts{
+		Run: true,
+		GitHeadSHA: func(dir string) (string, error) {
+			return "abc1234567890", nil
+		},
+		RunCmd: func(command string) ([]byte, int, error) {
+			return []byte("FAIL\n--- FAIL: TestBilling\n"), 1, nil
+		},
+		Backend: &evidence.LocalBackend{Dir: evDir},
+	}
+
+	code := TestRecord(s, cfg, "T-003", "api_unit", opts)
+	if code != 1 {
+		t.Errorf("returned %d, want 1", code)
+	}
+
+	// Verify fail recorded (not pass)
+	item, _ := s.Get("T-003")
+	ev, _ := getNestedField(item, "testing_evidence", "api_unit")
+	if !strings.HasPrefix(ev, "fail") {
+		t.Errorf("evidence = %q, want fail ...", ev)
+	}
+}
+
+func TestTestRunNoCommand(t *testing.T) {
+	s, cfg := setupPRTestEnv(t)
+	// Override suite to have empty command
+	cfg.Testing.RequiredSuites["api_unit"] = config.SuiteConfig{Command: ""}
+
+	opts := TestRecordOpts{
+		Run:        true,
+		GitHeadSHA: func(dir string) (string, error) { return "abc", nil },
+		Backend:    &evidence.LocalBackend{Dir: t.TempDir()},
+	}
+
+	code := TestRecord(s, cfg, "T-003", "api_unit", opts)
+	if code != 1 {
+		t.Errorf("returned %d, want 1 (no command)", code)
+	}
+}
+
+func TestTestRunExecutionError(t *testing.T) {
+	s, cfg := setupPRTestEnv(t)
+	opts := TestRecordOpts{
+		Run:        true,
+		GitHeadSHA: func(dir string) (string, error) { return "abc", nil },
+		RunCmd: func(command string) ([]byte, int, error) {
+			return nil, 0, fmt.Errorf("command not found")
+		},
+		Backend: &evidence.LocalBackend{Dir: t.TempDir()},
+	}
+
+	code := TestRecord(s, cfg, "T-003", "api_unit", opts)
+	if code != 1 {
+		t.Errorf("returned %d, want 1", code)
+	}
+}
+
+// --- Coverage enforcement ---
+
+func TestTestRunWithCoveragePass(t *testing.T) {
+	s, cfg := setupPRTestEnv(t)
+	evDir := t.TempDir()
+
+	// Set up manifest with app files
+	manifest.AppendPR(cfg.ManifestDir(), "T-003", manifest.PRRecord{
+		Repo: "api",
+		Files: []manifest.FileRecord{
+			{Path: "internal/db/billing.go", Type: "app"},
+		},
+	})
+
+	coverOut := `mode: set
+github.com/user/repo/internal/db/billing.go:10.2,15.3 2 2
+github.com/user/repo/internal/db/billing.go:17.2,20.3 1 1
+`
+	opts := TestRecordOpts{
+		Run:      true,
+		Coverage: true,
+		GitHeadSHA: func(dir string) (string, error) {
+			return "abc1234567890", nil
+		},
+		RunCmd: func(command string) ([]byte, int, error) {
+			return []byte("PASS\n"), 0, nil
+		},
+		ReadFile: func(path string) ([]byte, error) {
+			switch {
+			case strings.HasSuffix(path, "cover.out"):
+				return []byte(coverOut), nil
+			case strings.HasSuffix(path, "go.mod"):
+				return []byte("module github.com/user/repo\n"), nil
+			default:
+				return nil, os.ErrNotExist
+			}
+		},
+		Backend: &evidence.LocalBackend{Dir: evDir},
+	}
+
+	code := TestRecord(s, cfg, "T-003", "api_unit", opts)
+	if code != 0 {
+		t.Fatalf("returned %d, want 0 (100%% coverage)", code)
+	}
+
+	// Verify coverage files uploaded
+	keys, _ := opts.Backend.List("T-003/api_unit/")
+	foundCoverOut := false
+	for _, k := range keys {
+		if strings.HasSuffix(k, "cover.out") {
+			foundCoverOut = true
+		}
+	}
+	if !foundCoverOut {
+		t.Error("cover.out not uploaded")
+	}
+}
+
+func TestTestRunWithCoverageViolation(t *testing.T) {
+	s, cfg := setupPRTestEnv(t)
+	evDir := t.TempDir()
+
+	manifest.AppendPR(cfg.ManifestDir(), "T-003", manifest.PRRecord{
+		Repo: "api",
+		Files: []manifest.FileRecord{
+			{Path: "internal/db/billing.go", Type: "app"},
+		},
+	})
+
+	// Coverage with 0% on the file
+	coverOut := `mode: set
+github.com/user/repo/internal/db/billing.go:10.2,15.3 5 0
+`
+	opts := TestRecordOpts{
+		Run:      true,
+		Coverage: true,
+		GitHeadSHA: func(dir string) (string, error) {
+			return "abc1234567890", nil
+		},
+		RunCmd: func(command string) ([]byte, int, error) {
+			return []byte("PASS\n"), 0, nil
+		},
+		ReadFile: func(path string) ([]byte, error) {
+			switch {
+			case strings.HasSuffix(path, "cover.out"):
+				return []byte(coverOut), nil
+			case strings.HasSuffix(path, "go.mod"):
+				return []byte("module github.com/user/repo\n"), nil
+			default:
+				return nil, os.ErrNotExist
+			}
+		},
+		Backend: &evidence.LocalBackend{Dir: evDir},
+	}
+
+	code := TestRecord(s, cfg, "T-003", "api_unit", opts)
+	if code != 1 {
+		t.Errorf("returned %d, want 1 (coverage violation)", code)
+	}
+}
+
+func TestTestRunWithCoverageNoCoverFile(t *testing.T) {
+	s, cfg := setupPRTestEnv(t)
+	evDir := t.TempDir()
+
+	opts := TestRecordOpts{
+		Run:      true,
+		Coverage: true,
+		GitHeadSHA: func(dir string) (string, error) {
+			return "abc1234567890", nil
+		},
+		RunCmd: func(command string) ([]byte, int, error) {
+			return []byte("PASS\n"), 0, nil
+		},
+		ReadFile: func(path string) ([]byte, error) {
+			return nil, os.ErrNotExist
+		},
+		Backend: &evidence.LocalBackend{Dir: evDir},
+	}
+
+	// Should pass (non-fatal when coverage file not found)
+	code := TestRecord(s, cfg, "T-003", "api_unit", opts)
+	if code != 0 {
+		t.Errorf("returned %d, want 0 (coverage file missing is non-fatal)", code)
+	}
+}
+
+func TestTestRunVitestCoverage(t *testing.T) {
+	s, cfg := setupPRTestEnv(t)
+	evDir := t.TempDir()
+
+	manifest.AppendPR(cfg.ManifestDir(), "T-003", manifest.PRRecord{
+		Repo: "web",
+		Files: []manifest.FileRecord{
+			{Path: "src/Button.tsx", Type: "app"},
+		},
+	})
+
+	vitestJSON := `{
+  "total": {"lines": {"pct": 95}},
+  "src/Button.tsx": {
+    "lines": {"total": 50, "covered": 48, "pct": 96.0},
+    "branches": {"total": 20, "covered": 18, "pct": 90.0},
+    "functions": {"total": 10, "covered": 10, "pct": 100.0},
+    "statements": {"total": 60, "covered": 58, "pct": 96.67}
+  }
+}`
+
+	opts := TestRecordOpts{
+		Run:      true,
+		Coverage: true,
+		GitHeadSHA: func(dir string) (string, error) {
+			return "abc1234567890", nil
+		},
+		RunCmd: func(command string) ([]byte, int, error) {
+			return []byte("PASS\n"), 0, nil
+		},
+		ReadFile: func(path string) ([]byte, error) {
+			if strings.Contains(path, "coverage-summary.json") {
+				return []byte(vitestJSON), nil
+			}
+			return nil, os.ErrNotExist
+		},
+		Backend: &evidence.LocalBackend{Dir: evDir},
+	}
+
+	// web_e2e is a scope suite
+	code := TestRecord(s, cfg, "T-003", "web_e2e", opts)
+	if code != 0 {
+		t.Fatalf("returned %d, want 0", code)
+	}
+}
+
+// --- Helpers ---
+
+func TestDefaultRunCmd(t *testing.T) {
+	// Test with a simple command that should succeed
+	output, exitCode, err := defaultRunCmd("echo hello")
+	if err != nil {
+		t.Fatalf("defaultRunCmd: %v", err)
+	}
+	if exitCode != 0 {
+		t.Errorf("exitCode = %d", exitCode)
+	}
+	if !strings.Contains(string(output), "hello") {
+		t.Errorf("output = %q", string(output))
+	}
+}
+
+func TestDefaultRunCmdFail(t *testing.T) {
+	output, exitCode, err := defaultRunCmd("exit 1")
+	if err != nil {
+		t.Fatalf("defaultRunCmd err: %v", err)
+	}
+	if exitCode != 1 {
+		t.Errorf("exitCode = %d, want 1", exitCode)
+	}
+	_ = output
+}
+
+func TestEvidenceConfigFromCfg(t *testing.T) {
+	cfg := &config.Config{
+		Evidence: &config.EvidenceConfig{
+			Backend:  "s3",
+			S3Bucket: "my-bucket",
+			S3Region: "us-west-2",
+		},
+	}
+	ec := evidenceConfigFromCfg(cfg)
+	if ec.Backend != "s3" || ec.S3Bucket != "my-bucket" {
+		t.Errorf("config = %+v", ec)
+	}
+}
+
+func TestEvidenceConfigFromCfgDefault(t *testing.T) {
+	cfg := &config.Config{}
+	ec := evidenceConfigFromCfg(cfg)
+	if ec.Backend != "local" {
+		t.Errorf("backend = %q, want local", ec.Backend)
+	}
+}
+
+// Ensure imports are used
+var _ = filepath.Join
+var _ = os.ErrNotExist
+var _ = fmt.Errorf
+var _ config.SuiteConfig
+var _ manifest.PRRecord

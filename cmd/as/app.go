@@ -270,12 +270,19 @@ context for LLM agents. Works standalone or with CI/hooks.`,
 
 	testRecordCmd := &cobra.Command{
 		Use:   "test <id> <suite>",
-		Short: "Record test suite pass for an item",
+		Short: "Record or execute a test suite for an item",
+		Long:  "Without --run: records a manual test pass. With --run: executes the suite command, captures output, uploads evidence.",
 		Args:  cobra.ExactArgs(2),
 		Run: func(cmd *cobra.Command, args []string) {
-			exitCode = command.TestRecord(appStore, appCfg, args[0], args[1], command.TestRecordOpts{})
+			run, _ := cmd.Flags().GetBool("run")
+			cov, _ := cmd.Flags().GetBool("coverage")
+			exitCode = command.TestRecord(appStore, appCfg, args[0], args[1], command.TestRecordOpts{
+				Run: run, Coverage: cov,
+			})
 		},
 	}
+	testRecordCmd.Flags().Bool("run", false, "execute the suite command and capture evidence")
+	testRecordCmd.Flags().Bool("coverage", false, "enforce per-file coverage thresholds (requires --run)")
 	root.AddCommand(testRecordCmd)
 
 	editCmd := &cobra.Command{

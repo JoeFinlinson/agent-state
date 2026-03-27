@@ -316,6 +316,40 @@ func TestConfigEvidenceSection(t *testing.T) {
 	}
 }
 
+func TestConfigCoverageThresholds(t *testing.T) {
+	root := t.TempDir()
+	asDir := filepath.Join(root, ".as")
+	os.MkdirAll(asDir, 0755)
+	configContent := `testing:
+  required_suites:
+    api_unit: make test-unit
+  coverage_thresholds:
+    lines: 85
+    branches: 70
+    functions: 95
+`
+	os.WriteFile(filepath.Join(asDir, "config.yaml"), []byte(configContent), 0644)
+
+	cfg, err := Load(root)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if cfg.Testing == nil || cfg.Testing.CoverageThresholds == nil {
+		t.Fatal("coverage thresholds should not be nil")
+	}
+	ct := cfg.Testing.CoverageThresholds
+	if ct.Lines != 85 {
+		t.Errorf("lines = %f, want 85", ct.Lines)
+	}
+	if ct.Branches != 70 {
+		t.Errorf("branches = %f, want 70", ct.Branches)
+	}
+	if ct.Functions != 95 {
+		t.Errorf("functions = %f, want 95", ct.Functions)
+	}
+}
+
 func TestConfigEvidenceDir(t *testing.T) {
 	root := t.TempDir()
 	asDir := filepath.Join(root, ".as")

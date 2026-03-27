@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -105,8 +106,15 @@ type ComputedField struct {
 }
 
 type TestingConfig struct {
-	RequiredSuites map[string]SuiteConfig
-	ScopeSuites    map[string]ScopeSuiteConfig
+	RequiredSuites     map[string]SuiteConfig
+	ScopeSuites        map[string]ScopeSuiteConfig
+	CoverageThresholds *CoverageThresholds
+}
+
+type CoverageThresholds struct {
+	Lines     float64
+	Branches  float64
+	Functions float64
 }
 
 type SuiteConfig struct {
@@ -540,6 +548,20 @@ func applyValue(cfg *Config, levels [4]string, key, val string) {
 			cfg.Testing.RequiredSuites[key] = SuiteConfig{Command: val}
 		case "scope_suites":
 			cfg.Testing.ScopeSuites[key] = ScopeSuiteConfig{Command: val}
+		case "coverage_thresholds":
+			if cfg.Testing.CoverageThresholds == nil {
+				cfg.Testing.CoverageThresholds = &CoverageThresholds{Lines: 90, Branches: 80, Functions: 100}
+			}
+			if v, err := strconv.ParseFloat(val, 64); err == nil {
+				switch key {
+				case "lines":
+					cfg.Testing.CoverageThresholds.Lines = v
+				case "branches":
+					cfg.Testing.CoverageThresholds.Branches = v
+				case "functions":
+					cfg.Testing.CoverageThresholds.Functions = v
+				}
+			}
 		}
 
 	case "evidence":
