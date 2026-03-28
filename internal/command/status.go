@@ -456,7 +456,7 @@ func printRecent(s *store.Store, cfg *config.Config) {
 			if item.Completed != nil {
 				completed = item.Completed.Format("2006-01-02")
 			}
-			fmt.Printf("  %-8s  %-10s  %s  %s\n", item.ID, item.Status, completed, truncate(item.Title, 55))
+			fmt.Printf("  %-8s  %s  %s\n", item.ID, completed, truncate(item.Title, 60))
 		}
 	}
 	fmt.Println()
