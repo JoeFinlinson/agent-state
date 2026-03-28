@@ -134,7 +134,7 @@ func statusDashboard(s *store.Store, cfg *config.Config, opts StatusOpts) int {
 
 	// Issues section
 	if opts.Issues {
-		printIssues(s, g)
+		printIssues(s, cfg, g)
 	}
 
 	// Tasks section
@@ -187,17 +187,88 @@ func statusDashboard(s *store.Store, cfg *config.Config, opts StatusOpts) int {
 	return 0
 }
 
-func printIssues(s *store.Store, g *deps.Graph) {
+func printIssues(s *store.Store, cfg *config.Config, g *deps.Graph) {
 	openIssues := s.List(store.TypeFilter("issue"), store.StatusFilter("open"))
-	sort.Slice(openIssues, func(i, j int) bool {
-		ri, rj := severityRank(openIssues[i].Severity), severityRank(openIssues[j].Severity)
-		if ri != rj {
-			return ri < rj
+	if len(openIssues) == 0 {
+		return
+	}
+
+	// Load epics registry
+	reg, _ := registry.Load(cfg.EpicsPath())
+
+	// Group by epic → sprint → tag (same as tasks)
+	type group struct {
+		epic, eTitle, sprint, sTitle, tag string
+		items                             []*model.Item
+	}
+	type gkey struct{ epic, sprint, tag string }
+
+	groupMap := map[gkey]*group{}
+	var keys []gkey
+
+	for _, item := range openIssues {
+		epic := item.Epic
+		sprint := item.Sprint
+		tag := "not tagged"
+		if len(item.Tags) > 0 {
+			tag = item.Tags[0]
 		}
-		return openIssues[i].ID < openIssues[j].ID
+		k := gkey{epic, sprint, tag}
+		if _, ok := groupMap[k]; !ok {
+			eTitle := ""
+			if epic != "" && reg != nil {
+				if e, ok := reg.GetEpic(epic); ok {
+					eTitle = e.Title
+				}
+			}
+			sTitle := ""
+			if sprint != "" && reg != nil {
+				if sp, ok := reg.GetSprint(sprint); ok {
+					sTitle = sp.Title
+				}
+			}
+			groupMap[k] = &group{epic: epic, eTitle: eTitle, sprint: sprint, sTitle: sTitle, tag: tag}
+			keys = append(keys, k)
+		}
+		groupMap[k].items = append(groupMap[k].items, item)
+	}
+
+	// Sort groups: epic first, then sprint, then tag; "not tagged" last
+	sort.SliceStable(keys, func(i, j int) bool {
+		gi, gj := groupMap[keys[i]], groupMap[keys[j]]
+		if (gi.epic != "") != (gj.epic != "") {
+			return gi.epic != ""
+		}
+		if gi.eTitle != gj.eTitle {
+			return gi.eTitle < gj.eTitle
+		}
+		if (gi.sprint != "") != (gj.sprint != "") {
+			return gi.sprint != ""
+		}
+		if gi.sTitle != gj.sTitle {
+			return gi.sTitle < gj.sTitle
+		}
+		if gi.tag == "not tagged" {
+			return false
+		}
+		if gj.tag == "not tagged" {
+			return true
+		}
+		return gi.tag < gj.tag
 	})
 
-	// Count by severity
+	// Sort items within each group by severity
+	for _, grp := range groupMap {
+		sort.Slice(grp.items, func(i, j int) bool {
+			ri, rj := severityRank(grp.items[i].Severity), severityRank(grp.items[j].Severity)
+			if ri != rj {
+				return ri < rj
+			}
+			return grp.items[i].ID < grp.items[j].ID
+		})
+	}
+
+	// Count by severity for header
 	sevCounts := map[string]int{}
 	for _, item := range openIssues {
 		sev := item.Severity
@@ -215,27 +286,61 @@ func printIssues(s *store.Store, g *deps.Graph) {
 
 	fmt.Printf("%s━━━ OPEN ISSUES ━━━%s\n", cBoldW, cReset)
 	fmt.Println(summary)
-	fmt.Println()
 
-	for _, item := range openIssues {
-		sev := item.Severity
-		if sev == "" {
-			sev = "medium"
+	currentEpic := "\x00"
+	currentSprint := ""
+	hasEpicItems := false
+	for _, k := range keys {
+		if k.epic != "" {
+			hasEpicItems = true
+			break
 		}
-		label := sevLabel(sev)
-		fmt.Printf("  %s  %s%-8s%s %s\n",
-			label, cBold, item.ID, cReset, truncate(item.Title, 65))
+	}
+	for _, k := range keys {
+		grp := groupMap[k]
 
-		// Blocks line
-		blocksItems := g.BlocksItems(item.ID)
-		if len(blocksItems) > 0 {
-			fmt.Printf("              %s▶ blocks %s%s\n", cYellow, strings.Join(blocksItems, ", "), cReset)
+		if grp.epic != currentEpic {
+			currentEpic = grp.epic
+			currentSprint = ""
+			if grp.epic != "" {
+				fmt.Printf("\n  %s◆ %s — %s%s\n", cBoldM, grp.epic, grp.eTitle, cReset)
+			} else if hasEpicItems {
+				fmt.Printf("\n  %s◆ Unassigned%s\n", cBoldM, cReset)
+			}
 		}
 
-		// Blocked-by line
-		if g.IsBlocked(item.ID) {
-			unresolved := g.UnresolvedDeps(item.ID)
-			fmt.Printf("              %s⊘ blocked by %s%s\n", cRed, strings.Join(unresolved, ", "), cReset)
+		if grp.sprint != currentSprint {
+			currentSprint = grp.sprint
+			if grp.sprint != "" {
+				fmt.Printf("   %s▸ %s — %s%s\n", cBoldC, grp.sprint, grp.sTitle, cReset)
+			}
+		}
+
+		fmt.Printf("    %s◇ %s%s\n", cBoldB, grp.tag, cReset)
+
+		for _, item := range grp.items {
+			sev := item.Severity
+			if sev == "" {
+				sev = "medium"
+			}
+			blocked := g.IsBlocked(item.ID)
+			idColor := cGreen
+			if blocked {
+				idColor = cRed
+			}
+
+			touched := item.LastTouched.Format("2006-01-02")
+			fmt.Printf("    %s%-8s%s %-45s  %s%s%s  %s\n",
+				idColor, item.ID, cReset, truncate(item.Title, 45), cDim, touched, cReset, sevLabel(sev))
+
+			blocksItems := g.BlocksItems(item.ID)
+			if len(blocksItems) > 0 {
+				fmt.Printf("              %s▶ blocks %s%s\n", cYellow, strings.Join(blocksItems, ", "), cReset)
+			}
+			if blocked {
+				unresolved := g.UnresolvedDeps(item.ID)
+				fmt.Printf("              %s⊘ blocked by %s%s\n", cRed, strings.Join(unresolved, ", "), cReset)
+			}
 		}
 	}
 	fmt.Println()
@@ -648,13 +753,13 @@ func severityRank(sev string) int {
 func sevAbbrev(sev string) string {
 	switch sev {
 	case "critical":
-		return "crit"
+		return "crt"
 	case "high":
 		return "hig"
 	case "medium":
 		return "med"
 	case "normal":
-		return "norm"
+		return "nrm"
 	case "low":
 		return "low"
 	default:
@@ -665,17 +770,17 @@ func sevAbbrev(sev string) string {
 func sevLabel(sev string) string {
 	switch sev {
 	case "critical":
-		return fmt.Sprintf("%sCRIT%s", cRed, cReset)
+		return fmt.Sprintf("%sCRT%s", cRed, cReset)
 	case "high":
-		return fmt.Sprintf("%sHIG %s", cOrange, cReset)
+		return fmt.Sprintf("%sHIG%s", cOrange, cReset)
 	case "medium":
-		return fmt.Sprintf("%sMED %s", cYellow, cReset)
+		return fmt.Sprintf("%sMED%s", cYellow, cReset)
 	case "normal":
-		return fmt.Sprintf("%sNORM%s", cYellow, cReset)
+		return fmt.Sprintf("%sNRM%s", cYellow, cReset)
 	case "low":
-		return fmt.Sprintf("%sLOW %s", cDim, cReset)
+		return fmt.Sprintf("%sLOW%s", cDim, cReset)
 	default:
-		return fmt.Sprintf("%-4s", sev)
+		return fmt.Sprintf("%-3s", sev)
 	}
 }
 
