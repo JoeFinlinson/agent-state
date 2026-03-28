@@ -31,6 +31,7 @@ const (
 	cBoldC  = "\033[1m\033[36m"
 	cBoldM  = "\033[1m\033[35m"
 	cBoldB  = "\033[1m\033[34m"
+	cOrange = "\033[38;5;208m"
 )
 
 // StatusOpts holds flags for the status command.
@@ -389,14 +390,16 @@ func printQueuedTasks(s *store.Store, cfg *config.Config, g *deps.Graph, filterT
 			p := priorityOf(item)
 			blocked := g.IsBlocked(item.ID)
 
-			// Priority color: p0=red, p1=yellow, p2=default, p3+=dim
+			// Priority color: p0=red, p1=orange, p2=yellow, p3+=gray
 			pColor := ""
 			switch p {
 			case 0:
 				pColor = cRed
 			case 1:
+				pColor = cOrange
+			case 2:
 				pColor = cYellow
-			case 3, 4:
+			default:
 				pColor = cDim
 			}
 
@@ -405,9 +408,10 @@ func printQueuedTasks(s *store.Store, cfg *config.Config, g *deps.Graph, filterT
 				idColor = cRed
 			}
 
-			// Item line: ID + fixed-width title + colored priority
-			fmt.Printf("    %s%-8s%s %-55s %s(p%d)%s\n",
-				idColor, item.ID, cReset, truncate(item.Title, 55), pColor, p, cReset)
+			// Item line: ID + fixed-width title + last touched + colored priority
+			touched := item.LastTouched.Format("2006-01-02")
+			fmt.Printf("    %s%-8s%s %-45s  %s%s%s  %s(p%d)%s\n",
+				idColor, item.ID, cReset, truncate(item.Title, 45), cDim, touched, cReset, pColor, p, cReset)
 
 			// Blocks line (separate, indented)
 			blocksItems := g.BlocksItems(item.ID)
@@ -452,7 +456,7 @@ func printRecent(s *store.Store, cfg *config.Config) {
 			if item.Completed != nil {
 				completed = item.Completed.Format("2006-01-02")
 			}
-			fmt.Printf("  %-8s  %-10s  %s  %s\n", item.ID, item.Status, completed, item.Title)
+			fmt.Printf("  %-8s  %-10s  %s  %s\n", item.ID, item.Status, completed, truncate(item.Title, 55))
 		}
 	}
 	fmt.Println()
