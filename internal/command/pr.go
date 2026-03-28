@@ -229,31 +229,55 @@ func resolveRepoDir(cfg *config.Config, repo string) string {
 // resolveRepoDirForItem checks for a worktree first, falls back to main repo.
 func resolveRepoDirForItem(cfg *config.Config, itemID, repo string) string {
 	if cfg.Worktree != nil && cfg.Worktree.BaseDir != "" {
-		// Check if worktree exists: <root>/<base_dir>/<item-id>/<repo>
-		// Also check with just the repo dir name under the item worktree
-		wtBase := filepath.Join(cfg.Root(), cfg.Worktree.BaseDir, itemID)
-		// Try exact repo name
-		candidate := filepath.Join(wtBase, repo)
-		if isGitDir(candidate) {
-			return candidate
+		wtRoot := filepath.Join(cfg.Root(), cfg.Worktree.BaseDir)
+
+		// Pattern 1: <base_dir>/<item-id>/<repo> (st start pattern)
+		wtBase := filepath.Join(wtRoot, itemID)
+		for _, name := range []string{repo} {
+			candidate := filepath.Join(wtBase, name)
+			if isGitDir(candidate) {
+				return candidate
+			}
 		}
-		// Try with repo map
 		if cfg.Worktree.RepoMap != nil {
 			if mapped, ok := cfg.Worktree.RepoMap[repo]; ok {
-				candidate = filepath.Join(wtBase, mapped)
+				candidate := filepath.Join(wtBase, mapped)
 				if isGitDir(candidate) {
 					return candidate
 				}
 			}
 		}
-		// Try scanning the worktree dir for any git repo
-		entries, err := os.ReadDir(wtBase)
+
+		// Pattern 2: <base_dir>/<repo> (manual/legacy worktree)
+		candidate := filepath.Join(wtRoot, repo)
+		if isGitDir(candidate) {
+			return candidate
+		}
+
+		// Pattern 3: scan all worktree dirs for a repo matching the name
+		entries, err := os.ReadDir(wtRoot)
 		if err == nil {
 			for _, e := range entries {
-				if e.IsDir() && strings.Contains(e.Name(), repo) {
-					candidate = filepath.Join(wtBase, e.Name())
+				if !e.IsDir() {
+					continue
+				}
+				// Check direct match
+				if strings.Contains(e.Name(), repo) {
+					candidate := filepath.Join(wtRoot, e.Name())
 					if isGitDir(candidate) {
 						return candidate
+					}
+				}
+				// Check subdirs (st start creates <id>/<repo>)
+				subEntries, err := os.ReadDir(filepath.Join(wtRoot, e.Name()))
+				if err == nil {
+					for _, sub := range subEntries {
+						if sub.IsDir() && strings.Contains(sub.Name(), repo) {
+							candidate := filepath.Join(wtRoot, e.Name(), sub.Name())
+							if isGitDir(candidate) {
+								return candidate
+							}
+						}
 					}
 				}
 			}
