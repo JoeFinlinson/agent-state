@@ -263,6 +263,222 @@ func TestUniqueIDsAcrossTypes(t *testing.T) {
 	}
 }
 
+// --- Sprint promotion (T-164) ---
+
+func TestAddSprintAutoSequence(t *testing.T) {
+	r := &Registry{}
+	e := r.AddEpic("Parent")
+	s1, err := r.AddSprint(e.ID, "Sprint 1")
+	if err != nil {
+		t.Fatalf("AddSprint: %v", err)
+	}
+	if s1.Sequence != 1 {
+		t.Errorf("expected sequence 1, got %d", s1.Sequence)
+	}
+
+	s2, err := r.AddSprint(e.ID, "Sprint 2")
+	if err != nil {
+		t.Fatalf("AddSprint: %v", err)
+	}
+	if s2.Sequence != 2 {
+		t.Errorf("expected sequence 2, got %d", s2.Sequence)
+	}
+}
+
+func TestAddSprintAppendsToEpicSprintOrder(t *testing.T) {
+	r := &Registry{}
+	e := r.AddEpic("Parent")
+	s1, _ := r.AddSprint(e.ID, "Sprint 1")
+	s2, _ := r.AddSprint(e.ID, "Sprint 2")
+
+	epic, _ := r.GetEpic(e.ID)
+	if len(epic.SprintOrder) != 2 {
+		t.Fatalf("expected 2 in sprint_order, got %d", len(epic.SprintOrder))
+	}
+	if epic.SprintOrder[0] != s1.ID || epic.SprintOrder[1] != s2.ID {
+		t.Errorf("sprint_order = %v, want [%s, %s]", epic.SprintOrder, s1.ID, s2.ID)
+	}
+}
+
+func TestSprintByID(t *testing.T) {
+	r := &Registry{}
+	e := r.AddEpic("Parent")
+	s, _ := r.AddSprint(e.ID, "Test Sprint")
+
+	found, err := r.SprintByID(s.ID)
+	if err != nil {
+		t.Fatalf("SprintByID: %v", err)
+	}
+	if found.Title != "Test Sprint" {
+		t.Errorf("title: got %q, want %q", found.Title, "Test Sprint")
+	}
+
+	_, err = r.SprintByID("nonexistent")
+	if err == nil {
+		t.Error("expected error for nonexistent sprint")
+	}
+}
+
+func TestSprintAddItems(t *testing.T) {
+	r := &Registry{}
+	e := r.AddEpic("Parent")
+	s, _ := r.AddSprint(e.ID, "Sprint")
+
+	// Add items
+	err := r.SprintAddItems(s.ID, []string{"T-001", "T-002"})
+	if err != nil {
+		t.Fatalf("SprintAddItems: %v", err)
+	}
+
+	sp, _ := r.SprintByID(s.ID)
+	if len(sp.Items) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(sp.Items))
+	}
+
+	// Deduplicate
+	err = r.SprintAddItems(s.ID, []string{"T-002", "T-003"})
+	if err != nil {
+		t.Fatalf("SprintAddItems dedup: %v", err)
+	}
+	sp, _ = r.SprintByID(s.ID)
+	if len(sp.Items) != 3 {
+		t.Errorf("expected 3 items after dedup, got %d", len(sp.Items))
+	}
+
+	// Bad sprint
+	err = r.SprintAddItems("nonexistent", []string{"T-001"})
+	if err == nil {
+		t.Error("expected error for nonexistent sprint")
+	}
+}
+
+func TestSprintRemoveItem(t *testing.T) {
+	r := &Registry{}
+	e := r.AddEpic("Parent")
+	s, _ := r.AddSprint(e.ID, "Sprint")
+	r.SprintAddItems(s.ID, []string{"T-001", "T-002", "T-003"})
+
+	err := r.SprintRemoveItem(s.ID, "T-002")
+	if err != nil {
+		t.Fatalf("SprintRemoveItem: %v", err)
+	}
+	sp, _ := r.SprintByID(s.ID)
+	if len(sp.Items) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(sp.Items))
+	}
+
+	// Item not in sprint
+	err = r.SprintRemoveItem(s.ID, "T-999")
+	if err == nil {
+		t.Error("expected error for item not in sprint")
+	}
+
+	// Bad sprint
+	err = r.SprintRemoveItem("nonexistent", "T-001")
+	if err == nil {
+		t.Error("expected error for nonexistent sprint")
+	}
+}
+
+func TestSprintsForEpic(t *testing.T) {
+	r := &Registry{}
+	e1 := r.AddEpic("Epic 1")
+	e2 := r.AddEpic("Epic 2")
+
+	r.AddSprint(e1.ID, "Sprint A")
+	r.AddSprint(e1.ID, "Sprint B")
+	r.AddSprint(e2.ID, "Sprint C")
+
+	sprints := r.SprintsForEpic(e1.ID)
+	if len(sprints) != 2 {
+		t.Fatalf("expected 2 sprints for epic 1, got %d", len(sprints))
+	}
+	// Should be ordered by sequence
+	if sprints[0].Sequence > sprints[1].Sequence {
+		t.Error("sprints not ordered by sequence")
+	}
+
+	sprints = r.SprintsForEpic("nonexistent")
+	if len(sprints) != 0 {
+		t.Errorf("expected 0 sprints for nonexistent epic, got %d", len(sprints))
+	}
+}
+
+func TestSprintFieldsRoundtrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "epics.yaml")
+
+	r := &Registry{}
+	e := r.AddEpic("Epic")
+	s, _ := r.AddSprint(e.ID, "Sprint")
+	r.SprintAddItems(s.ID, []string{"T-001", "T-002"})
+
+	// Set plan approval
+	sp, _ := r.SprintByID(s.ID)
+	sp.PlanApproved = true
+	sp.PlanApprovedAt = "2026-03-28T10:00:00Z"
+	sp.PlanApprovedBy = "user"
+
+	if err := r.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	// Reload and verify
+	r2, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if len(r2.Sprints) != 1 {
+		t.Fatalf("expected 1 sprint, got %d", len(r2.Sprints))
+	}
+	sp2 := r2.Sprints[0]
+	if len(sp2.Items) != 2 {
+		t.Errorf("expected 2 items, got %d", len(sp2.Items))
+	}
+	if sp2.Items[0] != "T-001" || sp2.Items[1] != "T-002" {
+		t.Errorf("items = %v, want [T-001, T-002]", sp2.Items)
+	}
+	if !sp2.PlanApproved {
+		t.Error("expected plan_approved = true")
+	}
+	if sp2.PlanApprovedAt != "2026-03-28T10:00:00Z" {
+		t.Errorf("plan_approved_at = %q", sp2.PlanApprovedAt)
+	}
+	if sp2.PlanApprovedBy != "user" {
+		t.Errorf("plan_approved_by = %q", sp2.PlanApprovedBy)
+	}
+	if sp2.Sequence != 1 {
+		t.Errorf("sequence = %d, want 1", sp2.Sequence)
+	}
+}
+
+func TestEpicSprintOrderRoundtrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "epics.yaml")
+
+	r := &Registry{}
+	e := r.AddEpic("Epic")
+	s1, _ := r.AddSprint(e.ID, "Sprint 1")
+	s2, _ := r.AddSprint(e.ID, "Sprint 2")
+
+	if err := r.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	r2, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if len(r2.Epics[0].SprintOrder) != 2 {
+		t.Fatalf("expected 2 in sprint_order, got %d", len(r2.Epics[0].SprintOrder))
+	}
+	if r2.Epics[0].SprintOrder[0] != s1.ID || r2.Epics[0].SprintOrder[1] != s2.ID {
+		t.Errorf("sprint_order = %v", r2.Epics[0].SprintOrder)
+	}
+}
+
 func TestYamlQuote(t *testing.T) {
 	tests := []struct {
 		input string

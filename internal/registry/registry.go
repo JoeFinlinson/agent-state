@@ -5,6 +5,8 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,17 +15,23 @@ import (
 
 // Epic represents a long-lived work stream.
 type Epic struct {
-	ID     string
-	Title  string
-	Status string // active, completed
+	ID          string
+	Title       string
+	Status      string   // active, completed
+	SprintOrder []string // ordered sprint IDs
 }
 
 // Sprint represents a time-boxed iteration within an epic.
 type Sprint struct {
-	ID     string
-	Title  string
-	Epic   string // parent epic ID
-	Status string // active, completed
+	ID             string
+	Title          string
+	Epic           string // parent epic ID
+	Status         string // active, completed
+	Items          []string
+	PlanApproved   bool
+	PlanApprovedAt string
+	PlanApprovedBy string
+	Sequence       int
 }
 
 // Note represents a session-level narrative log entry.
@@ -60,6 +68,7 @@ func Load(path string) (*Registry, error) {
 
 	var section string // "epics", "sprints", "notes"
 	var current map[string]string
+	var currentLists map[string][]string
 
 	flush := func() {
 		if current == nil {
@@ -67,18 +76,30 @@ func Load(path string) (*Registry, error) {
 		}
 		switch section {
 		case "epics":
-			r.Epics = append(r.Epics, Epic{
+			e := Epic{
 				ID:     current["id"],
 				Title:  current["title"],
 				Status: current["status"],
-			})
+			}
+			if so, ok := currentLists["sprint_order"]; ok {
+				e.SprintOrder = so
+			}
+			r.Epics = append(r.Epics, e)
 		case "sprints":
-			r.Sprints = append(r.Sprints, Sprint{
-				ID:     current["id"],
-				Title:  current["title"],
-				Epic:   current["epic"],
-				Status: current["status"],
-			})
+			s := Sprint{
+				ID:             current["id"],
+				Title:          current["title"],
+				Epic:           current["epic"],
+				Status:         current["status"],
+				PlanApproved:   current["plan_approved"] == "true",
+				PlanApprovedAt: current["plan_approved_at"],
+				PlanApprovedBy: current["plan_approved_by"],
+				Sequence:       parseInt(current["sequence"]),
+			}
+			if items, ok := currentLists["items"]; ok {
+				s.Items = items
+			}
+			r.Sprints = append(r.Sprints, s)
 		case "notes":
 			r.Notes = append(r.Notes, Note{
 				ID:        current["id"],
@@ -89,6 +110,7 @@ func Load(path string) (*Registry, error) {
 			})
 		}
 		current = nil
+		currentLists = nil
 	}
 
 	for scanner.Scan() {
@@ -117,10 +139,30 @@ func Load(path string) (*Registry, error) {
 			continue
 		}
 
-		// Continuation of list item: "    key: value"
+		// Continuation of list item: "    key: value" or "    key: [a, b]"
 		if current != nil {
 			if k, v, ok := splitKV(trimmed); ok {
-				current[k] = v
+				// Check for inline list: [a, b, c]
+				if strings.HasPrefix(v, "[") && strings.HasSuffix(v, "]") {
+					inner := v[1 : len(v)-1]
+					if currentLists == nil {
+						currentLists = make(map[string][]string)
+					}
+					if strings.TrimSpace(inner) != "" {
+						parts := strings.Split(inner, ",")
+						var items []string
+						for _, p := range parts {
+							p = strings.TrimSpace(p)
+							p = strings.Trim(p, `"'`)
+							if p != "" {
+								items = append(items, p)
+							}
+						}
+						currentLists[k] = items
+					}
+				} else {
+					current[k] = v
+				}
 			}
 		}
 	}
@@ -142,6 +184,9 @@ func (r *Registry) Save(path string) error {
 			b.WriteString(fmt.Sprintf("  - id: %s\n", e.ID))
 			b.WriteString(fmt.Sprintf("    title: %s\n", yamlQuote(e.Title)))
 			b.WriteString(fmt.Sprintf("    status: %s\n", e.Status))
+			if len(e.SprintOrder) > 0 {
+				b.WriteString(fmt.Sprintf("    sprint_order: [%s]\n", strings.Join(e.SprintOrder, ", ")))
+			}
 		}
 	}
 
@@ -155,6 +200,21 @@ func (r *Registry) Save(path string) error {
 			b.WriteString(fmt.Sprintf("    title: %s\n", yamlQuote(s.Title)))
 			b.WriteString(fmt.Sprintf("    epic: %s\n", s.Epic))
 			b.WriteString(fmt.Sprintf("    status: %s\n", s.Status))
+			if len(s.Items) > 0 {
+				b.WriteString(fmt.Sprintf("    items: [%s]\n", strings.Join(s.Items, ", ")))
+			}
+			if s.PlanApproved {
+				b.WriteString("    plan_approved: true\n")
+				if s.PlanApprovedAt != "" {
+					b.WriteString(fmt.Sprintf("    plan_approved_at: %s\n", s.PlanApprovedAt))
+				}
+				if s.PlanApprovedBy != "" {
+					b.WriteString(fmt.Sprintf("    plan_approved_by: %s\n", s.PlanApprovedBy))
+				}
+			}
+			if s.Sequence > 0 {
+				b.WriteString(fmt.Sprintf("    sequence: %d\n", s.Sequence))
+			}
 		}
 	}
 
@@ -188,19 +248,109 @@ func (r *Registry) AddEpic(title string) Epic {
 }
 
 // AddSprint creates a new sprint under an epic.
+// It auto-assigns the next sequence number and appends to the epic's SprintOrder.
 func (r *Registry) AddSprint(epicID, title string) (Sprint, error) {
-	if _, ok := r.GetEpic(epicID); !ok {
+	epicIdx := -1
+	for i, e := range r.Epics {
+		if e.ID == epicID {
+			epicIdx = i
+			break
+		}
+	}
+	if epicIdx < 0 {
 		return Sprint{}, fmt.Errorf("epic not found: %s", epicID)
 	}
+
+	// Compute next sequence number from existing sprints in this epic
+	maxSeq := 0
+	for _, sp := range r.Sprints {
+		if sp.Epic == epicID && sp.Sequence > maxSeq {
+			maxSeq = sp.Sequence
+		}
+	}
+
 	existing := r.allIDs()
 	s := Sprint{
-		ID:     namegen.GenerateUnique(existing),
-		Title:  title,
-		Epic:   epicID,
-		Status: "active",
+		ID:       namegen.GenerateUnique(existing),
+		Title:    title,
+		Epic:     epicID,
+		Status:   "active",
+		Sequence: maxSeq + 1,
 	}
 	r.Sprints = append(r.Sprints, s)
+
+	// Append to epic's SprintOrder
+	r.Epics[epicIdx].SprintOrder = append(r.Epics[epicIdx].SprintOrder, s.ID)
+
 	return s, nil
+}
+
+// SprintByID returns a sprint by ID. Unlike GetSprint, this returns a pointer error style.
+func (r *Registry) SprintByID(sprintID string) (*Sprint, error) {
+	for i, s := range r.Sprints {
+		if s.ID == sprintID {
+			return &r.Sprints[i], nil
+		}
+	}
+	return nil, fmt.Errorf("sprint not found: %s", sprintID)
+}
+
+// SprintAddItems appends item IDs to a sprint, deduplicating.
+func (r *Registry) SprintAddItems(sprintID string, itemIDs []string) error {
+	sp, err := r.SprintByID(sprintID)
+	if err != nil {
+		return err
+	}
+
+	existing := make(map[string]bool)
+	for _, id := range sp.Items {
+		existing[id] = true
+	}
+
+	for _, id := range itemIDs {
+		if !existing[id] {
+			sp.Items = append(sp.Items, id)
+			existing[id] = true
+		}
+	}
+	return nil
+}
+
+// SprintRemoveItem removes an item ID from a sprint.
+func (r *Registry) SprintRemoveItem(sprintID, itemID string) error {
+	sp, err := r.SprintByID(sprintID)
+	if err != nil {
+		return err
+	}
+
+	found := false
+	var newItems []string
+	for _, id := range sp.Items {
+		if id == itemID {
+			found = true
+		} else {
+			newItems = append(newItems, id)
+		}
+	}
+	if !found {
+		return fmt.Errorf("item %s not in sprint %s", itemID, sprintID)
+	}
+	sp.Items = newItems
+	return nil
+}
+
+// SprintsForEpic returns sprints for an epic, ordered by Sequence.
+func (r *Registry) SprintsForEpic(epicID string) []Sprint {
+	var result []Sprint
+	for _, s := range r.Sprints {
+		if s.Epic == epicID {
+			result = append(result, s)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Sequence < result[j].Sequence
+	})
+	return result
 }
 
 // AddNote creates a new note with a generated ID.
@@ -318,6 +468,14 @@ func yamlQuote(s string) string {
 		return fmt.Sprintf("%q", s)
 	}
 	return s
+}
+
+func parseInt(s string) int {
+	if s == "" {
+		return 0
+	}
+	n, _ := strconv.Atoi(s)
+	return n
 }
 
 func parseTime(s string) time.Time {

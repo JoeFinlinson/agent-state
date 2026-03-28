@@ -467,7 +467,39 @@ context for LLM agents. Works standalone or with CI/hooks.`,
 		},
 	}
 	sprintListCmd.Flags().String("epic", "", "filter by epic ID")
-	sprintCmd.AddCommand(sprintCreateCmd, sprintListCmd)
+	sprintAddCmd := &cobra.Command{
+		Use:   "add <sprint-id> <item-ids...>",
+		Short: "Add items to a sprint",
+		Args:  cobra.MinimumNArgs(2),
+		Run: func(cmd *cobra.Command, args []string) {
+			exitCode = command.SprintAdd(appStore, appCfg, args[0], args[1:])
+		},
+	}
+	sprintRmCmd := &cobra.Command{
+		Use:   "rm <sprint-id> <item-id>",
+		Short: "Remove an item from a sprint",
+		Args:  cobra.ExactArgs(2),
+		Run: func(cmd *cobra.Command, args []string) {
+			exitCode = command.SprintRm(appStore, appCfg, args[0], args[1])
+		},
+	}
+	sprintShowCmd := &cobra.Command{
+		Use:   "show <sprint-id>",
+		Short: "Show sprint details and item status",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			exitCode = command.SprintShow(appStore, appCfg, args[0])
+		},
+	}
+	sprintPlanCmd := &cobra.Command{
+		Use:   "plan <sprint-id>",
+		Short: "Analyze sprint dependency graph and parallel groups",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			exitCode = command.SprintPlan(appStore, appCfg, args[0])
+		},
+	}
+	sprintCmd.AddCommand(sprintCreateCmd, sprintListCmd, sprintAddCmd, sprintRmCmd, sprintShowCmd, sprintPlanCmd)
 	root.AddCommand(sprintCmd)
 
 	uatCmd := &cobra.Command{

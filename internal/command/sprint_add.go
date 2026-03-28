@@ -1,0 +1,73 @@
+package command
+
+import (
+	"fmt"
+	"os"
+
+	"github.com/jfinlinson/agent-state/internal/config"
+	"github.com/jfinlinson/agent-state/internal/registry"
+	"github.com/jfinlinson/agent-state/internal/store"
+)
+
+// SprintAdd adds items to a sprint and updates each item's sprint field.
+func SprintAdd(s *store.Store, cfg *config.Config, sprintID string, itemIDs []string) int {
+	if len(itemIDs) == 0 {
+		fmt.Fprintln(os.Stderr, "no item IDs provided")
+		return 2
+	}
+
+	r, err := registry.Load(cfg.EpicsPath())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "loading registry: %v\n", err)
+		return 1
+	}
+
+	// Validate sprint exists
+	sp, err := r.SprintByID(sprintID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		return 1
+	}
+
+	// Validate all item IDs exist
+	for _, id := range itemIDs {
+		if _, ok := s.Get(id); !ok {
+			fmt.Fprintf(os.Stderr, "item not found: %s\n", id)
+			return 1
+		}
+	}
+
+	// Add items to sprint (deduplicates)
+	if err := r.SprintAddItems(sprintID, itemIDs); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		return 1
+	}
+
+	// Update each item's sprint field
+	for _, id := range itemIDs {
+		item, _ := s.Get(id)
+		if item.Sprint == sprintID {
+			continue // already set
+		}
+		item.Doc.SetField("sprint", sprintID)
+		item.Sprint = sprintID
+		// Also set epic if not already set
+		if item.Epic == "" && sp.Epic != "" {
+			item.Doc.SetField("epic", sp.Epic)
+			item.Epic = sp.Epic
+		}
+		if err := s.Write(item); err != nil {
+			fmt.Fprintf(os.Stderr, "writing %s: %v\n", id, err)
+			return 1
+		}
+	}
+
+	// Save registry
+	if err := r.Save(cfg.EpicsPath()); err != nil {
+		fmt.Fprintf(os.Stderr, "saving registry: %v\n", err)
+		return 1
+	}
+
+	fmt.Printf("Added %d item(s) to sprint %s\n", len(itemIDs), sprintID)
+	return 0
+}
