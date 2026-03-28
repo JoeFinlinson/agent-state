@@ -126,14 +126,25 @@ func Prime(s *store.Store, cfg *config.Config, opts PrimeOpts) int {
 		b.WriteString("\n")
 	}
 
-	// Next action directive — prefer queue item if active, else first active
+	// Next action directive — stack beats queue beats other active
 	activeID := ""
-	for _, e := range queueEntries {
-		if item, ok := s.Get(e.ID); ok && item.Status == "active" {
-			activeID = e.ID
-			break
+	// 1. Top of stack (interrupted work takes priority)
+	if len(stackEntries) > 0 {
+		top := stackEntries[len(stackEntries)-1]
+		if item, ok := s.Get(top.ID); ok && !cfg.IsTerminalStatus(item.Type, item.Status) {
+			activeID = top.ID
 		}
 	}
+	// 2. Queue item if no stack
+	if activeID == "" {
+		for _, e := range queueEntries {
+			if item, ok := s.Get(e.ID); ok && item.Status == "active" {
+				activeID = e.ID
+				break
+			}
+		}
+	}
+	// 3. Any active item as fallback
 	if activeID == "" && len(data.Active) > 0 {
 		activeID = data.Active[0].ID
 	}
