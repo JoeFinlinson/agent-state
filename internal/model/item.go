@@ -29,6 +29,8 @@ type Item struct {
 	LastTouchedBy  string // agent ID
 	Epic           string // epic ID (adjective-verb-noun)
 	Sprint         string // sprint ID (adjective-verb-noun)
+	ClaimedBy      string // session UUID that has claimed this item
+	ClaimedAt      string // RFC3339 timestamp of when claimed
 
 	// List fields
 	Tags               []string

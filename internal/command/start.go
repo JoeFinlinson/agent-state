@@ -11,6 +11,7 @@ import (
 	"github.com/jfinlinson/agent-state/internal/changelog"
 	"github.com/jfinlinson/agent-state/internal/config"
 	"github.com/jfinlinson/agent-state/internal/deps"
+	"github.com/jfinlinson/agent-state/internal/session"
 	"github.com/jfinlinson/agent-state/internal/store"
 )
 
@@ -53,6 +54,22 @@ func Start(s *store.Store, cfg *config.Config, id string, opts StartOpts) int {
 		return 1
 	}
 
+	// Check: not already claimed by another live session
+	sessionID := cfg.SessionID()
+	if item.ClaimedBy != "" && item.ClaimedBy != sessionID {
+		// Check if the claiming session is stale
+		mgr := session.NewManager(cfg.SessionsDir(), time.Duration(cfg.StaleClaimTTL())*time.Second)
+		claimingSession, _ := mgr.Load(item.ClaimedBy)
+		if claimingSession != nil && !mgr.IsStale(claimingSession) {
+			fmt.Fprintf(os.Stderr, "%s is claimed by session %s (since %s)\n", id, item.ClaimedBy, item.ClaimedAt)
+			fmt.Fprintln(os.Stderr, "use `st release` to clear the claim, or wait for the session to expire")
+			return 1
+		}
+		// Stale or dead session — clear the old claim
+		fmt.Printf("  Releasing stale claim from session %s\n", item.ClaimedBy)
+		_ = mgr.RemoveClaim(item.ClaimedBy, id)
+	}
+
 	// Create worktrees if configured
 	if cfg.Worktree != nil && cfg.Worktree.Enabled {
 		if opts.Slug == "" {
@@ -77,9 +94,24 @@ func Start(s *store.Store, cfg *config.Config, id string, opts StartOpts) int {
 		item.AssignedTo = agentID
 	}
 
-	// Record session ID if present
-	sessionID := os.Getenv("AS_SESSION_ID")
+	// Set session claim
 	if sessionID != "" {
+		now := time.Now().Format(time.RFC3339)
+		item.ClaimedBy = sessionID
+		item.ClaimedAt = now
+		item.Doc.SetField("claimed_by", sessionID)
+		item.Doc.SetField("claimed_at", now)
+
+		// Record session claim in session file
+		mgr := session.NewManager(cfg.SessionsDir(), time.Duration(cfg.StaleClaimTTL())*time.Second)
+		if _, err := mgr.EnsureSession(sessionID, agentID); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not create session: %v\n", err)
+		}
+		if err := mgr.AddClaim(sessionID, id); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not record claim: %v\n", err)
+		}
+
+		// Add to sessions list
 		item.Sessions = append(item.Sessions, sessionID)
 		updateListInDoc(item, "sessions", item.Sessions)
 	}

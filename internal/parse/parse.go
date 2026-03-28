@@ -353,6 +353,10 @@ func storeScalar(item *model.Item, key, val string) {
 		item.Epic = val
 	case "sprint":
 		item.Sprint = val
+	case "claimed_by":
+		item.ClaimedBy = val
+	case "claimed_at":
+		item.ClaimedAt = val
 	case "parallel_group":
 		// Legacy field — store but don't surface
 	}

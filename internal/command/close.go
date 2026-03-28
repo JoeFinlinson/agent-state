@@ -7,6 +7,7 @@ import (
 
 	"github.com/jfinlinson/agent-state/internal/changelog"
 	"github.com/jfinlinson/agent-state/internal/config"
+	"github.com/jfinlinson/agent-state/internal/session"
 	"github.com/jfinlinson/agent-state/internal/store"
 	"github.com/jfinlinson/agent-state/internal/validate"
 )
@@ -89,6 +90,16 @@ func Close(s *store.Store, cfg *config.Config, id, resolution string, opts Close
 
 	if opts.Reason != "" {
 		item.Doc.SetField("resolution", opts.Reason)
+	}
+
+	// Clear session claim
+	if item.ClaimedBy != "" {
+		mgr := session.NewManager(cfg.SessionsDir(), time.Duration(cfg.StaleClaimTTL())*time.Second)
+		_ = mgr.RemoveClaim(item.ClaimedBy, id)
+		item.ClaimedBy = ""
+		item.ClaimedAt = ""
+		item.Doc.SetField("claimed_by", "")
+		item.Doc.SetField("claimed_at", "")
 	}
 
 	if err := s.Write(item); err != nil {

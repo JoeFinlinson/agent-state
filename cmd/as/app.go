@@ -6,9 +6,11 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jfinlinson/agent-state/internal/command"
 	"github.com/jfinlinson/agent-state/internal/config"
+	"github.com/jfinlinson/agent-state/internal/session"
 	"github.com/jfinlinson/agent-state/internal/store"
 	"github.com/spf13/cobra"
 )
@@ -53,6 +55,19 @@ context for LLM agents. Works standalone or with CI/hooks.`,
 			appStore, err = store.New(appCfg)
 			if err != nil {
 				return fmt.Errorf("loading items: %w", err)
+			}
+			return nil
+		},
+		PersistentPostRunE: func(cmd *cobra.Command, args []string) error {
+			// Heartbeat: update session.last_active on every command
+			if appCfg != nil {
+				if sid := appCfg.SessionID(); sid != "" {
+					mgr := session.NewManager(
+						appCfg.SessionsDir(),
+						time.Duration(appCfg.StaleClaimTTL())*time.Second,
+					)
+					_ = mgr.Touch(sid) // best-effort, don't fail the command
+				}
 			}
 			return nil
 		},
@@ -499,7 +514,15 @@ context for LLM agents. Works standalone or with CI/hooks.`,
 			exitCode = command.SprintPlan(appStore, appCfg, args[0])
 		},
 	}
-	sprintCmd.AddCommand(sprintCreateCmd, sprintListCmd, sprintAddCmd, sprintRmCmd, sprintShowCmd, sprintPlanCmd)
+	sprintRecoverCmd := &cobra.Command{
+		Use:   "recover <sprint-id>",
+		Short: "Release stale claims in a sprint",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			exitCode = command.SprintRecover(appStore, appCfg, args[0])
+		},
+	}
+	sprintCmd.AddCommand(sprintCreateCmd, sprintListCmd, sprintAddCmd, sprintRmCmd, sprintShowCmd, sprintPlanCmd, sprintRecoverCmd)
 	root.AddCommand(sprintCmd)
 
 	uatCmd := &cobra.Command{

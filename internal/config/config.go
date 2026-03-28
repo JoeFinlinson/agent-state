@@ -51,6 +51,9 @@ type Config struct {
 	// Multi-agent support (optional)
 	Agents *AgentsConfig
 
+	// Sprint configuration (optional)
+	Sprints *SprintsConfig
+
 	// Pipeline steps (optional)
 	Pipeline *PipelineConfig
 
@@ -183,6 +186,10 @@ type AgentsConfig struct {
 	// Agent identity comes from $AS_AGENT_ID env var
 }
 
+type SprintsConfig struct {
+	StaleClaimTTL int // seconds before a claim is stale (default 7200)
+}
+
 // Root returns the root directory for this config.
 func (c *Config) Root() string {
 	return c.root
@@ -256,6 +263,20 @@ func (c *Config) EvidenceDir() string {
 // SessionID returns the current Claude Code session ID from $AS_SESSION_ID.
 func (c *Config) SessionID() string {
 	return os.Getenv("AS_SESSION_ID")
+}
+
+// SessionsDir returns the path to the sessions metadata directory.
+func (c *Config) SessionsDir() string {
+	return filepath.Join(c.root, ".as", "sessions")
+}
+
+// StaleClaimTTL returns the stale claim threshold in seconds.
+// Defaults to 7200 (2 hours) if not configured.
+func (c *Config) StaleClaimTTL() int {
+	if c.Sprints != nil && c.Sprints.StaleClaimTTL > 0 {
+		return c.Sprints.StaleClaimTTL
+	}
+	return 7200
 }
 
 // ValidStatuses returns the allowed statuses for a given item type.
@@ -689,6 +710,17 @@ func applyValue(cfg *Config, levels [4]string, key, val string) {
 			cfg.Worktree.BaseDir = val
 		case "parent_dir":
 			cfg.Worktree.ParentDir = val
+		}
+
+	case "sprints":
+		if cfg.Sprints == nil {
+			cfg.Sprints = &SprintsConfig{}
+		}
+		switch key {
+		case "stale_claim_ttl":
+			if v, err := strconv.Atoi(val); err == nil {
+				cfg.Sprints.StaleClaimTTL = v
+			}
 		}
 	}
 }
