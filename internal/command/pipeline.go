@@ -168,6 +168,17 @@ func runPipelineStep(s *store.Store, cfg *config.Config, id, stepName, nextStage
 		return 1
 	}
 
+	// For merge: gh pr merge exits 1 in worktrees because post-merge
+	// "git checkout main" fails (main is checked out elsewhere).
+	// Check if the merge actually succeeded despite the exit code.
+	if exitCode != 0 && stepName == "merge" {
+		outStr := string(output)
+		if strings.Contains(outStr, "already merged") || strings.Contains(outStr, "Merged") {
+			fmt.Println("  merge succeeded (post-merge checkout failed in worktree — expected)")
+			exitCode = 0
+		}
+	}
+
 	now := time.Now()
 
 	// Upload evidence
