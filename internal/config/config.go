@@ -263,18 +263,33 @@ func (c *Config) EvidenceDir() string {
 }
 
 // SessionID returns the current Claude Code session ID.
-// Checks in order: $AS_SESSION_ID env var, then .as/session file.
+// Checks in order: $AS_SESSION_ID env var, then .as/session file in CWD or project root.
 func (c *Config) SessionID() string {
 	if id := os.Getenv("AS_SESSION_ID"); id != "" {
 		return id
 	}
 	// Fallback: read from session file (written by startup hook)
-	path := filepath.Join(c.root, ".as", "session")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return ""
+	// Check project root first (st workspace), then CWD's .as/ (agent project dir)
+	for _, dir := range []string{c.root, "."} {
+		path := filepath.Join(dir, ".as", "session")
+		data, err := os.ReadFile(path)
+		if err == nil {
+			if id := strings.TrimSpace(string(data)); id != "" {
+				return id
+			}
+		}
 	}
-	return strings.TrimSpace(string(data))
+	// Also check $CLAUDE_PROJECT_DIR/.as/session (agent's project directory)
+	if projDir := os.Getenv("CLAUDE_PROJECT_DIR"); projDir != "" {
+		path := filepath.Join(projDir, ".as", "session")
+		data, err := os.ReadFile(path)
+		if err == nil {
+			if id := strings.TrimSpace(string(data)); id != "" {
+				return id
+			}
+		}
+	}
+	return ""
 }
 
 // SessionsDir returns the path to the sessions metadata directory.
