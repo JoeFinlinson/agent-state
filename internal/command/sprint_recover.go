@@ -72,5 +72,12 @@ func SprintRecover(s *store.Store, cfg *config.Config, sprintID string) int {
 	} else {
 		fmt.Printf("Released %d stale claim(s)\n", released)
 	}
+
+	// Prune dead sessions (stale + no remaining claims)
+	pruned, err := mgr.PruneStaleSessions()
+	if err == nil && pruned > 0 {
+		fmt.Printf("Pruned %d dead session(s)\n", pruned)
+	}
+
 	return 0
 }

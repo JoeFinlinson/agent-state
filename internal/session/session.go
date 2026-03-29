@@ -258,6 +258,36 @@ func (m *Manager) StaleSessions() ([]*Session, error) {
 	return stale, nil
 }
 
+// PruneStaleSessions removes session files that are stale (last_active older than TTL)
+// and have no claimed items. Returns the number of sessions pruned.
+func (m *Manager) PruneStaleSessions() (int, error) {
+	all, err := m.ListSessions()
+	if err != nil {
+		return 0, err
+	}
+
+	pruned := 0
+	for _, s := range all {
+		if !m.IsStale(s) {
+			continue
+		}
+		if len(s.ClaimedItems) > 0 {
+			continue // still has claims — needs recovery first
+		}
+		path := m.path(s.ID)
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			continue
+		}
+		pruned++
+	}
+	return pruned, nil
+}
+
+// DeleteSession removes a session file.
+func (m *Manager) DeleteSession(sessionID string) error {
+	return os.Remove(m.path(sessionID))
+}
+
 func (m *Manager) path(sessionID string) string {
 	return filepath.Join(m.dir, sessionID+".yaml")
 }

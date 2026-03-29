@@ -353,6 +353,188 @@ func TestListSessions_SkipsNonYaml(t *testing.T) {
 	}
 }
 
+// --- PruneStaleSessions ---
+
+func TestPruneStaleSessions(t *testing.T) {
+	dir := tempDir(t)
+	mgr := NewManager(dir, 1*time.Hour)
+
+	// Create a fresh session
+	mgr.EnsureSession("fresh", "agent")
+
+	// Create a stale session with no claims
+	mgr.EnsureSession("stale-no-claims", "agent")
+	s, _ := mgr.Load("stale-no-claims")
+	s.LastActive = time.Now().Add(-3 * time.Hour)
+	mgr.Save(s)
+
+	// Create a stale session WITH claims (should not be pruned)
+	mgr.EnsureSession("stale-with-claims", "agent")
+	s2, _ := mgr.Load("stale-with-claims")
+	s2.LastActive = time.Now().Add(-3 * time.Hour)
+	s2.ClaimedItems = []string{"T-001"}
+	mgr.Save(s2)
+
+	pruned, err := mgr.PruneStaleSessions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pruned != 1 {
+		t.Errorf("pruned = %d, want 1", pruned)
+	}
+
+	// Verify stale-no-claims is gone
+	s3, _ := mgr.Load("stale-no-claims")
+	if s3 != nil {
+		t.Error("stale-no-claims should be deleted")
+	}
+
+	// Verify stale-with-claims still exists
+	s4, _ := mgr.Load("stale-with-claims")
+	if s4 == nil {
+		t.Error("stale-with-claims should still exist")
+	}
+
+	// Verify fresh session still exists
+	s5, _ := mgr.Load("fresh")
+	if s5 == nil {
+		t.Error("fresh session should still exist")
+	}
+}
+
+func TestPruneStaleSessionsEmpty(t *testing.T) {
+	dir := tempDir(t)
+	mgr := NewManager(dir, 1*time.Hour)
+
+	pruned, err := mgr.PruneStaleSessions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pruned != 0 {
+		t.Errorf("pruned = %d, want 0", pruned)
+	}
+}
+
+func TestPruneStaleSessionsAllFresh(t *testing.T) {
+	dir := tempDir(t)
+	mgr := NewManager(dir, 1*time.Hour)
+
+	mgr.EnsureSession("sess-1", "agent")
+	mgr.EnsureSession("sess-2", "agent")
+
+	pruned, err := mgr.PruneStaleSessions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pruned != 0 {
+		t.Errorf("pruned = %d, want 0", pruned)
+	}
+}
+
+func TestDeleteSession(t *testing.T) {
+	dir := tempDir(t)
+	mgr := NewManager(dir, 2*time.Hour)
+
+	mgr.EnsureSession("sess-to-delete", "agent")
+
+	// Verify exists
+	s, _ := mgr.Load("sess-to-delete")
+	if s == nil {
+		t.Fatal("session should exist before delete")
+	}
+
+	if err := mgr.DeleteSession("sess-to-delete"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify gone
+	s, _ = mgr.Load("sess-to-delete")
+	if s != nil {
+		t.Error("session should be deleted")
+	}
+}
+
+// --- Concurrent session scenarios ---
+
+func TestMultipleSessionsSameSprint(t *testing.T) {
+	dir := tempDir(t)
+	mgr := NewManager(dir, 2*time.Hour)
+
+	// Session 1 joins sprint
+	s1, _ := mgr.EnsureSession("sess-1", "agent-a")
+	s1.Sprint = "my-sprint"
+	mgr.Save(s1)
+
+	// Session 2 joins same sprint
+	s2, _ := mgr.EnsureSession("sess-2", "agent-b")
+	s2.Sprint = "my-sprint"
+	mgr.Save(s2)
+
+	// Both should have the sprint
+	loaded1, _ := mgr.Load("sess-1")
+	loaded2, _ := mgr.Load("sess-2")
+	if loaded1.Sprint != "my-sprint" {
+		t.Errorf("sess-1 sprint = %q", loaded1.Sprint)
+	}
+	if loaded2.Sprint != "my-sprint" {
+		t.Errorf("sess-2 sprint = %q", loaded2.Sprint)
+	}
+}
+
+func TestConcurrentClaimDifferentItems(t *testing.T) {
+	dir := tempDir(t)
+	mgr := NewManager(dir, 2*time.Hour)
+
+	mgr.EnsureSession("sess-1", "agent-a")
+	mgr.EnsureSession("sess-2", "agent-b")
+
+	// Session 1 claims T-001
+	mgr.AddClaim("sess-1", "T-001")
+	// Session 2 claims T-002
+	mgr.AddClaim("sess-2", "T-002")
+
+	s1, _ := mgr.Load("sess-1")
+	s2, _ := mgr.Load("sess-2")
+
+	if len(s1.ClaimedItems) != 1 || s1.ClaimedItems[0] != "T-001" {
+		t.Errorf("sess-1 claims = %v, want [T-001]", s1.ClaimedItems)
+	}
+	if len(s2.ClaimedItems) != 1 || s2.ClaimedItems[0] != "T-002" {
+		t.Errorf("sess-2 claims = %v, want [T-002]", s2.ClaimedItems)
+	}
+}
+
+func TestSessionDeathRecovery(t *testing.T) {
+	dir := tempDir(t)
+	mgr := NewManager(dir, 1*time.Hour)
+
+	// Create a dead session (stale + has claims)
+	mgr.EnsureSession("dead-session", "agent")
+	s, _ := mgr.Load("dead-session")
+	s.LastActive = time.Now().Add(-3 * time.Hour)
+	s.ClaimedItems = []string{"T-001", "T-002"}
+	mgr.Save(s)
+
+	// Verify it's stale
+	if !mgr.IsStale(s) {
+		t.Error("session should be stale")
+	}
+
+	// Remove claims (simulating recovery)
+	mgr.RemoveClaim("dead-session", "T-001")
+	mgr.RemoveClaim("dead-session", "T-002")
+
+	// Now prune should clean it up
+	s2, _ := mgr.Load("dead-session")
+	s2.LastActive = time.Now().Add(-3 * time.Hour) // re-age since RemoveClaim touches LastActive
+	mgr.Save(s2)
+
+	pruned, _ := mgr.PruneStaleSessions()
+	if pruned != 1 {
+		t.Errorf("pruned = %d, want 1", pruned)
+	}
+}
+
 func TestSaveEmptyClaimedItems(t *testing.T) {
 	dir := tempDir(t)
 	mgr := NewManager(dir, 2*time.Hour)

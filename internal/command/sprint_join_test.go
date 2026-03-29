@@ -625,3 +625,110 @@ func TestResolveSessionSprintWithSprint(t *testing.T) {
 		t.Errorf("expected %q, got %q", sprintID, result)
 	}
 }
+
+// --- Concurrent session tests ---
+
+func TestMultipleSessionsJoinSameSprint(t *testing.T) {
+	_, cfg, _, sprintID := setupSprintTestEnv(t)
+
+	// Session 1 joins
+	os.Setenv("AS_SESSION_ID", "session-alpha")
+	defer os.Unsetenv("AS_SESSION_ID")
+	cfg1, _ := config.Load(cfg.Root())
+
+	code := SprintJoin(cfg1, sprintID)
+	if code != 0 {
+		t.Fatalf("session-alpha join returned %d", code)
+	}
+
+	// Session 2 joins same sprint
+	os.Setenv("AS_SESSION_ID", "session-beta")
+	cfg2, _ := config.Load(cfg.Root())
+
+	code = SprintJoin(cfg2, sprintID)
+	if code != 0 {
+		t.Fatalf("session-beta join returned %d", code)
+	}
+
+	// Both should be joined
+	mgr := session.NewManager(cfg.SessionsDir(), 2*time.Hour)
+	s1, _ := mgr.Load("session-alpha")
+	s2, _ := mgr.Load("session-beta")
+
+	if s1.Sprint != sprintID {
+		t.Errorf("session-alpha sprint = %q", s1.Sprint)
+	}
+	if s2.Sprint != sprintID {
+		t.Errorf("session-beta sprint = %q", s2.Sprint)
+	}
+}
+
+func TestConcurrentClaimRejection(t *testing.T) {
+	s, cfg := setupTestEnv(t)
+
+	// Session 1 starts T-001
+	os.Setenv("AS_SESSION_ID", "claimer-1")
+	defer os.Unsetenv("AS_SESSION_ID")
+	cfg1, _ := config.Load(cfg.Root())
+	s1, _ := store.New(cfg1)
+
+	code := Start(s1, cfg1, "T-001", StartOpts{})
+	if code != 0 {
+		t.Fatalf("claimer-1 start returned %d", code)
+	}
+
+	// Session 2 tries to start T-001 — should be rejected
+	os.Setenv("AS_SESSION_ID", "claimer-2")
+	cfg2, _ := config.Load(cfg.Root())
+	s2, _ := store.New(cfg2)
+
+	code = Start(s2, cfg2, "T-001", StartOpts{})
+	if code != 1 {
+		t.Errorf("claimer-2 should be rejected, got code %d", code)
+	}
+
+	_ = s // suppress unused
+}
+
+// --- SprintRecover with session pruning ---
+
+func TestSprintRecoverPrunesSessions(t *testing.T) {
+	s, cfg, _, sprintID := setupSprintTestEnv(t)
+
+	// Add item to sprint
+	SprintAdd(s, cfg, sprintID, []string{"T-001"})
+
+	// Create a stale session with a claim
+	os.Setenv("AS_SESSION_ID", "stale-session")
+	defer os.Unsetenv("AS_SESSION_ID")
+	cfg1, _ := config.Load(cfg.Root())
+	s1, _ := store.New(cfg1)
+
+	mgr := session.NewManager(cfg1.SessionsDir(), time.Duration(cfg1.StaleClaimTTL())*time.Second)
+	sess, _ := mgr.EnsureSession("stale-session", "agent")
+	sess.LastActive = time.Now().Add(-3 * time.Hour)
+	sess.ClaimedItems = []string{"T-001"}
+	mgr.Save(sess)
+
+	// Also set claim on item
+	item, _ := s1.Get("T-001")
+	item.ClaimedBy = "stale-session"
+	item.ClaimedAt = time.Now().Add(-3 * time.Hour).Format(time.RFC3339)
+	item.Doc.SetField("claimed_by", "stale-session")
+	item.Doc.SetField("claimed_at", item.ClaimedAt)
+	s1.Write(item)
+
+	// Recover
+	s2, _ := store.New(cfg1)
+	code := SprintRecover(s2, cfg1, sprintID)
+	if code != 0 {
+		t.Fatalf("SprintRecover returned %d", code)
+	}
+
+	// Verify claim was released and session was pruned
+	s3, _ := store.New(cfg1)
+	item2, _ := s3.Get("T-001")
+	if item2.ClaimedBy != "" {
+		t.Errorf("T-001 still claimed: %q", item2.ClaimedBy)
+	}
+}
