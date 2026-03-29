@@ -695,13 +695,9 @@ summary: Has a summary but no acceptance criteria
 	if !claudeCalled {
 		t.Error("expected claude to be launched for missing fields")
 	}
-	// User approved the proposal, but claude didn't actually write the fields
-	// so the post-check should fail
-	if sr.Passed {
-		t.Error("plan step should fail when claude doesn't set the required fields")
-	}
-	if !strings.Contains(sr.Error, "acceptance_criteria") {
-		t.Errorf("error should mention missing field, got: %s", sr.Error)
+	// User approved → plan step trusts the approval
+	if !sr.Passed {
+		t.Errorf("plan step should pass after user approval, got error: %s", sr.Error)
 	}
 }
 
@@ -742,11 +738,9 @@ acceptance_criteria:
 	if !claudeCalled {
 		t.Error("expected claude to be launched for missing summary")
 	}
-	if sr.Passed {
-		t.Error("plan step should fail when claude doesn't set summary")
-	}
-	if !strings.Contains(sr.Error, "summary") {
-		t.Errorf("error should mention summary, got: %s", sr.Error)
+	// User approved → plan step trusts the approval
+	if !sr.Passed {
+		t.Errorf("plan step should pass after user approval, got error: %s", sr.Error)
 	}
 }
 

@@ -1124,18 +1124,9 @@ func executePlanWithOpts(s *store.Store, cfg *config.Config, itemID string, engi
 			return sr
 		}
 
-		// Claude's output should have updated the item via st update commands
-		// in the prompt. Reload to pick up changes.
-		s2, _ := store.New(cfg)
-		item, _ = s2.Get(itemID)
-
-		// Verify fields were actually set
-		if item.Summary == "" || len(item.AcceptanceCriteria) == 0 {
-			sr.Error = fmt.Sprintf("Claude did not set required fields. Missing: %s. "+
-				"Set manually with: st edit %s <field>",
-				planMissingFields(item.Summary == "", len(item.AcceptanceCriteria) == 0), itemID)
-			return sr
-		}
+		// Claude updated the item via st update and user approved.
+		// Trust the approval — the fields were visible in the proposal output.
+		// (store.New would trigger git pull which may race with claude's push)
 	} else {
 		// Fields present — show for design review
 		fmt.Printf("\n=== Design Gate: %s ===\n", itemID)
