@@ -2,9 +2,12 @@ package command
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -859,8 +862,10 @@ func executeMergePrecheck(cfg *config.Config, worktreeDir string) StepResult {
 		sr.Passed = true // no pre-checks configured
 		return sr
 	}
+	// CI watch can take a long time — use 15 minute timeout
+	ciTimeout := 15 * time.Minute
 	for _, check := range cfg.Pipeline.Merge.PreChecks {
-		output, exitCode, err := runCmdInDir(worktreeDir, check)
+		output, exitCode, err := runCmdGuarded(worktreeDir, check, ciTimeout)
 		if err != nil && exitCode == 0 {
 			sr.Error = fmt.Sprintf("pre-check exec error: %v", err)
 			return sr
@@ -955,7 +960,8 @@ func executeClose(s *store.Store, cfg *config.Config, itemID string, step config
 func executeCommand(cfg *config.Config, itemID, sprintID string, step config.RunStepDef, worktreeDir string) StepResult {
 	sr := StepResult{Step: step.Name(), Type: "command"}
 	cmd := expandTemplate(step.Command, itemID, sprintID, worktreeDir, cfg)
-	output, exitCode, err := runCmdInDir(worktreeDir, cmd)
+	timeout := time.Duration(step.Timeout) * time.Second
+	output, exitCode, err := runCmdGuarded(worktreeDir, cmd, timeout)
 	if err != nil && exitCode == 0 {
 		sr.Error = fmt.Sprintf("exec error: %v", err)
 		return sr
@@ -1450,19 +1456,130 @@ func generateSessionID() string {
 		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
+// defaultTimeout for claude steps (10 minutes). Commands get 5 minutes.
+const defaultClaudeTimeout = 10 * time.Minute
+const defaultCommandTimeout = 5 * time.Minute
+
 func defaultRunClaude(cwd string, args []string, env []string) ([]byte, int, error) {
-	cmd := exec.Command("claude", args...)
-	cmd.Dir = cwd
-	cmd.Env = append(os.Environ(), env...)
-	output, err := cmd.CombinedOutput()
-	exitCode := 0
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-			err = nil // not a real error, just non-zero exit
+	// Use stream-json for real-time visibility + structured result at the end
+	// Replace --output-format json with stream-json in args
+	for i, a := range args {
+		if a == "--output-format" && i+1 < len(args) && args[i+1] == "json" {
+			args[i+1] = "stream-json"
+			break
 		}
 	}
-	return output, exitCode, err
+
+	ctx, cancel := context.WithTimeout(context.Background(), defaultClaudeTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "claude", args...)
+	cmd.Dir = cwd
+	cmd.Env = append(os.Environ(), env...)
+
+	// Stream stderr to terminal for visibility
+	cmd.Stderr = os.Stderr
+
+	// Capture stdout (stream-json events) and echo assistant text to terminal
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, 0, fmt.Errorf("stdout pipe: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return nil, 0, fmt.Errorf("start: %w", err)
+	}
+
+	// Read stream-json events, echo text, capture final result
+	var lastResult []byte
+	scanner := bufio.NewScanner(stdoutPipe)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB buffer for large events
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+
+		// Try to parse as JSON event
+		var event map[string]interface{}
+		if json.Unmarshal(line, &event) != nil {
+			continue
+		}
+
+		eventType, _ := event["type"].(string)
+		switch eventType {
+		case "assistant":
+			// Echo assistant text to terminal
+			if msg, ok := event["message"].(map[string]interface{}); ok {
+				if content, ok := msg["content"].([]interface{}); ok {
+					for _, c := range content {
+						if block, ok := c.(map[string]interface{}); ok {
+							if text, ok := block["text"].(string); ok && text != "" {
+								fmt.Fprint(os.Stderr, text)
+							}
+						}
+					}
+				}
+			}
+		case "result":
+			// Capture the final result event
+			lastResult = make([]byte, len(line))
+			copy(lastResult, line)
+		}
+	}
+
+	err = cmd.Wait()
+	exitCode := 0
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return lastResult, 1, fmt.Errorf("timeout after %s", defaultClaudeTimeout)
+		}
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+			err = nil
+		}
+	}
+
+	// If we got a result event, return that; otherwise return whatever we captured
+	if len(lastResult) > 0 {
+		return lastResult, exitCode, err
+	}
+	return nil, exitCode, err
+}
+
+// runCmdGuarded runs a shell command with a timeout and streams output to terminal.
+func runCmdGuarded(dir, command string, timeout time.Duration) ([]byte, int, error) {
+	if timeout <= 0 {
+		timeout = defaultCommandTimeout
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+
+	// Stream stderr to terminal for visibility
+	cmd.Stderr = os.Stderr
+
+	// Capture stdout while also streaming to terminal
+	var stdout bytes.Buffer
+	cmd.Stdout = io.MultiWriter(&stdout, os.Stderr) // show progress on stderr
+
+	err := cmd.Run()
+	exitCode := 0
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return stdout.Bytes(), 1, fmt.Errorf("timeout after %s", timeout)
+		}
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+			err = nil
+		}
+	}
+	return stdout.Bytes(), exitCode, err
 }
 
 func defaultPromptUser(_ string) (string, error) {
