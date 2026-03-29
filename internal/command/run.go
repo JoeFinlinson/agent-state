@@ -1485,9 +1485,11 @@ func releaseItem(cfg *config.Config, itemID string) {
 	localStore.Write(item)
 }
 
-// recoverStaleItems finds items in the sprint that are active but have no
-// live session, and resets them for retry. Called at the start of st run.
+// recoverStaleItems finds items in the sprint that are active but not
+// claimed by the current session, and resets them for retry.
+// Called at the start of st run.
 func recoverStaleItems(s *store.Store, cfg *config.Config, sprintItems []string) {
+	currentSession := cfg.SessionID()
 	for _, itemID := range sprintItems {
 		item, ok := s.Get(itemID)
 		if !ok {
@@ -1497,21 +1499,25 @@ func recoverStaleItems(s *store.Store, cfg *config.Config, sprintItems []string)
 		if !ok {
 			continue
 		}
-		// Item is active but unclaimed (or stale claim) — left from a previous failed run
-		if item.Status == tc.ActiveStatus && !cfg.IsTerminalStatus(item.Type, item.Status) {
-			isStale := true
-			if item.ClaimedBy != "" {
-				mgr := session.NewManager(cfg.SessionsDir(), time.Duration(cfg.StaleClaimTTL())*time.Second)
-				sess, _ := mgr.Load(item.ClaimedBy)
-				if sess != nil && !mgr.IsStale(sess) {
-					isStale = false // actively claimed by a live session
-				}
-			}
-			if isStale {
-				fmt.Printf("[%s] Recovering stale item (was active, no live session)\n", itemID)
-				releaseItem(cfg, itemID)
-			}
+		if item.Status != tc.ActiveStatus {
+			continue
 		}
+		if cfg.IsTerminalStatus(item.Type, item.Status) {
+			continue
+		}
+
+		// If claimed by current session, leave it (we're resuming our own work)
+		if item.ClaimedBy == currentSession && currentSession != "" {
+			continue
+		}
+
+		// Active item not claimed by us — recover it
+		reason := "unclaimed"
+		if item.ClaimedBy != "" {
+			reason = fmt.Sprintf("claimed by %s (not current session)", item.ClaimedBy[:8])
+		}
+		fmt.Printf("[%s] Recovering: %s\n", itemID, reason)
+		releaseItem(cfg, itemID)
 	}
 }
 
