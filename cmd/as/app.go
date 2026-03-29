@@ -50,7 +50,7 @@ context for LLM agents. Works standalone or with CI/hooks.`,
 				return fmt.Errorf("config: %w", err)
 			}
 			if !appCfg.Discovered {
-				return fmt.Errorf("no st project found (looked up from %s)\n\n  Run `st init` to create one, or set $ST_ROOT", dir)
+				return fmt.Errorf("no st project found (looked up from %s)\n\n  Run `st init` to create one, add a .st-root file, or set $ST_ROOT", dir)
 			}
 			appStore, err = store.New(appCfg)
 			if err != nil {

@@ -191,6 +191,75 @@ func TestLoadWithoutConfig(t *testing.T) {
 	}
 }
 
+func TestDiscoverViaStRoot(t *testing.T) {
+	// Create a parent dir with .st-root pointing to a subdirectory
+	parent := t.TempDir()
+	sub := filepath.Join(parent, "workspace")
+	os.MkdirAll(filepath.Join(sub, ".as"), 0755)
+	os.WriteFile(filepath.Join(sub, ".as", "config.yaml"), []byte("project:\n  name: redirected\n"), 0644)
+
+	// .st-root with relative path
+	os.WriteFile(filepath.Join(parent, ".st-root"), []byte("workspace\n"), 0644)
+
+	t.Setenv("ST_ROOT", "")
+	cfg, err := Load(parent)
+	if err != nil {
+		t.Fatalf("Load via .st-root: %v", err)
+	}
+	if !cfg.Discovered {
+		t.Fatal("expected Discovered=true via .st-root redirect")
+	}
+	if cfg.Project.Name != "redirected" {
+		t.Errorf("project.name = %q, want %q", cfg.Project.Name, "redirected")
+	}
+	if cfg.Root() != sub {
+		t.Errorf("Root() = %q, want %q", cfg.Root(), sub)
+	}
+}
+
+func TestDiscoverViaStRootAbsPath(t *testing.T) {
+	// .st-root with absolute path
+	parent := t.TempDir()
+	target := t.TempDir()
+	os.MkdirAll(filepath.Join(target, ".as"), 0755)
+	os.WriteFile(filepath.Join(target, ".as", "config.yaml"), []byte("project:\n  name: abs-redirect\n"), 0644)
+
+	os.WriteFile(filepath.Join(parent, ".st-root"), []byte(target+"\n"), 0644)
+
+	t.Setenv("ST_ROOT", "")
+	cfg, err := Load(parent)
+	if err != nil {
+		t.Fatalf("Load via .st-root (abs): %v", err)
+	}
+	if cfg.Project.Name != "abs-redirect" {
+		t.Errorf("project.name = %q, want %q", cfg.Project.Name, "abs-redirect")
+	}
+}
+
+func TestDiscoverViaStRootFromChild(t *testing.T) {
+	// .st-root at parent, discovery starts from a child directory
+	parent := t.TempDir()
+	child := filepath.Join(parent, "some", "nested", "dir")
+	os.MkdirAll(child, 0755)
+
+	sub := filepath.Join(parent, "workspace")
+	os.MkdirAll(filepath.Join(sub, ".as"), 0755)
+	os.WriteFile(filepath.Join(sub, ".as", "config.yaml"), []byte("project:\n  name: from-child\n"), 0644)
+	os.WriteFile(filepath.Join(parent, ".st-root"), []byte("workspace\n"), 0644)
+
+	t.Setenv("ST_ROOT", "")
+	cfg, err := Load(child)
+	if err != nil {
+		t.Fatalf("Load from child via .st-root: %v", err)
+	}
+	if !cfg.Discovered {
+		t.Fatal("expected Discovered=true")
+	}
+	if cfg.Project.Name != "from-child" {
+		t.Errorf("project.name = %q, want %q", cfg.Project.Name, "from-child")
+	}
+}
+
 func TestAgentID(t *testing.T) {
 	cfg := Defaults()
 

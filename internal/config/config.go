@@ -2,7 +2,8 @@
 //
 // The tool works with sensible defaults out of the box. An optional
 // .as/config.yaml in the project root can override any default.
-// Config discovery: walk up from CWD looking for .as/config.yaml,
+// Config discovery: walk up from CWD looking for .as/config.yaml or
+// .st-root (a redirect file containing a path to the project root),
 // or use --config flag. If none found, use defaults.
 package config
 
@@ -448,12 +449,27 @@ func LoadFrom(configPath string) (*Config, error) {
 }
 
 // discover walks up from dir looking for .as/config.yaml.
+// If a .st-root file is found first, its content is used as a redirect path.
 func discover(dir string) (string, bool) {
 	dir, _ = filepath.Abs(dir)
 	for {
 		candidate := filepath.Join(dir, ".as", "config.yaml")
 		if _, err := os.Stat(candidate); err == nil {
 			return candidate, true
+		}
+		// Check for .st-root redirect file
+		rootFile := filepath.Join(dir, ".st-root")
+		if data, err := os.ReadFile(rootFile); err == nil {
+			target := strings.TrimSpace(string(data))
+			if target != "" {
+				if !filepath.IsAbs(target) {
+					target = filepath.Join(dir, target)
+				}
+				redirected := filepath.Join(target, ".as", "config.yaml")
+				if _, err := os.Stat(redirected); err == nil {
+					return redirected, true
+				}
+			}
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
