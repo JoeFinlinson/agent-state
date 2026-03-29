@@ -7,7 +7,6 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -862,10 +861,9 @@ func executeMergePrecheck(cfg *config.Config, worktreeDir string) StepResult {
 		sr.Passed = true // no pre-checks configured
 		return sr
 	}
-	// CI watch can take a long time — use 15 minute timeout
-	ciTimeout := 15 * time.Minute
+	// CI watch can have long gaps between output — use CI idle timeout
 	for _, check := range cfg.Pipeline.Merge.PreChecks {
-		output, exitCode, err := runCmdGuarded(worktreeDir, check, ciTimeout)
+		output, exitCode, err := runCmdGuarded(worktreeDir, check, defaultCIIdleTimeout)
 		if err != nil && exitCode == 0 {
 			sr.Error = fmt.Sprintf("pre-check exec error: %v", err)
 			return sr
@@ -1456,13 +1454,17 @@ func generateSessionID() string {
 		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
-// defaultTimeout for claude steps (10 minutes). Commands get 5 minutes.
-const defaultClaudeTimeout = 10 * time.Minute
-const defaultCommandTimeout = 5 * time.Minute
+// Idle timeouts — process is killed if no output for this long.
+// Active processes that keep producing output run indefinitely.
+const defaultClaudeIdleTimeout = 5 * time.Minute
+const defaultCommandIdleTimeout = 3 * time.Minute
+const defaultCIIdleTimeout = 10 * time.Minute
+
+// Hard safety cap — even active processes get killed after this.
+const maxWallTimeout = 2 * time.Hour
 
 func defaultRunClaude(cwd string, args []string, env []string) ([]byte, int, error) {
 	// Use stream-json for real-time visibility + structured result at the end
-	// Replace --output-format json with stream-json in args
 	for i, a := range args {
 		if a == "--output-format" && i+1 < len(args) && args[i+1] == "json" {
 			args[i+1] = "stream-json"
@@ -1470,17 +1472,14 @@ func defaultRunClaude(cwd string, args []string, env []string) ([]byte, int, err
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), defaultClaudeTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), maxWallTimeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Dir = cwd
 	cmd.Env = append(os.Environ(), env...)
-
-	// Stream stderr to terminal for visibility
 	cmd.Stderr = os.Stderr
 
-	// Capture stdout (stream-json events) and echo assistant text to terminal
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, 0, fmt.Errorf("stdout pipe: %w", err)
@@ -1490,17 +1489,25 @@ func defaultRunClaude(cwd string, args []string, env []string) ([]byte, int, err
 		return nil, 0, fmt.Errorf("start: %w", err)
 	}
 
+	// Activity watchdog — kills process if no output for idleTimeout
+	activity := &activityTracker{
+		lastSeen:    time.Now(),
+		idleTimeout: defaultClaudeIdleTimeout,
+		cancel:      cancel,
+	}
+	go activity.watch()
+
 	// Read stream-json events, echo text, capture final result
 	var lastResult []byte
 	scanner := bufio.NewScanner(stdoutPipe)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB buffer for large events
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
 			continue
 		}
+		activity.ping() // activity detected
 
-		// Try to parse as JSON event
 		var event map[string]interface{}
 		if json.Unmarshal(line, &event) != nil {
 			continue
@@ -1509,7 +1516,6 @@ func defaultRunClaude(cwd string, args []string, env []string) ([]byte, int, err
 		eventType, _ := event["type"].(string)
 		switch eventType {
 		case "assistant":
-			// Echo assistant text to terminal
 			if msg, ok := event["message"].(map[string]interface{}); ok {
 				if content, ok := msg["content"].([]interface{}); ok {
 					for _, c := range content {
@@ -1522,17 +1528,21 @@ func defaultRunClaude(cwd string, args []string, env []string) ([]byte, int, err
 				}
 			}
 		case "result":
-			// Capture the final result event
 			lastResult = make([]byte, len(line))
 			copy(lastResult, line)
 		}
 	}
+	activity.stop()
 
 	err = cmd.Wait()
 	exitCode := 0
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return lastResult, 1, fmt.Errorf("timeout after %s", defaultClaudeTimeout)
+			idle := time.Since(activity.lastSeen)
+			if idle >= activity.idleTimeout {
+				return lastResult, 1, fmt.Errorf("killed: no output for %s (idle timeout)", idle.Round(time.Second))
+			}
+			return lastResult, 1, fmt.Errorf("killed: wall time limit (%s)", maxWallTimeout)
 		}
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			exitCode = exitErr.ExitCode()
@@ -1540,20 +1550,62 @@ func defaultRunClaude(cwd string, args []string, env []string) ([]byte, int, err
 		}
 	}
 
-	// If we got a result event, return that; otherwise return whatever we captured
 	if len(lastResult) > 0 {
 		return lastResult, exitCode, err
 	}
 	return nil, exitCode, err
 }
 
-// runCmdGuarded runs a shell command with a timeout and streams output to terminal.
-func runCmdGuarded(dir, command string, timeout time.Duration) ([]byte, int, error) {
-	if timeout <= 0 {
-		timeout = defaultCommandTimeout
+// activityTracker monitors a subprocess for idle timeout.
+// It kills the process (via context cancel) if no ping() is received within idleTimeout.
+type activityTracker struct {
+	lastSeen    time.Time
+	idleTimeout time.Duration
+	cancel      context.CancelFunc
+	mu          sync.Mutex
+	stopped     bool
+}
+
+func (a *activityTracker) ping() {
+	a.mu.Lock()
+	a.lastSeen = time.Now()
+	a.mu.Unlock()
+}
+
+func (a *activityTracker) stop() {
+	a.mu.Lock()
+	a.stopped = true
+	a.mu.Unlock()
+}
+
+func (a *activityTracker) watch() {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		a.mu.Lock()
+		if a.stopped {
+			a.mu.Unlock()
+			return
+		}
+		idle := time.Since(a.lastSeen)
+		a.mu.Unlock()
+
+		if idle >= a.idleTimeout {
+			fmt.Fprintf(os.Stderr, "\n[st run] No activity for %s — killing process\n", idle.Round(time.Second))
+			a.cancel()
+			return
+		}
+	}
+}
+
+// runCmdGuarded runs a shell command with activity-based timeout and streams output.
+// idleTimeout: kill if no output for this long (0 = use default).
+func runCmdGuarded(dir, command string, idleTimeout time.Duration) ([]byte, int, error) {
+	if idleTimeout <= 0 {
+		idleTimeout = defaultCommandIdleTimeout
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), maxWallTimeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
@@ -1561,25 +1613,53 @@ func runCmdGuarded(dir, command string, timeout time.Duration) ([]byte, int, err
 		cmd.Dir = dir
 	}
 
-	// Stream stderr to terminal for visibility
+	// Pipe stdout+stderr, stream to terminal, track activity
+	stdoutPipe, _ := cmd.StdoutPipe()
 	cmd.Stderr = os.Stderr
 
-	// Capture stdout while also streaming to terminal
-	var stdout bytes.Buffer
-	cmd.Stdout = io.MultiWriter(&stdout, os.Stderr) // show progress on stderr
+	if err := cmd.Start(); err != nil {
+		return nil, 0, err
+	}
 
-	err := cmd.Run()
+	activity := &activityTracker{
+		lastSeen:    time.Now(),
+		idleTimeout: idleTimeout,
+		cancel:      cancel,
+	}
+	go activity.watch()
+
+	// Read stdout, echo to terminal, capture
+	var captured bytes.Buffer
+	buf := make([]byte, 4096)
+	for {
+		n, readErr := stdoutPipe.Read(buf)
+		if n > 0 {
+			activity.ping()
+			os.Stderr.Write(buf[:n]) // echo to terminal
+			captured.Write(buf[:n])
+		}
+		if readErr != nil {
+			break
+		}
+	}
+	activity.stop()
+
+	err := cmd.Wait()
 	exitCode := 0
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return stdout.Bytes(), 1, fmt.Errorf("timeout after %s", timeout)
+			idle := time.Since(activity.lastSeen)
+			if idle >= idleTimeout {
+				return captured.Bytes(), 1, fmt.Errorf("killed: no output for %s", idle.Round(time.Second))
+			}
+			return captured.Bytes(), 1, fmt.Errorf("killed: wall time limit")
 		}
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			exitCode = exitErr.ExitCode()
 			err = nil
 		}
 	}
-	return stdout.Bytes(), exitCode, err
+	return captured.Bytes(), exitCode, err
 }
 
 func defaultPromptUser(_ string) (string, error) {
