@@ -263,6 +263,14 @@ func reconcileArchive(s *store.Store, cfg *config.Config, opts ReconcileOpts) in
 		updates++
 		fmt.Printf("  %s: move to archive (%s)\n", item.ID, item.Status)
 		if !opts.DryRun {
+			// Backfill completed timestamp if missing
+			if item.Completed == nil {
+				nowStr := time.Now().Format(time.RFC3339)
+				item.Doc.SetField("completed", nowStr)
+				if err := s.Write(item); err != nil {
+					fmt.Fprintf(os.Stderr, "  error backfilling completed on %s: %v\n", item.ID, err)
+				}
+			}
 			if err := s.Move(item.ID); err != nil {
 				fmt.Fprintf(os.Stderr, "  error moving %s: %v\n", item.ID, err)
 			}
