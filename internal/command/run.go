@@ -1310,6 +1310,17 @@ func buildDefaultPrompt(s *store.Store, cfg *config.Config, itemID, sprintID str
 		b.WriteString("\n")
 	}
 
+	// Scope test suites (triggered by st pr based on file changes)
+	if cfg.Testing != nil && len(cfg.Testing.ScopeSuites) > 0 {
+		b.WriteString("## Scope Test Suites\n")
+		b.WriteString("After recording the PR with `st pr`, check which scope suites were triggered.\n")
+		b.WriteString("Run any that show as 'required' in testing_evidence:\n")
+		for name := range cfg.Testing.ScopeSuites {
+			b.WriteString(fmt.Sprintf("  st test %s %s --run  # if triggered\n", itemID, name))
+		}
+		b.WriteString("\n")
+	}
+
 	b.WriteString("## Delivery Instructions\n")
 	b.WriteString("1. Implement the changes\n")
 	b.WriteString("2. Run ALL required test suites (above) — they must pass BEFORE committing\n")
@@ -1317,7 +1328,8 @@ func buildDefaultPrompt(s *store.Store, cfg *config.Config, itemID, sprintID str
 	b.WriteString("4. Commit and push your branch\n")
 	b.WriteString("5. Create a pull request with `gh pr create`\n")
 	b.WriteString(fmt.Sprintf("6. Record the PR: `st pr %s --repo <repo-name> --pr <number>`\n", itemID))
-	b.WriteString("7. STOP here. Do NOT merge. Report your results.\n\n")
+	b.WriteString("7. Check if `st pr` triggered any scope suites — run them if so\n")
+	b.WriteString("8. STOP here. Do NOT merge. Report your results.\n\n")
 
 	b.WriteString("## State Tracking\n")
 	b.WriteString(fmt.Sprintf("- `st test %s <suite> --run` — execute and record test evidence\n", itemID))
