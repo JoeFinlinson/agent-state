@@ -1685,7 +1685,12 @@ func defaultRunClaude(cwd string, args []string, env []string) ([]byte, int, err
 	ctx, cancel := context.WithTimeout(parentCtx, maxWallTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "claude", args...)
+	// Resolve claude binary — may not be on subprocess PATH
+	claudeBin, err := exec.LookPath("claude")
+	if err != nil {
+		return nil, 127, fmt.Errorf("claude not found in PATH")
+	}
+	cmd := exec.CommandContext(ctx, claudeBin, args...)
 	cmd.Dir = cwd
 	cmd.Env = append(os.Environ(), env...)
 	cmd.Stderr = os.Stderr
