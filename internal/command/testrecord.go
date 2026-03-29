@@ -126,14 +126,16 @@ func testRunMode(s *store.Store, cfg *config.Config, id, suite, suiteCmd, sha st
 	fmt.Printf("Running %s: %s\n", suite, suiteCmd)
 	start := time.Now()
 
-	// Execute suite command (always from workspace root so relative paths work)
+	// Execute suite command — prefer worktree if one exists for this item
 	var output []byte
 	var exitCode int
 	var runErr error
 	if opts.RunCmd != nil {
 		output, exitCode, runErr = opts.RunCmd(suiteCmd)
 	} else {
-		output, exitCode, runErr = runCmdInDir(cfg.Root(), suiteCmd)
+		// Rewrite suite command to run from worktree if available
+		cmd := rewriteSuiteForWorktree(cfg, id, suiteCmd)
+		output, exitCode, runErr = runCmdInDir(cfg.Root(), cmd)
 	}
 	duration := time.Since(start)
 
@@ -509,6 +511,45 @@ func createTarGz(w io.Writer, files []string) error {
 		f.Close()
 	}
 	return nil
+}
+
+// rewriteSuiteForWorktree rewrites a suite command's `cd ../repo` to use the
+// item's worktree path instead of the main checkout.
+// e.g., "cd ../theraprac-api && make test-unit" → "cd worktrees/I-112/theraprac-api && make test-unit"
+func rewriteSuiteForWorktree(cfg *config.Config, itemID, suiteCmd string) string {
+	if cfg.Worktree == nil || !cfg.Worktree.Enabled || cfg.Worktree.BaseDir == "" {
+		return suiteCmd
+	}
+
+	wtBase := filepath.Join(cfg.Root(), cfg.Worktree.BaseDir, itemID)
+	if _, err := os.Stat(wtBase); err != nil {
+		return suiteCmd // no worktree for this item
+	}
+
+	// Replace "cd ../repo-name" with "cd <worktree-path>/repo-name"
+	for _, repo := range cfg.Worktree.Repos {
+		repoDir := repo
+		if cfg.Worktree.RepoMap != nil {
+			if mapped, ok := cfg.Worktree.RepoMap[repo]; ok {
+				repoDir = mapped
+			}
+		}
+		wtRepo := filepath.Join(wtBase, repoDir)
+		if _, err := os.Stat(wtRepo); err == nil {
+			// Replace various relative path patterns
+			for _, pattern := range []string{
+				"cd ../" + repoDir,
+				"cd ../" + repo,
+			} {
+				if strings.Contains(suiteCmd, pattern) {
+					suiteCmd = strings.Replace(suiteCmd, pattern, "cd "+wtRepo, 1)
+					return suiteCmd
+				}
+			}
+		}
+	}
+
+	return suiteCmd
 }
 
 func evidenceConfigFromCfg(cfg *config.Config) evidence.Config {

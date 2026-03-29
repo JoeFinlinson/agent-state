@@ -370,12 +370,77 @@ func Run(s *store.Store, cfg *config.Config, sprintID string, opts RunOpts, engi
 	// Completion report
 	printCompletionReport(allResults, sprintID, time.Since(start))
 
+	// Check if sprint is now complete — all items done
+	checkSprintCompletion(cfg, sprintID)
+
 	for _, r := range allResults {
 		if !r.Success {
 			return 1
 		}
 	}
 	return 0
+}
+
+// checkSprintCompletion checks if all items in the sprint are terminal,
+// and if so, archives the sprint. If all sprints in the epic are done,
+// archives the epic too.
+func checkSprintCompletion(cfg *config.Config, sprintID string) {
+	s, err := store.New(cfg)
+	if err != nil {
+		return
+	}
+	reg, err := registry.Load(cfg.EpicsPath())
+	if err != nil {
+		return
+	}
+
+	sp, err := reg.SprintByID(sprintID)
+	if err != nil {
+		return
+	}
+
+	// Check if all items are terminal
+	allDone := true
+	for _, itemID := range sp.Items {
+		item, ok := s.Get(itemID)
+		if !ok {
+			continue
+		}
+		if !cfg.IsTerminalStatus(item.Type, item.Status) {
+			allDone = false
+			break
+		}
+	}
+
+	if !allDone {
+		return
+	}
+
+	// Archive sprint
+	fmt.Printf("\n[sprint] All %d items complete — archiving sprint %s\n", len(sp.Items), sp.Title)
+	sp.Status = "archived"
+	reg.Save(cfg.EpicsPath())
+
+	// Check if all sprints in the epic are archived
+	epicID := sp.Epic
+	allSprintsDone := true
+	for _, es := range reg.Sprints {
+		if es.Epic == epicID && es.Status != "archived" {
+			allSprintsDone = false
+			break
+		}
+	}
+
+	if allSprintsDone && epicID != "" {
+		for i := range reg.Epics {
+			if reg.Epics[i].ID == epicID {
+				fmt.Printf("[epic] All sprints complete — archiving epic %s\n", reg.Epics[i].Title)
+				reg.Epics[i].Status = "archived"
+				reg.Save(cfg.EpicsPath())
+				break
+			}
+		}
+	}
 }
 
 // Advance finds the next unblocked item and runs its pipeline steps.
