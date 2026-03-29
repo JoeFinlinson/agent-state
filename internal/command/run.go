@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"github.com/jfinlinson/agent-state/internal/config"
 	"github.com/jfinlinson/agent-state/internal/model"
 	"github.com/jfinlinson/agent-state/internal/registry"
+	"github.com/jfinlinson/agent-state/internal/session"
 	"github.com/jfinlinson/agent-state/internal/store"
 )
 
@@ -318,14 +320,43 @@ func Run(s *store.Store, cfg *config.Config, sprintID string, opts RunOpts, engi
 		return printDryRun(s, cfg, sp, groups, pipeline, opts)
 	}
 
+	// Recover items left in broken state from previous failed runs
+	recoverStaleItems(s, cfg, sp.Items)
+	// Reload store after recovery
+	s, _ = store.New(cfg)
+
+	// Set up Ctrl+C handler to clean up active items
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt)
+	interrupted := false
+
 	// Execute groups sequentially, items within groups up to parallelism
 	start := time.Now()
 	var allResults []ItemResult
 
 	for i, group := range groups {
+		// Check for interrupt between groups
+		select {
+		case <-sigChan:
+			interrupted = true
+			fmt.Fprintf(os.Stderr, "\n[st run] Interrupted — cleaning up...\n")
+		default:
+		}
+		if interrupted {
+			break
+		}
+
 		fmt.Printf("\n=== Group %d/%d ===\n", i+1, len(groups))
 		results := runGroup(s, cfg, group, sprintID, pipeline, opts, engine)
 		allResults = append(allResults, results...)
+	}
+	signal.Stop(sigChan)
+
+	// Clean up any items that were started but didn't complete
+	for _, r := range allResults {
+		if !r.Success {
+			releaseItem(cfg, r.ItemID)
+		}
 	}
 
 	// Completion report
@@ -504,6 +535,7 @@ func runSingleItem(s *store.Store, cfg *config.Config, itemID, sprintID string, 
 		if !sr.Passed {
 			fmt.Printf("[%s] Step %s FAILED: %s\n", itemID, step.Name(), sr.Error)
 			result.Duration = time.Since(start)
+			releaseItem(cfg, itemID)
 			return result
 		}
 
@@ -1406,6 +1438,81 @@ func resolveWorktreeDir(cfg *config.Config, itemID string) string {
 	}
 
 	return wtBase
+}
+
+// releaseItem resets an item back to startable state after a pipeline failure.
+// Clears claim, resets status so the item can be retried.
+func releaseItem(cfg *config.Config, itemID string) {
+	localStore, err := store.New(cfg)
+	if err != nil {
+		return
+	}
+	item, ok := localStore.Get(itemID)
+	if !ok {
+		return
+	}
+
+	tc, ok := cfg.Types[item.Type]
+	if !ok {
+		return
+	}
+
+	// Only reset if item is in active status (we put it there via st start)
+	if item.Status != tc.ActiveStatus {
+		return
+	}
+
+	fmt.Printf("[%s] Releasing — resetting to %s for retry\n", itemID, tc.StartStatus)
+
+	item.Doc.SetField("status", tc.StartStatus)
+	item.Status = tc.StartStatus
+
+	// Clear claim
+	if item.ClaimedBy != "" {
+		mgr := session.NewManager(cfg.SessionsDir(), time.Duration(cfg.StaleClaimTTL())*time.Second)
+		_ = mgr.RemoveClaim(item.ClaimedBy, itemID)
+		item.ClaimedBy = ""
+		item.ClaimedAt = ""
+		item.Doc.SetField("claimed_by", "")
+		item.Doc.SetField("claimed_at", "")
+	}
+
+	// Clear plan_approved so the plan step runs again on retry
+	item.PlanApproved = false
+	item.Doc.SetField("plan_approved", "false")
+
+	item.Doc.SetField("last_touched", time.Now().Format(time.RFC3339))
+	localStore.Write(item)
+}
+
+// recoverStaleItems finds items in the sprint that are active but have no
+// live session, and resets them for retry. Called at the start of st run.
+func recoverStaleItems(s *store.Store, cfg *config.Config, sprintItems []string) {
+	for _, itemID := range sprintItems {
+		item, ok := s.Get(itemID)
+		if !ok {
+			continue
+		}
+		tc, ok := cfg.Types[item.Type]
+		if !ok {
+			continue
+		}
+		// Item is active but unclaimed (or stale claim) — left from a previous failed run
+		if item.Status == tc.ActiveStatus && !cfg.IsTerminalStatus(item.Type, item.Status) {
+			isStale := true
+			if item.ClaimedBy != "" {
+				mgr := session.NewManager(cfg.SessionsDir(), time.Duration(cfg.StaleClaimTTL())*time.Second)
+				sess, _ := mgr.Load(item.ClaimedBy)
+				if sess != nil && !mgr.IsStale(sess) {
+					isStale = false // actively claimed by a live session
+				}
+			}
+			if isStale {
+				fmt.Printf("[%s] Recovering stale item (was active, no live session)\n", itemID)
+				releaseItem(cfg, itemID)
+			}
+		}
+	}
 }
 
 func isEligible(s *store.Store, cfg *config.Config, itemID string) bool {
