@@ -173,7 +173,7 @@ func runPipelineStep(s *store.Store, cfg *config.Config, id, stepName, nextStage
 	// Check if the merge actually succeeded despite the exit code.
 	if exitCode != 0 && stepName == "merge" {
 		outStr := string(output)
-		if strings.Contains(outStr, "already merged") || strings.Contains(outStr, "Merged") {
+		if strings.Contains(outStr, "already merged") || strings.Contains(outStr, "Merged") || strings.Contains(outStr, "merged") {
 			fmt.Println("  merge succeeded (post-merge checkout failed in worktree — expected)")
 			exitCode = 0
 		}

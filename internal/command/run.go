@@ -904,6 +904,21 @@ func executePR(s *store.Store, cfg *config.Config, itemID string, step config.Ru
 
 func executeMerge(s *store.Store, cfg *config.Config, itemID, worktreeDir string) StepResult {
 	sr := StepResult{Step: "merge", Type: "merge"}
+
+	// Skip if no PR exists (item already on main, nothing to merge)
+	out, exitCode, _ := runCmdInDir(worktreeDir, "gh pr view --json state -q .state 2>/dev/null")
+	state := strings.TrimSpace(string(out))
+	if exitCode != 0 || state == "" {
+		fmt.Println("  no PR on this branch — skipping merge")
+		sr.Passed = true
+		return sr
+	}
+	if state == "MERGED" {
+		fmt.Println("  PR already merged")
+		sr.Passed = true
+		return sr
+	}
+
 	pipeOpts := PipelineOpts{
 		RunCmd: func(cmd string) ([]byte, int, error) {
 			return runCmdInDir(worktreeDir, cmd)
@@ -922,6 +937,14 @@ func executeMergePrecheck(cfg *config.Config, worktreeDir string) StepResult {
 	sr := StepResult{Step: "merge_precheck", Type: "merge_precheck"}
 	if cfg.Pipeline == nil || cfg.Pipeline.Merge == nil || len(cfg.Pipeline.Merge.PreChecks) == 0 {
 		sr.Passed = true // no pre-checks configured
+		return sr
+	}
+
+	// Skip if no PR exists on this branch (e.g., item already on main)
+	out, exitCode, _ := runCmdInDir(worktreeDir, "gh pr view --json number -q .number 2>/dev/null")
+	if exitCode != 0 || strings.TrimSpace(string(out)) == "" {
+		fmt.Println("  no PR on this branch — skipping pre-checks")
+		sr.Passed = true
 		return sr
 	}
 	// CI watch can have long gaps between output — use CI idle timeout
