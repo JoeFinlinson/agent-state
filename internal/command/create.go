@@ -9,6 +9,7 @@ import (
 	"github.com/jfinlinson/agent-state/internal/changelog"
 	"github.com/jfinlinson/agent-state/internal/config"
 	"github.com/jfinlinson/agent-state/internal/model"
+	"github.com/jfinlinson/agent-state/internal/registry"
 	"github.com/jfinlinson/agent-state/internal/store"
 )
 
@@ -18,6 +19,7 @@ type CreateOpts struct {
 	Severity string // issues only: critical, high, medium, low
 	Tag      string
 	Depends  string
+	Sprint   string // optional: assign to sprint on creation
 }
 
 func Create(s *store.Store, cfg *config.Config, itemType, title string, opts CreateOpts) int {
@@ -123,6 +125,28 @@ func Create(s *store.Store, cfg *config.Config, itemType, title string, opts Cre
 		return 1
 	}
 
+	// Assign to sprint if requested
+	if opts.Sprint != "" {
+		r, err := registry.Load(cfg.EpicsPath())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not load registry for sprint assignment: %v\n", err)
+		} else if err := r.SprintAddItems(opts.Sprint, []string{id}); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not add to sprint: %v\n", err)
+		} else {
+			sp, _ := r.SprintByID(opts.Sprint)
+			item.Sprint = opts.Sprint
+			item.Doc.SetField("sprint", opts.Sprint)
+			if sp != nil && sp.Epic != "" {
+				item.Epic = sp.Epic
+				item.Doc.SetField("epic", sp.Epic)
+			}
+			_ = s.Write(item)
+			if err := r.Save(cfg.EpicsPath()); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: could not save registry: %v\n", err)
+			}
+		}
+	}
+
 	// Record in changelog
 	changelog.Append(cfg, id, changelog.Entry{
 		Op: "create", Field: "status", NewValue: tc.StartStatus,
@@ -130,5 +154,8 @@ func Create(s *store.Store, cfg *config.Config, itemType, title string, opts Cre
 	})
 
 	fmt.Printf("Created %s — %s\n", id, title)
+	if opts.Sprint != "" {
+		fmt.Printf("  Sprint: %s\n", opts.Sprint)
+	}
 	return 0
 }

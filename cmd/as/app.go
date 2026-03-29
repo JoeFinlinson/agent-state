@@ -121,8 +121,9 @@ context for LLM agents. Works standalone or with CI/hooks.`,
 			severity, _ := cmd.Flags().GetString("severity")
 			tag, _ := cmd.Flags().GetString("tag")
 			depends, _ := cmd.Flags().GetString("depends")
+			sprint, _ := cmd.Flags().GetString("sprint")
 			exitCode = command.Create(appStore, appCfg, args[0], args[1], command.CreateOpts{
-				Priority: priority, Severity: severity, Tag: tag, Depends: depends,
+				Priority: priority, Severity: severity, Tag: tag, Depends: depends, Sprint: sprint,
 			})
 		},
 	}
@@ -130,6 +131,7 @@ context for LLM agents. Works standalone or with CI/hooks.`,
 	createCmd.Flags().String("severity", "", "issue severity (critical, high, medium, low)")
 	createCmd.Flags().String("tag", "", "initial tag")
 	createCmd.Flags().String("depends", "", "depends on item ID")
+	createCmd.Flags().String("sprint", "", "assign to sprint on creation")
 	root.AddCommand(createCmd)
 
 	updateCmd := &cobra.Command{
@@ -554,7 +556,34 @@ context for LLM agents. Works standalone or with CI/hooks.`,
 			exitCode = command.SprintDelete(appCfg, args[0])
 		},
 	}
-	sprintCmd.AddCommand(sprintCreateCmd, sprintListCmd, sprintAddCmd, sprintRmCmd, sprintShowCmd, sprintPlanCmd, sprintRecoverCmd, sprintArchiveCmd, sprintDeleteCmd)
+	sprintJoinCmd := &cobra.Command{
+		Use:   "join <sprint-id>",
+		Short: "Bind current session to a sprint",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			exitCode = command.SprintJoin(appCfg, args[0])
+		},
+	}
+	sprintLeaveCmd := &cobra.Command{
+		Use:   "leave",
+		Short: "Unbind current session from sprint and release claims",
+		Run: func(cmd *cobra.Command, args []string) {
+			exitCode = command.SprintLeave(appStore, appCfg)
+		},
+	}
+	sprintStatusCmd := &cobra.Command{
+		Use:   "status [sprint-id]",
+		Short: "Coordinator view — all active sprints or single sprint detail",
+		Args:  cobra.MaximumNArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			sprintID := ""
+			if len(args) > 0 {
+				sprintID = args[0]
+			}
+			exitCode = command.SprintStatus(appStore, appCfg, sprintID)
+		},
+	}
+	sprintCmd.AddCommand(sprintCreateCmd, sprintListCmd, sprintAddCmd, sprintRmCmd, sprintShowCmd, sprintPlanCmd, sprintRecoverCmd, sprintArchiveCmd, sprintDeleteCmd, sprintJoinCmd, sprintLeaveCmd, sprintStatusCmd)
 	root.AddCommand(sprintCmd)
 
 	uatCmd := &cobra.Command{
