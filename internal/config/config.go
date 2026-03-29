@@ -262,9 +262,19 @@ func (c *Config) EvidenceDir() string {
 	return filepath.Join(c.root, c.Paths.Root, ".evidence")
 }
 
-// SessionID returns the current Claude Code session ID from $AS_SESSION_ID.
+// SessionID returns the current Claude Code session ID.
+// Checks in order: $AS_SESSION_ID env var, then .as/session file.
 func (c *Config) SessionID() string {
-	return os.Getenv("AS_SESSION_ID")
+	if id := os.Getenv("AS_SESSION_ID"); id != "" {
+		return id
+	}
+	// Fallback: read from session file (written by startup hook)
+	path := filepath.Join(c.root, ".as", "session")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }
 
 // SessionsDir returns the path to the sessions metadata directory.
