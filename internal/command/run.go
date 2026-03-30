@@ -1946,11 +1946,16 @@ func allWorktreeDirsWithPR(cfg *config.Config, itemID string) []string {
 		if item, ok := s.Get(itemID); ok && item.Manifest != nil {
 			if prsRaw, ok := item.Manifest["prs"]; ok {
 				if prsStr, ok := prsRaw.(string); ok && prsStr != "" {
+					seen := make(map[string]bool)
 					var dirs []string
 					for _, pr := range strings.Split(prsStr, ",") {
 						pr = strings.TrimSpace(pr)
 						if idx := strings.Index(pr, "#"); idx > 0 {
 							repo := pr[:idx]
+							if seen[repo] {
+								continue // deduplicate same repo
+							}
+							seen[repo] = true
 							candidate := filepath.Join(wtBase, repo)
 							if _, err := os.Stat(candidate); err == nil {
 								dirs = append(dirs, candidate)
