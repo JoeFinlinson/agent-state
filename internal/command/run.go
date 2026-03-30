@@ -898,7 +898,7 @@ func executeStepWithSession(s *store.Store, cfg *config.Config, itemID, sprintID
 	case "smoke":
 		return executeSmoke(s, cfg, itemID, worktreeDir)
 	case "uat":
-		return executeUAT(s, cfg, itemID)
+		return executeUAT(s, cfg, itemID, worktreeDir)
 	case "gate":
 		return executeGate(itemID, engine)
 	case "close":
@@ -1010,7 +1010,8 @@ func executePR(s *store.Store, cfg *config.Config, itemID string, step config.Ru
 		return sr
 	}
 	// Detect PR number from current branch
-	out, exitCode, err := runCmdInDir(worktreeDir, "gh pr view --json number -q .number")
+	cmd := ghPRCmd(worktreeDir, "view --json number -q .number")
+	out, exitCode, err := runCmdInDir(worktreeDir, cmd)
 	if err != nil || exitCode != 0 || len(out) == 0 {
 		sr.Error = "could not detect PR number (is there an open PR on this branch?)"
 		return sr
@@ -1034,7 +1035,8 @@ func executeMerge(s *store.Store, cfg *config.Config, itemID, worktreeDir string
 	sr := StepResult{Step: "merge", Type: "merge"}
 
 	// Skip if no PR exists (item already on main, nothing to merge)
-	out, exitCode, _ := runCmdInDir(worktreeDir, "gh pr view --json state -q .state 2>/dev/null")
+	cmd := ghPRCmd(worktreeDir, "view --json state -q .state")
+	out, exitCode, _ := runCmdInDir(worktreeDir, cmd+" 2>/dev/null")
 	state := strings.TrimSpace(string(out))
 	if exitCode != 0 || state == "" {
 		fmt.Println("  no PR on this branch — skipping merge")
@@ -1047,8 +1049,21 @@ func executeMerge(s *store.Store, cfg *config.Config, itemID, worktreeDir string
 		return sr
 	}
 
+	mergeRepo := resolveGHRepo(worktreeDir)
+	mergeBranch := ""
+	if bOut, _, _ := runCmdInDir(worktreeDir, "git branch --show-current 2>/dev/null"); len(bOut) > 0 {
+		mergeBranch = strings.TrimSpace(string(bOut))
+	}
 	pipeOpts := PipelineOpts{
 		RunCmd: func(cmd string) ([]byte, int, error) {
+			// Inject --repo and branch for gh pr commands
+			if mergeRepo != "" && strings.Contains(cmd, "gh pr") && !strings.Contains(cmd, "--repo") {
+				suffix := " --repo " + mergeRepo
+				if mergeBranch != "" {
+					suffix = " " + mergeBranch + suffix
+				}
+				cmd = strings.Replace(cmd, "gh pr", "gh pr"+suffix, 1)
+			}
 			return runCmdInDir(worktreeDir, cmd)
 		},
 	}
@@ -1069,15 +1084,31 @@ func executeMergePrecheck(cfg *config.Config, worktreeDir string) StepResult {
 	}
 
 	// Skip if no PR exists on this branch (e.g., item already on main)
-	out, exitCode, _ := runCmdInDir(worktreeDir, "gh pr view --json number -q .number 2>/dev/null")
+	cmd := ghPRCmd(worktreeDir, "view --json number -q .number")
+	out, exitCode, _ := runCmdInDir(worktreeDir, cmd+" 2>/dev/null")
 	if exitCode != 0 || strings.TrimSpace(string(out)) == "" {
 		fmt.Println("  no PR on this branch — skipping pre-checks")
 		sr.Passed = true
 		return sr
 	}
+
 	// CI watch can have long gaps between output — use CI idle timeout
+	ghRepo := resolveGHRepo(worktreeDir)
+	branch := ""
+	if branchOut, _, _ := runCmdInDir(worktreeDir, "git branch --show-current 2>/dev/null"); len(branchOut) > 0 {
+		branch = strings.TrimSpace(string(branchOut))
+	}
 	for _, check := range cfg.Pipeline.Merge.PreChecks {
-		output, exitCode, err := runCmdGuarded(worktreeDir, check, defaultCIIdleTimeout)
+		// Inject --repo and branch if the command uses gh pr
+		rewritten := check
+		if ghRepo != "" && strings.Contains(check, "gh pr") && !strings.Contains(check, "--repo") {
+			suffix := " --repo " + ghRepo
+			if branch != "" {
+				suffix = " " + branch + suffix
+			}
+			rewritten = strings.Replace(check, "gh pr", "gh pr"+suffix, 1)
+		}
+		output, exitCode, err := runCmdGuarded(worktreeDir, rewritten, defaultCIIdleTimeout)
 		if err != nil && exitCode == 0 {
 			sr.Error = fmt.Sprintf("pre-check exec error: %v", err)
 			return sr
@@ -1123,9 +1154,14 @@ func executeSmoke(s *store.Store, cfg *config.Config, itemID, worktreeDir string
 	return sr
 }
 
-func executeUAT(s *store.Store, cfg *config.Config, itemID string) StepResult {
+func executeUAT(s *store.Store, cfg *config.Config, itemID, worktreeDir string) StepResult {
 	sr := StepResult{Step: "uat", Type: "uat"}
-	code := UAT(s, cfg, itemID, UATOpts{})
+	// Run UAT with cmd: ACs executing from the worktree directory
+	code := UAT(s, cfg, itemID, UATOpts{
+		RunCmd: func(cmd string) ([]byte, int, error) {
+			return runCmdInDir(worktreeDir, cmd)
+		},
+	})
 	if code != 0 {
 		sr.Error = fmt.Sprintf("st uat exited %d", code)
 		return sr
@@ -1693,20 +1729,9 @@ func releaseItem(cfg *config.Config, itemID string) {
 		return
 	}
 
-	tc, ok := cfg.Types[item.Type]
-	if !ok {
-		return
-	}
-
-	// Only reset if item is in active status (we put it there via st start)
-	if item.Status != tc.ActiveStatus {
-		return
-	}
-
-	fmt.Printf("[%s] Releasing — resetting to %s for retry\n", itemID, tc.StartStatus)
-
-	item.Doc.SetField("status", tc.StartStatus)
-	item.Status = tc.StartStatus
+	// Keep item active — just clear the claim so the next run can pick it up.
+	// Do NOT reset status to start. The work (code, PR, tests) is preserved.
+	fmt.Printf("[%s] Releasing claim for retry (keeping status: %s)\n", itemID, item.Status)
 
 	// Clear claim
 	if item.ClaimedBy != "" {
@@ -1776,8 +1801,9 @@ func detectMergedPR(cfg *config.Config, itemID string, item *model.Item) bool {
 		return false // no worktree
 	}
 
-	// Check PR state from the worktree branch (works even without manifest)
-	out, exitCode, _ := runCmdInDir(worktreeDir, "gh pr view --json state -q .state 2>/dev/null")
+	// Check PR state from the worktree branch with correct --repo
+	cmd := ghPRCmd(worktreeDir, "view --json state -q .state")
+	out, exitCode, _ := runCmdInDir(worktreeDir, cmd+" 2>/dev/null")
 	if exitCode == 0 {
 		state := strings.TrimSpace(string(out))
 		return state == "MERGED"
@@ -1832,6 +1858,46 @@ func ensureAWSCredentials(cfg *config.Config) {
 	if err := loginCmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "[st run] AWS SSO login failed: %v (evidence uploads will be skipped)\n", err)
 	}
+}
+
+// resolveGHRepo detects the GitHub "owner/repo" from a worktree's git remote.
+// Returns e.g. "TheraPrac/theraprac-web" or "" if not detectable.
+func resolveGHRepo(worktreeDir string) string {
+	out, exitCode, _ := runCmdInDir(worktreeDir, "gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null")
+	if exitCode == 0 {
+		repo := strings.TrimSpace(string(out))
+		if repo != "" {
+			return repo
+		}
+	}
+	// Fallback: parse git remote
+	out, _, _ = runCmdInDir(worktreeDir, "git remote get-url origin 2>/dev/null")
+	remote := strings.TrimSpace(string(out))
+	// Parse github.com:Owner/Repo.git or https://github.com/Owner/Repo.git
+	for _, prefix := range []string{"git@github.com:", "https://github.com/"} {
+		if strings.HasPrefix(remote, prefix) {
+			repo := strings.TrimPrefix(remote, prefix)
+			repo = strings.TrimSuffix(repo, ".git")
+			return repo
+		}
+	}
+	return ""
+}
+
+// ghPRCmd builds a gh pr command with --repo flag and branch name for worktree context.
+func ghPRCmd(worktreeDir, subcmd string) string {
+	repo := resolveGHRepo(worktreeDir)
+	if repo == "" {
+		return fmt.Sprintf("gh pr %s", subcmd)
+	}
+	// When using --repo, gh pr view needs the branch name
+	branch := ""
+	out, _, _ := runCmdInDir(worktreeDir, "git branch --show-current 2>/dev/null")
+	branch = strings.TrimSpace(string(out))
+	if branch != "" {
+		return fmt.Sprintf("gh pr %s %s --repo %s", subcmd, branch, repo)
+	}
+	return fmt.Sprintf("gh pr %s --repo %s", subcmd, repo)
 }
 
 func isEligible(s *store.Store, cfg *config.Config, itemID string) bool {
