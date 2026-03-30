@@ -1126,6 +1126,9 @@ func executeClaude(s *store.Store, cfg *config.Config, itemID, sprintID string, 
 		prompt = expandTemplate(prompt, itemID, sprintID, worktreeDir, cfg)
 	}
 
+	// Always inject full item context so claude never has to rediscover
+	prompt += buildItemContext(s, cfg, itemID, worktreeDir)
+
 	// Per-step budget override
 	stepOpts := opts
 	if step.Budget > 0 {
@@ -2104,6 +2107,117 @@ func buildContextBlock(itemID, worktreeDir, branch, prInfo, repo string, cfg *co
 	if ghRepo != "" {
 		b.WriteString(fmt.Sprintf("- GitHub repo: %s\n", ghRepo))
 	}
+	return b.String()
+}
+
+// buildItemContext builds a comprehensive context block from the item's current state.
+// Injected into every claude invocation so it never has to rediscover the environment.
+func buildItemContext(s *store.Store, cfg *config.Config, itemID, worktreeDir string) string {
+	var b strings.Builder
+	b.WriteString("\n\n---\n## Full Item Context (auto-injected)\n")
+
+	item, ok := s.Get(itemID)
+	if !ok {
+		b.WriteString(fmt.Sprintf("Item %s not found in store.\n", itemID))
+		return b.String()
+	}
+
+	// Identity
+	b.WriteString(fmt.Sprintf("- Item: %s (%s)\n", itemID, item.Type))
+	b.WriteString(fmt.Sprintf("- Title: %s\n", item.Title))
+	b.WriteString(fmt.Sprintf("- Status: %s\n", item.Status))
+
+	// Environment
+	b.WriteString(fmt.Sprintf("- Working directory: %s\n", worktreeDir))
+	branch := ""
+	if worktreeDir != "" {
+		out, err := exec.Command("git", "-C", worktreeDir, "rev-parse", "--abbrev-ref", "HEAD").Output()
+		if err == nil {
+			branch = strings.TrimSpace(string(out))
+		}
+	}
+	if branch != "" {
+		b.WriteString(fmt.Sprintf("- Branch: %s\n", branch))
+	}
+	ghRepo := resolveGHRepo(worktreeDir)
+	if ghRepo != "" {
+		b.WriteString(fmt.Sprintf("- GitHub repo: %s\n", ghRepo))
+	}
+
+	// PRs
+	if item.Manifest != nil {
+		if prsRaw, ok := item.Manifest["prs"]; ok {
+			if prsStr, ok := prsRaw.(string); ok && prsStr != "" {
+				b.WriteString(fmt.Sprintf("- PRs: %s\n", prsStr))
+				// Extract PR number for convenience
+				if idx := strings.Index(prsStr, "#"); idx >= 0 {
+					rest := prsStr[idx+1:]
+					if ci := strings.Index(rest, ","); ci >= 0 {
+						rest = rest[:ci]
+					}
+					b.WriteString(fmt.Sprintf("- PR number: %s\n", strings.TrimSpace(rest)))
+				}
+			}
+		}
+	}
+
+	// Delivery stage
+	if item.Delivery != nil {
+		if stage, ok := item.Delivery["stage"]; ok {
+			if stageStr, ok := stage.(string); ok && stageStr != "" {
+				b.WriteString(fmt.Sprintf("- Delivery stage: %s\n", stageStr))
+			}
+		}
+		if lastStep, ok := item.Delivery["last_completed_step"]; ok {
+			if stepStr, ok := lastStep.(string); ok && stepStr != "" {
+				b.WriteString(fmt.Sprintf("- Last completed step: %s\n", stepStr))
+			}
+		}
+	}
+
+	// Test evidence
+	if item.TestingEvidence != nil {
+		if reqSuites, ok := item.TestingEvidence["required_suites"]; ok {
+			if m, ok := reqSuites.(map[string]interface{}); ok {
+				var passed, failing []string
+				for name, val := range m {
+					if s, ok := val.(string); ok {
+						if strings.HasPrefix(s, "pass") {
+							passed = append(passed, name)
+						} else if s != "null" && s != "" {
+							failing = append(failing, name+": "+s)
+						}
+					}
+				}
+				if len(passed) > 0 {
+					sort.Strings(passed)
+					b.WriteString(fmt.Sprintf("- Tests passing: %s\n", strings.Join(passed, ", ")))
+				}
+				if len(failing) > 0 {
+					sort.Strings(failing)
+					b.WriteString(fmt.Sprintf("- Tests failing: %s\n", strings.Join(failing, ", ")))
+				}
+			}
+		}
+	}
+
+	// Summary (truncated)
+	if item.Summary != "" {
+		summary := item.Summary
+		if len(summary) > 500 {
+			summary = summary[:500] + "..."
+		}
+		b.WriteString(fmt.Sprintf("\n### Summary\n%s\n", summary))
+	}
+
+	// Acceptance criteria
+	if len(item.AcceptanceCriteria) > 0 {
+		b.WriteString("\n### Acceptance Criteria\n")
+		for i, ac := range item.AcceptanceCriteria {
+			b.WriteString(fmt.Sprintf("%d. %s\n", i+1, ac))
+		}
+	}
+
 	return b.String()
 }
 
