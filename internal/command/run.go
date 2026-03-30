@@ -1477,15 +1477,32 @@ func executeVerifyTests(s *store.Store, cfg *config.Config, itemID string) StepR
 		return sr
 	}
 
+	// Helper to look up evidence — checks both flat (TestingEvidence["api_unit"])
+	// and nested (TestingEvidence["required_suites"]["api_unit"]) storage.
+	getEvidence := func(sectionKey, name string) string {
+		// Try flat first
+		if v, ok := item.TestingEvidence[name]; ok {
+			if s, ok := v.(string); ok {
+				return s
+			}
+		}
+		// Try nested under section key (e.g., "required_suites" or "scope_suites")
+		if section, ok := item.TestingEvidence[sectionKey]; ok {
+			if m, ok := section.(map[string]interface{}); ok {
+				if v, ok := m[name]; ok {
+					if s, ok := v.(string); ok {
+						return s
+					}
+				}
+			}
+		}
+		return ""
+	}
+
 	// Check required suites
 	var missing []string
 	for name := range cfg.Testing.RequiredSuites {
-		val := ""
-		if v, ok := item.TestingEvidence[name]; ok {
-			if s, ok := v.(string); ok {
-				val = s
-			}
-		}
+		val := getEvidence("required_suites", name)
 		if !strings.HasPrefix(val, "pass") {
 			missing = append(missing, name)
 		}
@@ -1493,12 +1510,7 @@ func executeVerifyTests(s *store.Store, cfg *config.Config, itemID string) StepR
 
 	// Check triggered scope suites
 	for name := range cfg.Testing.ScopeSuites {
-		val := ""
-		if v, ok := item.TestingEvidence[name]; ok {
-			if s, ok := v.(string); ok {
-				val = s
-			}
-		}
+		val := getEvidence("scope_suites", name)
 		if val == "required" {
 			missing = append(missing, name+" (triggered, not run)")
 		}
