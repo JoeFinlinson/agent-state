@@ -141,25 +141,19 @@ func RunInteractive(s *store.Store, cfg *config.Config, opts RunOpts, engine Run
 		if epic.Status != "active" {
 			continue
 		}
-		// Collect this epic's sprints that have remaining work
-		var epicSprints []*sprintProgress
-		if len(epic.SprintOrder) > 0 {
-			for _, sid := range epic.SprintOrder {
-				if sp, ok := sprintMap[sid]; ok {
-					epicSprints = append(epicSprints, sp)
-					sprintInEpic[sid] = true
-				}
-			}
-		} else {
-			// No explicit order — find sprints that reference this epic
-			for _, sp := range sprintMap {
-				if sp.sprint.Epic == epic.ID {
-					epicSprints = append(epicSprints, sp)
-					sprintInEpic[sp.sprint.ID] = true
+		// Show all sprints in this epic — archived as completed, active as selectable
+		hasSprintsForEpic := false
+
+		// First check if this epic has any sprints at all
+		allSprintIDs := epic.SprintOrder
+		if len(allSprintIDs) == 0 {
+			for _, es := range reg.Sprints {
+				if es.Epic == epic.ID {
+					allSprintIDs = append(allSprintIDs, es.ID)
 				}
 			}
 		}
-		if len(epicSprints) == 0 {
+		if len(allSprintIDs) == 0 {
 			continue
 		}
 
@@ -168,15 +162,41 @@ func RunInteractive(s *store.Store, cfg *config.Config, opts RunOpts, engine Run
 			hasEpicOutput = true
 		}
 		fmt.Printf("\n  %s\n", epic.Title)
-		for _, sp := range epicSprints {
-			num++
-			approved := ""
-			if sp.sprint.PlanApproved {
-				approved = " [approved]"
+
+		for _, sid := range allSprintIDs {
+			sprintInEpic[sid] = true
+
+			// Check if it's archived/completed
+			var sprintRef *registry.Sprint
+			for i := range reg.Sprints {
+				if reg.Sprints[i].ID == sid {
+					sprintRef = &reg.Sprints[i]
+					break
+				}
 			}
-			fmt.Printf("    %d. %s  %d/%d%s\n", num, sp.sprint.Title, sp.complete, sp.total, approved)
-			candidates = append(candidates, candidate{sprint: sp.sprint, total: sp.total, complete: sp.complete})
+			if sprintRef == nil {
+				continue
+			}
+
+			if sprintRef.Status == "archived" || sprintRef.Status == "completed" {
+				fmt.Printf("    done %s  %d/%d\n", sprintRef.Title, len(sprintRef.Items), len(sprintRef.Items))
+				hasSprintsForEpic = true
+				continue
+			}
+
+			// Active sprint with remaining work
+			if sp, ok := sprintMap[sid]; ok {
+				num++
+				approved := ""
+				if sp.sprint.PlanApproved {
+					approved = " [approved]"
+				}
+				fmt.Printf("    %d. %s  %d/%d%s\n", num, sp.sprint.Title, sp.complete, sp.total, approved)
+				candidates = append(candidates, candidate{sprint: sp.sprint, total: sp.total, complete: sp.complete})
+				hasSprintsForEpic = true
+			}
 		}
+		_ = hasSprintsForEpic
 	}
 
 	// --- Section 2: Loose sprints (not in any epic) ---
