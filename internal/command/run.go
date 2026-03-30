@@ -940,13 +940,18 @@ func runSingleItem(s *store.Store, cfg *config.Config, itemID, sprintID string, 
 		if !sr.Passed {
 			fmt.Printf("[%s] Step %s FAILED: %s\n", itemID, step.Name(), sr.Error)
 
-			// For CI failures, try to fix inline: get the failure log,
-			// feed it to claude, retry CI. Up to 3 attempts before asking user.
+			// For CI failures, fix inline: get the failure log, feed
+			// it to claude, retry CI. Keep going as long as the error
+			// changes (= progress). Pause only after 3 consecutive
+			// identical errors.
 			if step.Type == "merge_precheck" {
-				const maxFixAttempts = 3
 				fixed := false
-				for attempt := 1; attempt <= maxFixAttempts; attempt++ {
-					fmt.Printf("[%s] CI fix attempt %d/%d...\n", itemID, attempt, maxFixAttempts)
+				lastError := sr.Error
+				sameErrorCount := 0
+				const maxSameError = 3
+
+				for attempt := 1; ; attempt++ {
+					fmt.Printf("[%s] CI fix attempt %d...\n", itemID, attempt)
 					fixPrompt := fmt.Sprintf(
 						"CI failed for item %s (attempt %d). The pre-check error was:\n\n%s\n\n"+
 							"Check the CI failure with `gh run view --log-failed` for the specific repo. "+
@@ -960,49 +965,64 @@ func runSingleItem(s *store.Store, cfg *config.Config, itemID, sprintID string, 
 
 					if !fixSR.Passed {
 						fmt.Printf("[%s] Fix attempt %d failed to run\n", itemID, attempt)
-						continue
-					}
-
-					// Retry the CI step
-					fmt.Printf("[%s] Retrying %s after fix...\n", itemID, step.Name())
-					localStore, _ = store.New(cfg)
-					sr2 := executeStepWithSession(localStore, cfg, itemID, sprintID, step, opts, engine, worktreeDir, claudeSessionID, true)
-					sr2.Duration = time.Since(stepStart)
-					result.Steps = append(result.Steps, sr2)
-					result.TotalCost += sr2.CostUSD
-
-					if sr2.Passed {
-						fmt.Printf("[%s] Step %s OK after fix attempt %d (%s)\n", itemID, step.Name(), attempt, sr2.Duration.Round(time.Second))
-						if progressStore, err := store.New(cfg); err == nil {
-							if progressItem, ok := progressStore.Get(itemID); ok {
-								setNestedField(progressItem, "delivery", "last_completed_step", step.Name())
-								progressStore.Write(progressItem)
-							}
-						}
+						sameErrorCount++
+					} else {
+						// Retry the CI step
+						fmt.Printf("[%s] Retrying %s after fix...\n", itemID, step.Name())
 						localStore, _ = store.New(cfg)
-						fixed = true
-						break
+						sr2 := executeStepWithSession(localStore, cfg, itemID, sprintID, step, opts, engine, worktreeDir, claudeSessionID, true)
+						sr2.Duration = time.Since(stepStart)
+						result.Steps = append(result.Steps, sr2)
+						result.TotalCost += sr2.CostUSD
+
+						if sr2.Passed {
+							fmt.Printf("[%s] Step %s OK after fix attempt %d (%s)\n", itemID, step.Name(), attempt, sr2.Duration.Round(time.Second))
+							if progressStore, err := store.New(cfg); err == nil {
+								if progressItem, ok := progressStore.Get(itemID); ok {
+									setNestedField(progressItem, "delivery", "last_completed_step", step.Name())
+									progressStore.Write(progressItem)
+								}
+							}
+							localStore, _ = store.New(cfg)
+							fixed = true
+							break
+						}
+
+						// Track whether error changed (= progress)
+						if sr2.Error == lastError {
+							sameErrorCount++
+						} else {
+							sameErrorCount = 1 // new error, reset counter
+							fmt.Printf("[%s] Error changed — still making progress\n", itemID)
+						}
+						lastError = sr2.Error
+						sr = sr2
 					}
-					sr = sr2 // update error for next attempt's prompt
+
+					// Pause only after same error repeats
+					if sameErrorCount >= maxSameError {
+						fmt.Printf("[%s] Same error %d times — pausing for input.\n", itemID, sameErrorCount)
+						action := showPauseMenu(itemID, step.Name(), step.Name(), result, engine)
+						switch action {
+						case "continue":
+							sameErrorCount = 0 // reset and keep trying
+						case "skip":
+							result.Steps = append(result.Steps, StepResult{
+								Step: step.Name(), Type: "skipped", Passed: true,
+							})
+							fixed = true // not really fixed, but skip means move on
+							break
+						case "abort":
+							break
+						}
+						if action == "abort" || action == "skip" {
+							break
+						}
+					}
 				}
 
 				if fixed {
 					continue // proceed to next pipeline step
-				}
-
-				// All attempts exhausted — ask user
-				fmt.Printf("[%s] CI fix failed after %d attempts. Pausing for input.\n", itemID, maxFixAttempts)
-				action := showPauseMenu(itemID, step.Name(), step.Name(), result, engine)
-				switch action {
-				case "continue":
-					continue // user says try again (will hit the step again next iteration... skip instead)
-				case "skip":
-					result.Steps = append(result.Steps, StepResult{
-						Step: step.Name(), Type: "skipped", Passed: true,
-					})
-					continue
-				case "abort":
-					// fall through to release
 				}
 			}
 
