@@ -2329,20 +2329,14 @@ func printCompletionReport(results []ItemResult, sprintID string, totalDuration 
 				sprintDone++
 			}
 
-			// For current sprint items, use live results if available
+			// Use accumulated time_tracking from the item (sums across all sessions).
+			// For current sprint, also check live results for status.
 			var wallTime, aiTime time.Duration
 			var cost float64
 
 			if isCurrent {
 				for _, r := range results {
 					if r.ItemID == itemID {
-						wallTime = r.Duration
-						cost = r.TotalCost
-						for _, sr := range r.Steps {
-							if sr.Type == "claude" {
-								aiTime += sr.Duration
-							}
-						}
 						if !r.Success {
 							for _, sr := range r.Steps {
 								if !sr.Passed {
@@ -2358,25 +2352,19 @@ func printCompletionReport(results []ItemResult, sprintID string, totalDuration 
 				}
 			}
 
-			// Fall back to stored time_tracking for historical data
-			if wallTime == 0 {
-				if v, ok := getNestedField(item, "time_tracking", "run_wall_seconds"); ok {
-					var secs int
-					fmt.Sscanf(v, "%d", &secs)
-					wallTime = time.Duration(secs) * time.Second
-				}
+			// Always use accumulated time_tracking (sums across all st run sessions)
+			if v, ok := getNestedField(item, "time_tracking", "run_wall_seconds"); ok {
+				var secs int
+				fmt.Sscanf(v, "%d", &secs)
+				wallTime = time.Duration(secs) * time.Second
 			}
-			if aiTime == 0 {
-				if v, ok := getNestedField(item, "time_tracking", "ai_duration_seconds"); ok {
-					var secs int
-					fmt.Sscanf(v, "%d", &secs)
-					aiTime = time.Duration(secs) * time.Second
-				}
+			if v, ok := getNestedField(item, "time_tracking", "ai_duration_seconds"); ok {
+				var secs int
+				fmt.Sscanf(v, "%d", &secs)
+				aiTime = time.Duration(secs) * time.Second
 			}
-			if cost == 0 {
-				if v, ok := getNestedField(item, "time_tracking", "ai_cost_usd"); ok {
-					fmt.Sscanf(v, "%f", &cost)
-				}
+			if v, ok := getNestedField(item, "time_tracking", "ai_cost_usd"); ok {
+				fmt.Sscanf(v, "%f", &cost)
 			}
 
 			sprintWall += wallTime
