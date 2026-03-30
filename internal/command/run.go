@@ -65,7 +65,8 @@ type StepResult struct {
 	Error        string        `json:"error,omitempty"`
 	Duration     time.Duration `json:"duration"`
 	CostUSD      float64       `json:"cost_usd,omitempty"`
-	AIDurationMs int64         `json:"ai_duration_ms,omitempty"` // from claude's reported duration_ms
+	AIDurationMs int64         `json:"ai_duration_ms,omitempty"`
+	retried      bool          // internal: prevents infinite retry loops
 }
 
 // ItemResult captures the outcome of running one sprint item.
@@ -703,8 +704,24 @@ func runSingleItem(s *store.Store, cfg *config.Config, itemID, sprintID string, 
 	// otherwise fall back to the first available repo worktree.
 	worktreeDir := resolveWorktreeDirWithPR(cfg, itemID)
 
-	// Generate a new session for this run.
-	claudeSessionID := generateSessionID()
+	// Reuse existing claude session if resuming (preserves context across retries).
+	// Store the session ID on the item so subsequent runs can --resume it.
+	claudeSessionID := ""
+	if item, ok := localStore.Get(itemID); ok {
+		if sid, _ := getNestedField(item, "delivery", "claude_session_id"); sid != "" {
+			claudeSessionID = sid
+		}
+	}
+	isNewSession := claudeSessionID == ""
+	if isNewSession {
+		claudeSessionID = generateSessionID()
+		if progressStore, err := store.New(cfg); err == nil {
+			if progressItem, ok := progressStore.Get(itemID); ok {
+				setNestedField(progressItem, "delivery", "claude_session_id", claudeSessionID)
+				progressStore.Write(progressItem)
+			}
+		}
+	}
 	claudeStepCount := 0
 
 	// Always record metrics on exit — success, failure, or Ctrl+C
@@ -747,11 +764,13 @@ func runSingleItem(s *store.Store, cfg *config.Config, itemID, sprintID string, 
 	for i := startIdx; i < len(pipeline); i++ {
 		step := pipeline[i]
 		stepStart := time.Now()
-		// Track which claude invocation this is for session reuse
+		// Track which claude invocation this is for session reuse.
+		// Resume if: (a) 2nd+ claude step in this run, or (b) reusing
+		// a session from a previous run.
 		isResume := false
 		if step.Type == "claude" {
 			claudeStepCount++
-			if claudeStepCount > 1 {
+			if claudeStepCount > 1 || !isNewSession {
 				isResume = true
 			}
 		}
@@ -763,35 +782,43 @@ func runSingleItem(s *store.Store, cfg *config.Config, itemID, sprintID string, 
 		if !sr.Passed {
 			fmt.Printf("[%s] Step %s FAILED: %s\n", itemID, step.Name(), sr.Error)
 
-			// For CI/merge failures, reset progress so next run goes back
-			// to implement where claude can see and fix the issue.
-			if step.Type == "merge_precheck" || step.Type == "merge" {
-				if progressStore, err := store.New(cfg); err == nil {
-					if progressItem, ok := progressStore.Get(itemID); ok {
-						// Find the last claude step before this failure
-						resetTo := ""
-						for j := i - 1; j >= 0; j-- {
-							if pipeline[j].Type == "claude" {
-								resetTo = pipeline[j].Name()
-								// Reset to one step BEFORE the claude step so it re-runs
-								if j > 0 {
-									resetTo = pipeline[j-1].Name()
-								} else {
-									resetTo = ""
-								}
-								break
+			// For CI failures, try to fix inline: get the failure log,
+			// feed it to claude, and retry the CI step once.
+			if (step.Type == "merge_precheck") && !sr.retried {
+				fmt.Printf("[%s] Attempting inline CI fix...\n", itemID)
+				fixPrompt := fmt.Sprintf(
+					"CI failed for item %s. The pre-check error was:\n\n%s\n\n"+
+						"Check the CI failure with `gh run view --log-failed` for the specific repo. "+
+						"Fix the issue, commit, and push. Do NOT merge.",
+					itemID, sr.Error)
+				fixStep := config.RunStepDef{Type: "claude", Prompt: fixPrompt, Budget: 3.0}
+				fixStep.SetName("ci_fix")
+				fixSR := executeClaude(s, cfg, itemID, sprintID, fixStep, opts, engine, worktreeDir, claudeSessionID, true)
+				result.Steps = append(result.Steps, fixSR)
+				result.TotalCost += fixSR.CostUSD
+
+				if fixSR.Passed {
+					// Retry the failed step
+					fmt.Printf("[%s] Retrying %s after fix...\n", itemID, step.Name())
+					sr2 := executeStepWithSession(localStore, cfg, itemID, sprintID, step, opts, engine, worktreeDir, claudeSessionID, true)
+					sr2.retried = true
+					sr2.Duration = time.Since(stepStart)
+					result.Steps = append(result.Steps, sr2)
+					result.TotalCost += sr2.CostUSD
+					if sr2.Passed {
+						fmt.Printf("[%s] Step %s OK after fix (%s)\n", itemID, step.Name(), sr2.Duration.Round(time.Second))
+						// Record progress and continue pipeline
+						if progressStore, err := store.New(cfg); err == nil {
+							if progressItem, ok := progressStore.Get(itemID); ok {
+								setNestedField(progressItem, "delivery", "last_completed_step", step.Name())
+								progressStore.Write(progressItem)
 							}
 						}
-						if resetTo != "" {
-							setNestedField(progressItem, "delivery", "last_completed_step", resetTo)
-						} else {
-							// No claude step found — clear entirely
-							setNestedField(progressItem, "delivery", "last_completed_step", "")
-						}
-						progressStore.Write(progressItem)
-						fmt.Printf("[%s] Reset progress for retry (claude will see CI failure)\n", itemID)
+						localStore, _ = store.New(cfg)
+						continue // proceed to next pipeline step
 					}
 				}
+				fmt.Printf("[%s] Inline fix failed — releasing for manual retry\n", itemID)
 			}
 
 			releaseItem(cfg, itemID)
@@ -1073,8 +1100,14 @@ func executeClaude(s *store.Store, cfg *config.Config, itemID, sprintID string, 
 		prompt = expandTemplate(prompt, itemID, sprintID, worktreeDir, cfg)
 	}
 
+	// Per-step budget override
+	stepOpts := opts
+	if step.Budget > 0 {
+		stepOpts.MaxBudgetUSD = step.Budget
+	}
+
 	// Build args — resume existing session for 2nd+ claude step
-	args := buildClaudeArgs(cfg, prompt, opts, worktreeDir)
+	args := buildClaudeArgs(cfg, prompt, stepOpts, worktreeDir)
 	if isResume {
 		args = append(args, "--resume", claudeSessionID)
 	} else {
@@ -1511,16 +1544,13 @@ func executeVerifyTests(s *store.Store, cfg *config.Config, itemID string) StepR
 		return sr
 	}
 
-	// Helper to look up evidence — checks both flat (TestingEvidence["api_unit"])
-	// and nested (TestingEvidence["required_suites"]["api_unit"]) storage.
+	// Helper to look up evidence — checks both flat and nested storage.
 	getEvidence := func(sectionKey, name string) string {
-		// Try flat first
 		if v, ok := item.TestingEvidence[name]; ok {
 			if s, ok := v.(string); ok {
 				return s
 			}
 		}
-		// Try nested under section key (e.g., "required_suites" or "scope_suites")
 		if section, ok := item.TestingEvidence[sectionKey]; ok {
 			if m, ok := section.(map[string]interface{}); ok {
 				if v, ok := m[name]; ok {
@@ -1533,7 +1563,7 @@ func executeVerifyTests(s *store.Store, cfg *config.Config, itemID string) StepR
 		return ""
 	}
 
-	// Check required suites
+	// Find missing required suites
 	var missing []string
 	for name := range cfg.Testing.RequiredSuites {
 		val := getEvidence("required_suites", name)
@@ -1542,17 +1572,47 @@ func executeVerifyTests(s *store.Store, cfg *config.Config, itemID string) StepR
 		}
 	}
 
-	// Check triggered scope suites
+	// Find triggered but unrun scope suites
+	var missingScope []string
 	for name := range cfg.Testing.ScopeSuites {
 		val := getEvidence("scope_suites", name)
 		if val == "required" {
-			missing = append(missing, name+" (triggered, not run)")
+			missingScope = append(missingScope, name)
 		}
 	}
 
-	if len(missing) > 0 {
-		sr.Error = fmt.Sprintf("missing test evidence: %s", strings.Join(missing, ", "))
-		return sr
+	// Self-heal: run missing suites directly instead of failing
+	if len(missing) > 0 || len(missingScope) > 0 {
+		allMissing := append(missing, missingScope...)
+		fmt.Printf("  auto-running %d missing test suite(s): %s\n", len(allMissing), strings.Join(allMissing, ", "))
+
+		for _, name := range allMissing {
+			opts := TestRecordOpts{Run: true}
+			code := TestRecord(s, cfg, itemID, name, opts)
+			if code != 0 {
+				sr.Error = fmt.Sprintf("test suite %s failed (exit %d)", name, code)
+				return sr
+			}
+			// Reload store after each test record
+			s, _ = store.New(cfg)
+		}
+
+		// Re-check after running
+		s, _ = store.New(cfg)
+		item, _ = s.Get(itemID)
+
+		// Verify everything passes now
+		var stillMissing []string
+		for name := range cfg.Testing.RequiredSuites {
+			val := getEvidence("required_suites", name)
+			if !strings.HasPrefix(val, "pass") {
+				stillMissing = append(stillMissing, name)
+			}
+		}
+		if len(stillMissing) > 0 {
+			sr.Error = fmt.Sprintf("test suites still failing after auto-run: %s", strings.Join(stillMissing, ", "))
+			return sr
+		}
 	}
 
 	sr.Passed = true

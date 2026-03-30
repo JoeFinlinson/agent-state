@@ -210,17 +210,21 @@ type RunConfig struct {
 
 // RunStepDef defines a single pipeline step for st run.
 type RunStepDef struct {
-	Type       string // claude, test, pr, merge, merge_precheck, deploy, smoke, uat, gate, close, command
-	Command    string // for command type
-	Prompt     string // for claude type (optional, uses default)
-	Resolution string // for close type (e.g. "completed")
-	Timeout    int    // for watch/deploy (seconds, default 600)
-	Coverage   bool   // for test type
-	name       string // set by RunPipeline(), not from config
+	Type       string  // claude, test, pr, merge, merge_precheck, deploy, smoke, uat, gate, close, command
+	Command    string  // for command type
+	Prompt     string  // for claude type (optional, uses default)
+	Resolution string  // for close type (e.g. "completed")
+	Timeout    int     // for watch/deploy (seconds, default 600)
+	Coverage   bool    // for test type
+	Budget     float64 // per-step budget override (USD, 0 = use default)
+	name       string  // set by RunPipeline(), not from config
 }
 
 // Name returns the step's name (set when building the pipeline from config).
 func (s RunStepDef) Name() string { return s.name }
+
+// SetName sets the step name (for dynamically created steps like ci_fix).
+func (s *RunStepDef) SetName(name string) { s.name = name }
 
 // Root returns the root directory for this config.
 func (c *Config) Root() string {
@@ -864,6 +868,10 @@ func applyValue(cfg *Config, levels [4]string, key, val string) {
 					}
 				case "coverage":
 					step.Coverage = val == "true"
+				case "budget":
+					if v, err := strconv.ParseFloat(val, 64); err == nil {
+						step.Budget = v
+					}
 				}
 				cfg.Run.Steps[stepName] = step
 			}
