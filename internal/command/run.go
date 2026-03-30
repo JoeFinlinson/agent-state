@@ -1636,19 +1636,56 @@ func showPauseMenu(itemID, lastStep, nextStep string, result ItemResult, engine 
 	gateMu.Lock()
 	defer gateMu.Unlock()
 
+	// Summarize what happened so far
+	var stepSummary []string
+	failCount := 0
+	for _, s := range result.Steps {
+		status := "OK"
+		if !s.Passed {
+			status = "FAIL"
+			failCount++
+		}
+		dur := ""
+		if s.Duration > 0 {
+			dur = fmt.Sprintf(" (%s)", formatDuration(s.Duration))
+		}
+		stepSummary = append(stepSummary, fmt.Sprintf("  %s: %s%s", s.Step, status, dur))
+	}
+
+	// Build recommendation
+	recommendation := "[c] continue"
+	if nextStep == "code_review" && failCount == 0 {
+		recommendation = "[c] continue -- all green, code review should be quick"
+	} else if nextStep == "merge" && failCount == 0 {
+		recommendation = "[c] continue -- CI passed, ready to merge"
+	} else if failCount > 0 {
+		recommendation = "[s] skip -- previous failures suggest this step may also fail"
+	}
+
 	// Content lines (all ASCII so len() == display width)
 	content := []string{
 		fmt.Sprintf("PAUSED: %s", itemID),
 		"",
-		fmt.Sprintf("Last:   %s (OK)", lastStep),
+	}
+	// Show step history (last 5 max to keep it readable)
+	historyStart := 0
+	if len(stepSummary) > 5 {
+		historyStart = len(stepSummary) - 5
+	}
+	for _, line := range stepSummary[historyStart:] {
+		content = append(content, line)
+	}
+	content = append(content,
+		"",
 		fmt.Sprintf("Next:   %s", nextStep),
-		fmt.Sprintf("Cost:   $%.2f", result.TotalCost),
-		fmt.Sprintf("Steps:  %d", len(result.Steps)),
+		fmt.Sprintf("Cost:   $%.2f  |  Steps: %d  |  Fails: %d", result.TotalCost, len(result.Steps), failCount),
+		"",
+		fmt.Sprintf(">>> %s", recommendation),
 		"",
 		"[c] continue -- resume pipeline",
 		"[s] skip     -- skip next step, continue",
 		"[a] abort    -- stop, release item for retry",
-	}
+	)
 
 	// Find widest line
 	w := 0
