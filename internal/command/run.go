@@ -619,10 +619,14 @@ func runSingleItem(s *store.Store, cfg *config.Config, itemID, sprintID string, 
 	worktreeDir := resolveWorktreeDir(cfg, itemID)
 
 	// Generate a new session for this run.
-	// Session reuse across steps within THIS run (not across runs) is handled
-	// by the claudeStepCount logic below.
 	claudeSessionID := generateSessionID()
 	claudeStepCount := 0
+
+	// Always record metrics on exit — success, failure, or Ctrl+C
+	defer func() {
+		result.Duration = time.Since(start)
+		recordRunMetrics(cfg, itemID, result)
+	}()
 
 	// Execute each pipeline step
 	for _, step := range pipeline {
@@ -642,9 +646,8 @@ func runSingleItem(s *store.Store, cfg *config.Config, itemID, sprintID string, 
 
 		if !sr.Passed {
 			fmt.Printf("[%s] Step %s FAILED: %s\n", itemID, step.Name(), sr.Error)
-			result.Duration = time.Since(start)
 			releaseItem(cfg, itemID)
-			return result
+			return result // defer records metrics
 		}
 
 		fmt.Printf("[%s] Step %s OK (%s)\n", itemID, step.Name(), sr.Duration.Round(time.Second))
@@ -671,11 +674,6 @@ func runSingleItem(s *store.Store, cfg *config.Config, itemID, sprintID string, 
 	}
 
 	result.Success = true
-	result.Duration = time.Since(start)
-
-	// Write time tracking + cost back to item
-	recordRunMetrics(cfg, itemID, result)
-
 	return result
 }
 
