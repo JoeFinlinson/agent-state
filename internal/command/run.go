@@ -673,14 +673,16 @@ func runSingleItem(s *store.Store, cfg *config.Config, itemID, sprintID string, 
 		return result
 	}
 
-	// Check if PR is already merged — auto-close without running pipeline
+	// Check if PR is already merged — advance past merge and continue pipeline
+	// (still need deploy verification, smoke, UAT, and user approval)
 	if detectMergedPR(cfg, itemID, item) {
-		fmt.Printf("[%s] PR already merged — closing\n", itemID)
-		autoCloseItem(localStore, cfg, itemID, item)
-		cleanupWorktree(cfg, itemID)
-		result.Success = true
-		result.Duration = time.Since(start)
-		return result
+		fmt.Printf("[%s] PR already merged — advancing to post-merge steps\n", itemID)
+		setNestedField(item, "delivery", "stage", "merged")
+		setNestedField(item, "delivery", "last_completed_step", "merge")
+		item.Doc.SetField("last_touched", time.Now().Format(time.RFC3339))
+		localStore.Write(item)
+		// Reload and continue — the resume logic will skip to deploy_watch
+		localStore, _ = store.New(cfg)
 	}
 
 	// Start the item if not already active (creates worktrees + claims)
@@ -2199,10 +2201,14 @@ func recoverStaleItems(s *store.Store, cfg *config.Config, sprintItems []string)
 			continue
 		}
 
-		// Check if this item's PR was already merged — if so, close it
+		// Check if this item's PR was already merged — advance past merge
+		// so the pipeline continues with deploy verification, UAT, etc.
 		if detectMergedPR(cfg, itemID, item) {
-			fmt.Printf("[%s] PR already merged — closing as done\n", itemID)
-			autoCloseItem(s, cfg, itemID, item)
+			fmt.Printf("[%s] PR already merged — advancing to post-merge steps\n", itemID)
+			setNestedField(item, "delivery", "stage", "merged")
+			setNestedField(item, "delivery", "last_completed_step", "merge")
+			item.Doc.SetField("last_touched", time.Now().Format(time.RFC3339))
+			s.Write(item)
 			continue
 		}
 
@@ -2245,23 +2251,8 @@ func detectMergedPR(cfg *config.Config, itemID string, item *model.Item) bool {
 	return foundAny
 }
 
-// autoCloseItem closes an item that was completed by a previous st run.
-func autoCloseItem(s *store.Store, cfg *config.Config, itemID string, item *model.Item) {
-	resolution := "completed"
-	if item.Type == "issue" {
-		resolution = "resolved"
-	}
-
-	// Set delivery stage
-	setNestedField(item, "delivery", "stage", "merged")
-	item.Doc.SetField("last_touched", time.Now().Format(time.RFC3339))
-	s.Write(item)
-
-	Close(s, cfg, itemID, resolution, CloseOpts{
-		Reason: "auto-closed: PR merged by previous st run",
-		Force:  true,
-	})
-}
+// autoCloseItem was removed — merged PRs now continue through the pipeline
+// (deploy verification, smoke, UAT, approval) instead of being force-closed.
 
 // ensureAWSCredentials checks if AWS credentials are valid and runs SSO login if needed.
 func ensureAWSCredentials(cfg *config.Config) {
