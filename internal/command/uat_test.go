@@ -24,7 +24,6 @@ func setupUATTestEnv(t *testing.T) (*store.Store, *config.Config) {
 		"API unit tests pass",
 		"PR manifest recorded",
 		"cmd:echo hello",
-		"User can see the diagnosis modal",
 	}
 	s.Write(item)
 
@@ -154,10 +153,10 @@ func TestUATManualCriteria(t *testing.T) {
 		Backend: &evidence.LocalBackend{Dir: t.TempDir()},
 	}
 
-	// Manual criteria don't cause failure — they're flagged for review
+	// Prose ACs without cmd: prefix now fail — they're not machine-verifiable
 	code := UAT(s, cfg, "T-003", opts)
-	if code != 0 {
-		t.Errorf("UAT returned %d, want 0 (manual criteria don't fail)", code)
+	if code != 1 {
+		t.Errorf("UAT returned %d, want 1 (non-cmd ACs must fail)", code)
 	}
 }
 

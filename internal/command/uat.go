@@ -286,6 +286,24 @@ func evaluateCriterion(criterion string, item *model.Item, cfg *config.Config, r
 		}
 	}
 
+	// Check for manifest/PR keywords
+	if strings.Contains(lower, "manifest") || strings.Contains(lower, "pr recorded") || strings.Contains(lower, "pr created") {
+		prs := ""
+		if item.Manifest != nil {
+			if v, ok := item.Manifest["prs"]; ok {
+				if s, ok := v.(string); ok {
+					prs = s
+				}
+			}
+		}
+		passed := prs != "" && prs != "null"
+		detail := prs
+		if !passed {
+			detail = "no PR manifest recorded"
+		}
+		return checkResult{Label: criterion, Mode: "auto", Passed: passed, Detail: detail}
+	}
+
 	// Check for keywords that match cross-cutting checks
 	if strings.Contains(lower, "ci") || strings.Contains(lower, "checks") || strings.Contains(lower, "pipeline") {
 		stage := deliveryStage(item)
@@ -303,8 +321,9 @@ func evaluateCriterion(criterion string, item *model.Item, cfg *config.Config, r
 		}
 	}
 
-	// Default: manual review
-	return checkResult{Label: criterion, Mode: "manual", Pending: true, Detail: "needs human verification"}
+	// No cmd: prefix and no keyword match — this AC is not machine-verifiable.
+	// Fail it so the plan step rewrites it as a cmd: test command.
+	return checkResult{Label: criterion, Mode: "manual", Passed: false, Detail: "not machine-verifiable — rewrite as cmd: <test command>"}
 }
 
 // --- Report upload ---

@@ -1397,11 +1397,14 @@ func proposePlan(cfg *config.Config, itemID string, item *model.Item, engine Run
 		b.WriteString(fmt.Sprintf("   printf '- criterion 1\\n- criterion 2\\n' | st update %s acceptance_criteria --stdin\n", itemID))
 	}
 	b.WriteString(fmt.Sprintf("4. Print your analysis and what you set to stdout\n\n"))
-	b.WriteString("Acceptance criteria rules:\n")
-	b.WriteString("- Specific and testable (not vague)\n")
-	b.WriteString("- Verifiable by automated tests or code inspection\n")
-	b.WriteString("- Complete — cover the full scope of the work\n")
-	b.WriteString("- Include integration test requirements\n")
+	b.WriteString("Acceptance criteria format — EVERY criterion must start with 'cmd:' followed by\n")
+	b.WriteString("an executable command that exits 0 on success. ACs ARE tests. Examples:\n")
+	b.WriteString("- cmd: go test ./cmd/server/ -run TestServiceDefinitions_RBAC_Staff_POST_Returns403\n")
+	b.WriteString("- cmd: go test ./internal/db/ -run TestVoidClientCharge_Concurrent_OnlyOneSucceeds\n")
+	b.WriteString("- cmd: cd ../theraprac-web && npx playwright test tests/e2e/staff-role-split.spec.ts\n")
+	b.WriteString("- cmd: grep -q 'SELECT.*FOR UPDATE' internal/db/client_charges.go\n")
+	b.WriteString("\nFor new features, name the test function that WILL exist after implementation.\n")
+	b.WriteString("The implement step writes the actual test. No prose ACs — if it can't be a command, it's not an AC.\n")
 	b.WriteString("\nDo NOT ask 'shall I go ahead' — just set the fields and report what you did.\n")
 
 	// Use the worktree dir if available, otherwise the config root
