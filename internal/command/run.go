@@ -583,6 +583,24 @@ func runSingleItem(s *store.Store, cfg *config.Config, itemID, sprintID string, 
 	}
 	result.Title = item.Title
 
+	// Check if item is already done (terminal status)
+	if cfg.IsTerminalStatus(item.Type, item.Status) {
+		fmt.Printf("[%s] Already closed (%s) — skipping\n", itemID, item.Status)
+		result.Success = true
+		result.Duration = time.Since(start)
+		return result
+	}
+
+	// Check if PR is already merged — auto-close without running pipeline
+	if detectMergedPR(cfg, itemID, item) {
+		fmt.Printf("[%s] PR already merged — closing\n", itemID)
+		autoCloseItem(localStore, cfg, itemID, item)
+		cleanupWorktree(cfg, itemID)
+		result.Success = true
+		result.Duration = time.Since(start)
+		return result
+	}
+
 	// Start the item if not already active (creates worktrees + claims)
 	tc, _ := cfg.Types[item.Type]
 	if item.Status == tc.StartStatus {
