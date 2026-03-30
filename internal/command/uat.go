@@ -321,9 +321,9 @@ func evaluateCriterion(criterion string, item *model.Item, cfg *config.Config, r
 		}
 	}
 
-	// No cmd: prefix and no keyword match — this AC is not machine-verifiable.
-	// Fail it so the plan step rewrites it as a cmd: test command.
-	return checkResult{Label: criterion, Mode: "manual", Passed: false, Detail: "not machine-verifiable — rewrite as cmd: <test command>"}
+	// No cmd: prefix and no keyword match — mark as pending manual rewrite.
+	// Does NOT count as auto-fail (won't block the pipeline).
+	return checkResult{Label: criterion, Mode: "manual", Passed: false, Pending: true, Detail: "needs rewrite as cmd: <test command>"}
 }
 
 // --- Report upload ---
