@@ -10,4 +10,8 @@ clean:
 	rm -f bin/st
 
 install: build
-	cp bin/st /usr/local/bin/st
+	@# Resolve symlinks — write directly to the final target
+	@target=$$(readlink /usr/local/bin/st 2>/dev/null || echo /usr/local/bin/st); \
+	rm -f "$$target"; \
+	cp bin/st "$$target"; \
+	xattr -cr "$$target" 2>/dev/null || true
