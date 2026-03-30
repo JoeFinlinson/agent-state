@@ -152,6 +152,7 @@ type PipelineStepConfig struct {
 	HealthURLs []string // multiple health URLs — all must pass
 	Timeout    int      // seconds, 0 = default 300
 	Artifacts  []string
+	WatchCI    bool     // if true, watch the latest GH Actions run on main before health checks
 }
 
 type EvidenceConfig struct {
@@ -767,6 +768,8 @@ func applyValue(cfg *Config, levels [4]string, key, val string) {
 				if v, err := strconv.Atoi(val); err == nil {
 					(*step).Timeout = v
 				}
+			case "watch_ci":
+				(*step).WatchCI = val == "true"
 			}
 		}
 

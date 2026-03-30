@@ -69,6 +69,22 @@ func DeployCheck(s *store.Store, cfg *config.Config, id string, opts PipelineOpt
 
 	stepCfg := getStepConfig(cfg, "deploy_check")
 
+	runCmd := opts.RunCmd
+	if runCmd == nil {
+		root := cfg.Root()
+		runCmd = func(command string) ([]byte, int, error) {
+			return runCmdInDir(root, command)
+		}
+	}
+
+	// Phase 1: Watch CI on main branch (GH Actions run must complete first)
+	if stepCfg != nil && stepCfg.WatchCI {
+		if err := watchMainCI(runCmd); err != nil {
+			fmt.Fprintf(os.Stderr, "CI watch failed: %v\n", err)
+			return 1
+		}
+	}
+
 	// Collect all health URLs (singular + plural config)
 	var healthURLs []string
 	if stepCfg != nil {
@@ -76,7 +92,6 @@ func DeployCheck(s *store.Store, cfg *config.Config, id string, opts PipelineOpt
 			healthURLs = append(healthURLs, stepCfg.HealthURL)
 		}
 		for _, u := range stepCfg.HealthURLs {
-			// Avoid duplicates if same URL is in both fields
 			found := false
 			for _, existing := range healthURLs {
 				if existing == u {
@@ -90,7 +105,8 @@ func DeployCheck(s *store.Store, cfg *config.Config, id string, opts PipelineOpt
 		}
 	}
 
-	// Health URL checks — all must pass within timeout
+	// Phase 2: Health URL checks — all must pass within timeout
+	// The timeout covers the orchestrator/Lambda deploy time after CI completes
 	if len(healthURLs) > 0 {
 		timeout := 300
 		if stepCfg != nil && stepCfg.Timeout > 0 {
@@ -300,6 +316,58 @@ func getStepConfig(cfg *config.Config, step string) *config.PipelineStepConfig {
 		return cfg.Pipeline.Smoke
 	}
 	return nil
+}
+
+// watchMainCI watches the latest GH Actions runs on the main/master branch
+// across all configured repos until they complete.
+func watchMainCI(runCmd func(string) ([]byte, int, error)) error {
+	fmt.Println("Watching CI on main branch...")
+
+	// Use gh run list to find the latest in-progress run, then watch it
+	// gh run list --branch main --limit 1 --json databaseId,status,conclusion
+	deadline := time.Now().Add(20 * time.Minute) // CI shouldn't take longer than 20m
+	lastStatus := ""
+	for time.Now().Before(deadline) {
+		out, exitCode, _ := runCmd(`gh run list --branch main --limit 1 --json databaseId,status,conclusion --jq '.[0] | "\(.databaseId) \(.status) \(.conclusion)"' 2>/dev/null`)
+		if exitCode != 0 {
+			// gh not available or no runs — skip CI watch
+			fmt.Println("  could not query GH runs — skipping CI watch")
+			return nil
+		}
+
+		parts := strings.Fields(strings.TrimSpace(string(out)))
+		if len(parts) < 2 {
+			time.Sleep(10 * time.Second)
+			continue
+		}
+
+		runID := parts[0]
+		status := parts[1]
+		conclusion := ""
+		if len(parts) >= 3 {
+			conclusion = parts[2]
+		}
+
+		if status != lastStatus {
+			fmt.Printf("  CI run %s: %s", runID, status)
+			if conclusion != "" {
+				fmt.Printf(" (%s)", conclusion)
+			}
+			fmt.Println()
+			lastStatus = status
+		}
+
+		if status == "completed" {
+			if conclusion == "success" {
+				fmt.Println("  CI passed — proceeding to health checks")
+				return nil
+			}
+			return fmt.Errorf("CI run %s failed: %s", runID, conclusion)
+		}
+
+		time.Sleep(20 * time.Second)
+	}
+	return fmt.Errorf("CI watch timed out after 20 minutes")
 }
 
 func checkHealth(url string, timeout int, httpGet func(string) (int, error)) error {

@@ -1267,9 +1267,16 @@ func executeMergePrecheck(cfg *config.Config, itemID, worktreeDir string) StepRe
 
 func executeDeploy(s *store.Store, cfg *config.Config, itemID, worktreeDir string) StepResult {
 	sr := StepResult{Step: "deploy", Type: "deploy"}
+
+	// For CI watching, use the repo worktree that had the PR
+	prDir := resolveWorktreeDirWithPR(cfg, itemID)
+	if prDir == "" {
+		prDir = worktreeDir
+	}
+
 	pipeOpts := PipelineOpts{
 		RunCmd: func(cmd string) ([]byte, int, error) {
-			return runCmdInDir(worktreeDir, cmd)
+			return runCmdInDir(prDir, cmd)
 		},
 	}
 	code := DeployCheck(s, cfg, itemID, pipeOpts)
