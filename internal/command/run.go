@@ -1451,47 +1451,47 @@ func showPauseMenu(itemID, lastStep, nextStep string, result ItemResult, engine 
 	gateMu.Lock()
 	defer gateMu.Unlock()
 
-	lines := []string{
-		fmt.Sprintf("  PAUSED: %s", itemID),
+	// Content lines (all ASCII so len() == display width)
+	content := []string{
+		fmt.Sprintf("PAUSED: %s", itemID),
 		"",
-		fmt.Sprintf("  Last step:  %s (OK)", lastStep),
-		fmt.Sprintf("  Next step:  %s", nextStep),
-		fmt.Sprintf("  Cost so far: $%.2f", result.TotalCost),
-		fmt.Sprintf("  Steps done:  %d", len(result.Steps)),
+		fmt.Sprintf("Last:   %s (OK)", lastStep),
+		fmt.Sprintf("Next:   %s", nextStep),
+		fmt.Sprintf("Cost:   $%.2f", result.TotalCost),
+		fmt.Sprintf("Steps:  %d", len(result.Steps)),
 		"",
-		"  [c]ontinue  — resume pipeline",
-		"  [s]kip      — skip next step, continue",
-		"  [a]bort     — stop, release item for retry",
+		"[c] continue -- resume pipeline",
+		"[s] skip     -- skip next step, continue",
+		"[a] abort    -- stop, release item for retry",
 	}
 
-	// Measure by rune count (handles multi-byte chars like —)
-	runeWidth := func(s string) int {
-		n := 0
-		for _, r := range s {
-			n++
-			_ = r
-		}
-		return n
-	}
-	width := 0
-	for _, l := range lines {
-		if w := runeWidth(l); w > width {
-			width = w
+	// Find widest line
+	w := 0
+	for _, l := range content {
+		if len(l) > w {
+			w = len(l)
 		}
 	}
-	width += 2 // padding
 
-	bar := strings.Repeat("═", width)
-	fmt.Printf("\n╔%s╗\n", bar)
-	for _, l := range lines {
+	// Box drawing: each content line gets 2-char padding on each side
+	hline := func(l, m, r string) {
+		fmt.Print(l)
+		for i := 0; i < w+4; i++ {
+			fmt.Print(m)
+		}
+		fmt.Println(r)
+	}
+
+	fmt.Println()
+	hline("╔", "═", "╗")
+	for _, l := range content {
 		if l == "" {
-			fmt.Printf("╠%s╣\n", bar)
+			hline("╠", "═", "╣")
 		} else {
-			pad := width - runeWidth(l)
-			fmt.Printf("║%s%s║\n", l, strings.Repeat(" ", pad))
+			fmt.Printf("║  %-*s  ║\n", w, l)
 		}
 	}
-	fmt.Printf("╚%s╝\n", bar)
+	hline("╚", "═", "╝")
 
 	for {
 		fmt.Printf("\nAction [c/s/a]: ")
