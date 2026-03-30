@@ -1451,18 +1451,38 @@ func showPauseMenu(itemID, lastStep, nextStep string, result ItemResult, engine 
 	gateMu.Lock()
 	defer gateMu.Unlock()
 
-	fmt.Printf("\n╔══════════════════════════════════════════╗\n")
-	fmt.Printf("║  PAUSED: %s\n", itemID)
-	fmt.Printf("╠══════════════════════════════════════════╣\n")
-	fmt.Printf("║  Last step:  %s (OK)\n", lastStep)
-	fmt.Printf("║  Next step:  %s\n", nextStep)
-	fmt.Printf("║  Cost so far: $%.2f\n", result.TotalCost)
-	fmt.Printf("║  Steps done:  %d\n", len(result.Steps))
-	fmt.Printf("╠══════════════════════════════════════════╣\n")
-	fmt.Printf("║  [c]ontinue  — resume pipeline\n")
-	fmt.Printf("║  [s]kip      — skip next step, continue\n")
-	fmt.Printf("║  [a]bort     — stop, release item for retry\n")
-	fmt.Printf("╚══════════════════════════════════════════╝\n")
+	// Build lines first to measure width
+	lines := []string{
+		fmt.Sprintf("  PAUSED: %s", itemID),
+		"",
+		fmt.Sprintf("  Last step:  %s (OK)", lastStep),
+		fmt.Sprintf("  Next step:  %s", nextStep),
+		fmt.Sprintf("  Cost so far: $%.2f", result.TotalCost),
+		fmt.Sprintf("  Steps done:  %d", len(result.Steps)),
+		"",
+		"  [c]ontinue  — resume pipeline",
+		"  [s]kip      — skip next step, continue",
+		"  [a]bort     — stop, release item for retry",
+	}
+	width := 0
+	for _, l := range lines {
+		if len(l) > width {
+			width = len(l)
+		}
+	}
+	width += 2 // padding
+
+	bar := strings.Repeat("═", width)
+	fmt.Printf("\n╔%s╗\n", bar)
+	for i, l := range lines {
+		if l == "" {
+			fmt.Printf("╠%s╣\n", bar)
+		} else {
+			fmt.Printf("║%-*s║\n", width, l)
+		}
+		_ = i
+	}
+	fmt.Printf("╚%s╝\n", bar)
 
 	for {
 		fmt.Printf("\nAction [c/s/a]: ")
