@@ -69,27 +69,50 @@ func DeployCheck(s *store.Store, cfg *config.Config, id string, opts PipelineOpt
 
 	stepCfg := getStepConfig(cfg, "deploy_check")
 
-	// Health URL check (even without a command)
-	if stepCfg != nil && stepCfg.HealthURL != "" {
-		timeout := stepCfg.Timeout
-		if timeout == 0 {
-			timeout = 300
+	// Collect all health URLs (singular + plural config)
+	var healthURLs []string
+	if stepCfg != nil {
+		if stepCfg.HealthURL != "" {
+			healthURLs = append(healthURLs, stepCfg.HealthURL)
 		}
-		fmt.Printf("Checking health: %s (timeout %ds)\n", stepCfg.HealthURL, timeout)
+		for _, u := range stepCfg.HealthURLs {
+			// Avoid duplicates if same URL is in both fields
+			found := false
+			for _, existing := range healthURLs {
+				if existing == u {
+					found = true
+					break
+				}
+			}
+			if !found {
+				healthURLs = append(healthURLs, u)
+			}
+		}
+	}
+
+	// Health URL checks — all must pass within timeout
+	if len(healthURLs) > 0 {
+		timeout := 300
+		if stepCfg != nil && stepCfg.Timeout > 0 {
+			timeout = stepCfg.Timeout
+		}
 		httpGet := opts.HTTPGet
 		if httpGet == nil {
 			httpGet = defaultHTTPGet
 		}
-		if err := checkHealth(stepCfg.HealthURL, timeout, httpGet); err != nil {
-			fmt.Fprintf(os.Stderr, "health check failed: %v\n", err)
-			return 1
+		for _, url := range healthURLs {
+			fmt.Printf("Checking health: %s (timeout %ds)\n", url, timeout)
+			if err := checkHealth(url, timeout, httpGet); err != nil {
+				fmt.Fprintf(os.Stderr, "health check failed: %v\n", err)
+				return 1
+			}
+			fmt.Println("  health: OK")
 		}
-		fmt.Println("  health: OK")
 	}
 
 	if stepCfg == nil || stepCfg.Command == "" {
-		// No command — just health check was enough (or nothing configured)
-		if stepCfg != nil && stepCfg.HealthURL != "" {
+		// No command — just health checks were enough (or nothing configured)
+		if len(healthURLs) > 0 {
 			now := time.Now()
 			setNestedField(item, "delivery", "stage", "deployed_dev")
 			setNestedField(item, "delivery", "deployed_date", now.Format("2006-01-02"))

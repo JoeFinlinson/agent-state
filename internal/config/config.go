@@ -148,8 +148,9 @@ type PipelineStepConfig struct {
 	Command    string
 	PreChecks  []string
 	PostRecord string
-	HealthURL  string
-	Timeout    int // seconds, 0 = default 300
+	HealthURL  string   // single health URL (backward compatible)
+	HealthURLs []string // multiple health URLs — all must pass
+	Timeout    int      // seconds, 0 = default 300
 	Artifacts  []string
 }
 
@@ -901,6 +902,8 @@ func applyInlineList(cfg *Config, levels [4]string, key string, items []string) 
 					step.PreChecks = items
 				case "artifacts":
 					step.Artifacts = items
+				case "health_urls":
+					step.HealthURLs = items
 				}
 			}
 		}
