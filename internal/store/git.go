@@ -43,7 +43,8 @@ func acquireGitLock(dir string) (func(), error) {
 }
 
 // GitPull pulls latest changes from remote before reading items.
-// Best-effort: returns nil on failure so commands still work offline.
+// Preserves any uncommitted local changes (e.g., test evidence written
+// but not yet synced) by committing them first, then pulling with rebase.
 func GitPull(cfg *config.Config) error {
 	if cfg.Git == nil || !cfg.Git.AutoPush {
 		return nil
@@ -51,12 +52,28 @@ func GitPull(cfg *config.Config) error {
 
 	unlock, err := acquireGitLock(cfg.ItemDir())
 	if err != nil {
-		// Lock timeout — skip pull rather than hang
 		return nil
 	}
 	defer unlock()
 
-	return gitCmdQuiet(cfg.ItemDir(), "pull", "--ff-only")
+	root := cfg.ItemDir()
+
+	// Commit any uncommitted local changes BEFORE pulling,
+	// so they don't get overwritten by the remote.
+	out, err := gitOutput(root, "status", "--porcelain")
+	if err == nil && strings.TrimSpace(out) != "" {
+		_ = gitCmdQuiet(root, "add", "-A")
+		_ = gitCmdQuiet(root, "commit", "-m", "auto-save: preserve local changes before pull")
+	}
+
+	// Pull with rebase to avoid merge commits
+	if err := gitCmdQuiet(root, "pull", "--rebase"); err != nil {
+		// If rebase fails (conflict), abort and continue with local state
+		_ = gitCmdQuiet(root, "rebase", "--abort")
+		return nil
+	}
+
+	return nil
 }
 
 // GitSync stages, commits, and pushes changes in the item root directory.
