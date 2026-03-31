@@ -737,34 +737,19 @@ func Run(s *store.Store, cfg *config.Config, sprintID string, opts RunOpts, engi
 	// Reload store after recovery
 	s, _ = store.New(cfg)
 
-	// Set up Ctrl+C handler — first press pauses after current step,
-	// second press kills subprocesses, third press hard-exits.
-	runCtx, runCancel := context.WithCancel(context.Background())
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt)
+	// Set up Ctrl+C handler — first press kills current subprocess and pauses,
+	// second press hard-exits.
+	activeSigChan = make(chan os.Signal, 1)
+	signal.Notify(activeSigChan, os.Interrupt)
 	pauseRequested.Store(0)
-	go func() {
-		<-sigChan
-		fmt.Fprintf(os.Stderr, "\n[st run] Ctrl+C received — will pause after current step finishes...\n")
-		pauseRequested.Store(1)
-		// Second Ctrl+C = kill subprocesses
-		<-sigChan
-		fmt.Fprintf(os.Stderr, "\n[st run] Interrupted — killing subprocesses...\n")
-		runCancel()
-		// Third Ctrl+C = hard exit
-		<-sigChan
-		os.Exit(1)
-	}()
-
-	// Store the cancel context for subprocess use
-	activeRunCtx = runCtx
+	resetRunCtx() // creates activeRunCtx + arms signal handler
 
 	// Execute groups sequentially, items within groups up to parallelism
 	start := time.Now()
 	var allResults []ItemResult
 
 	for i, group := range groups {
-		if runCtx.Err() != nil {
+		if activeRunCtx != nil && activeRunCtx.Err() != nil {
 			break
 		}
 
@@ -772,8 +757,13 @@ func Run(s *store.Store, cfg *config.Config, sprintID string, opts RunOpts, engi
 		results := runGroup(s, cfg, group, sprintID, pipeline, opts, engine)
 		allResults = append(allResults, results...)
 	}
-	signal.Stop(sigChan)
+	signal.Stop(activeSigChan)
+	if activeRunCancel != nil {
+		activeRunCancel()
+	}
 	activeRunCtx = nil
+	activeRunCancel = nil
+	activeSigChan = nil
 	pauseRequested.Store(0)
 
 	// Clean up any items that were started but didn't complete
@@ -1002,9 +992,40 @@ var gateMu sync.Mutex
 // activeRunCtx is the cancel context for the current st run — Ctrl+C cancels it.
 var activeRunCtx context.Context
 
+// activeRunCancel cancels activeRunCtx. Set by Run() and resetRunCtx().
+var activeRunCancel context.CancelFunc
+
+// activeSigChan receives os.Interrupt for the current run.
+var activeSigChan chan os.Signal
+
 // pauseRequested is set to 1 by Ctrl+C. The step loop checks it between steps
 // and shows an interactive menu instead of killing the process immediately.
 var pauseRequested atomic.Int32
+
+// resetRunCtx creates a fresh context after Ctrl+C cancellation.
+// Called when user chooses "continue" from pause menu.
+func resetRunCtx() {
+	ctx, cancel := context.WithCancel(context.Background())
+	activeRunCtx = ctx
+	activeRunCancel = cancel
+	// Re-arm signal handler
+	go func() {
+		select {
+		case <-activeSigChan:
+			fmt.Fprintf(os.Stderr, "\n[st run] Ctrl+C received — stopping current step...\n")
+			pauseRequested.Store(1)
+			cancel()
+			// Second Ctrl+C = hard exit
+			select {
+			case <-activeSigChan:
+				fmt.Fprintf(os.Stderr, "\n[st run] Force exit.\n")
+				os.Exit(1)
+			case <-ctx.Done():
+			}
+		case <-ctx.Done():
+		}
+	}()
+}
 
 func runSingleItem(s *store.Store, cfg *config.Config, itemID, sprintID string, pipeline []config.RunStepDef, opts RunOpts, engine RunEngine) ItemResult {
 	start := time.Now()
@@ -1144,7 +1165,11 @@ func runSingleItem(s *store.Store, cfg *config.Config, itemID, sprintID string, 
 			// it to claude, retry CI. Keep going as long as the error
 			// changes (= progress). Pause only after 3 consecutive
 			// identical errors.
-			if step.Type != "gate" && step.Type != "close" {
+			//
+			// Skip fix loop if interrupted (Ctrl+C / context cancelled) —
+			// go straight to pause menu instead.
+			interrupted := pauseRequested.Load() != 0 || (activeRunCtx != nil && activeRunCtx.Err() != nil)
+			if step.Type != "gate" && step.Type != "close" && !interrupted {
 				fixed := false
 				lastError := sr.Error
 				sameErrorCount := 0
@@ -1155,6 +1180,11 @@ func runSingleItem(s *store.Store, cfg *config.Config, itemID, sprintID string, 
 					stepLabel = "UAT"
 				}
 				for attempt := 1; ; attempt++ {
+					// Check for interruption before each attempt
+					if pauseRequested.Load() != 0 || (activeRunCtx != nil && activeRunCtx.Err() != nil) {
+						fmt.Printf("[%s] Interrupted — skipping fix attempts\n", itemID)
+						break
+					}
 					fmt.Printf("[%s] %s fix attempt %d...\n", itemID, stepLabel, attempt)
 					fixPrompt := fmt.Sprintf(
 						"The %s step failed for item %s (attempt %d). The error was:\n\n%s\n\n"+
@@ -1212,6 +1242,8 @@ func runSingleItem(s *store.Store, cfg *config.Config, itemID, sprintID string, 
 					if sameErrorCount >= maxSameError {
 						fmt.Printf("[%s] Same error %d times — pausing for input.\n", itemID, sameErrorCount)
 						action := showPauseMenu(itemID, step.Name(), step.Name(), result, engine)
+						pauseRequested.Store(0)
+						resetRunCtx() // fresh context so claude can run again
 						switch action {
 						case "continue":
 							sameErrorCount = 0 // reset and keep trying
@@ -1280,6 +1312,8 @@ func runSingleItem(s *store.Store, cfg *config.Config, itemID, sprintID string, 
 			if shouldPause {
 				action := showPauseMenu(itemID, step.Name(), nextStep, result, engine)
 				pauseRequested.Store(0) // clear the flag after handling
+				// Reset context so subsequent steps can launch subprocesses
+				resetRunCtx()
 				switch action {
 				case "continue":
 					// proceed to next step
@@ -3360,7 +3394,9 @@ func generateSessionID() string {
 
 // Idle timeouts — process is killed if no output for this long.
 // Active processes that keep producing output run indefinitely.
-const defaultClaudeIdleTimeout = 5 * time.Minute
+// Claude needs a generous timeout — it legitimately thinks for long
+// periods without producing stdout (especially during planning).
+const defaultClaudeIdleTimeout = 15 * time.Minute
 const defaultCommandIdleTimeout = 3 * time.Minute
 const defaultCIIdleTimeout = 10 * time.Minute
 
