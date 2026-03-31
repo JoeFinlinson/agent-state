@@ -133,9 +133,10 @@ type SuiteConfig struct {
 }
 
 type ScopeSuiteConfig struct {
-	Command   string
-	Triggers  []string // file glob patterns that activate this suite
-	Artifacts []string // glob patterns for artifacts to upload after execution
+	Command       string
+	Triggers      []string // file glob patterns that activate this suite
+	Artifacts     []string // glob patterns for artifacts to upload after execution
+	PostDeployCmd string   // command to run post-deploy verification (e.g., E2E against dev)
 }
 
 type PipelineConfig struct {
@@ -717,15 +718,18 @@ func applyValue(cfg *Config, levels [4]string, key, val string) {
 			}
 			// val == "" means this is a section header (suite name), levels tracks it
 		case "scope_suites":
-			if val != "" && key != "command" && key != "artifacts" {
+			if val != "" && key != "command" && key != "artifacts" && key != "post_deploy" {
 				// Simple format
 				cfg.Testing.ScopeSuites[key] = ScopeSuiteConfig{Command: val}
 			} else if val != "" {
 				// Nested format field
 				suiteName := levels[2]
 				sc := cfg.Testing.ScopeSuites[suiteName]
-				if key == "command" {
+				switch key {
+				case "command":
 					sc.Command = val
+				case "post_deploy":
+					sc.PostDeployCmd = val
 				}
 				cfg.Testing.ScopeSuites[suiteName] = sc
 			}
@@ -932,16 +936,23 @@ func applyInlineList(cfg *Config, levels [4]string, key string, items []string) 
 
 	case "testing":
 		ensureTesting(cfg)
-		if key == "artifacts" && levels[2] != "" {
+		if (key == "artifacts" || key == "triggers") && levels[2] != "" {
 			suiteName := levels[2]
 			switch levels[1] {
 			case "required_suites":
 				sc := cfg.Testing.RequiredSuites[suiteName]
-				sc.Artifacts = items
+				if key == "artifacts" {
+					sc.Artifacts = items
+				}
 				cfg.Testing.RequiredSuites[suiteName] = sc
 			case "scope_suites":
 				sc := cfg.Testing.ScopeSuites[suiteName]
-				sc.Artifacts = items
+				switch key {
+				case "artifacts":
+					sc.Artifacts = items
+				case "triggers":
+					sc.Triggers = items
+				}
 				cfg.Testing.ScopeSuites[suiteName] = sc
 			}
 		}

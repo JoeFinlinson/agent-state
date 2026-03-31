@@ -399,3 +399,48 @@ func TestItemDir(t *testing.T) {
 		t.Errorf("ItemDir() = %q, want %q", got, want)
 	}
 }
+
+func TestScopeSuitePostDeployAndTriggers(t *testing.T) {
+	root := t.TempDir()
+	asDir := filepath.Join(root, ".as")
+	os.MkdirAll(asDir, 0755)
+
+	os.WriteFile(filepath.Join(asDir, "config.yaml"), []byte(`paths:
+  root: .
+
+testing:
+  enabled: true
+  scope_suites:
+    web_e2e:
+      command: scripts/e2e-local.sh run
+      post_deploy: scripts/e2e-local.sh run --target dev
+      triggers: [src/app/**, src/components/**]
+      artifacts: [test-results/**]
+`), 0644)
+
+	cfg, err := Load(root)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	sc, ok := cfg.Testing.ScopeSuites["web_e2e"]
+	if !ok {
+		t.Fatal("web_e2e scope suite not found")
+	}
+	if sc.Command != "scripts/e2e-local.sh run" {
+		t.Errorf("Command = %q", sc.Command)
+	}
+	if sc.PostDeployCmd != "scripts/e2e-local.sh run --target dev" {
+		t.Errorf("PostDeployCmd = %q", sc.PostDeployCmd)
+	}
+	if len(sc.Triggers) != 2 {
+		t.Errorf("Triggers = %v, want 2 items", sc.Triggers)
+	} else {
+		if sc.Triggers[0] != "src/app/**" || sc.Triggers[1] != "src/components/**" {
+			t.Errorf("Triggers = %v", sc.Triggers)
+		}
+	}
+	if len(sc.Artifacts) != 1 || sc.Artifacts[0] != "test-results/**" {
+		t.Errorf("Artifacts = %v", sc.Artifacts)
+	}
+}

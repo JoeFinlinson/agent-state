@@ -1851,12 +1851,99 @@ func executeGate(itemID string, engine RunEngine) StepResult {
 	return sr
 }
 
+// postDeployE2E checks the item's manifest for page files that need E2E coverage,
+// then runs the corresponding E2E specs against the deployed dev environment.
+// Returns a summary of results (empty string if no post-deploy E2E was needed).
+func postDeployE2E(cfg *config.Config, itemID string) string {
+	m, err := manifest.Load(cfg.ManifestDir(), itemID)
+	if err != nil || len(m.PRs) == 0 {
+		return ""
+	}
+
+	// Collect unique E2E specs from page files across all PRs
+	specSet := map[string]bool{}
+	for _, pr := range m.PRs {
+		for _, f := range pr.Files {
+			if f.Action == "D" {
+				continue
+			}
+			spec := e2eSpecFor(f.Path)
+			if spec != "" {
+				specSet[spec] = true
+			}
+		}
+	}
+	if len(specSet) == 0 {
+		return ""
+	}
+
+	// Find scope suites with PostDeployCmd
+	if cfg.Testing == nil {
+		return ""
+	}
+	var deployCmd string
+	for _, suite := range cfg.Testing.ScopeSuites {
+		if suite.PostDeployCmd != "" {
+			deployCmd = suite.PostDeployCmd
+			break
+		}
+	}
+	if deployCmd == "" {
+		return ""
+	}
+
+	// Run each spec against dev
+	var results []string
+	specs := make([]string, 0, len(specSet))
+	for spec := range specSet {
+		specs = append(specs, spec)
+	}
+
+	// Determine the run directory (worktree base or project root)
+	runDir := cfg.Root()
+	if cfg.Worktree != nil && cfg.Worktree.Enabled {
+		wtBase := filepath.Join(cfg.Root(), cfg.Worktree.BaseDir, itemID)
+		if _, err := os.Stat(wtBase); err == nil {
+			runDir = wtBase
+		}
+	}
+
+	fmt.Printf("[%s] Running post-deploy E2E against dev (%d spec(s))...\n", itemID, len(specs))
+	allPassed := true
+	for _, spec := range specs {
+		cmd := deployCmd + " " + spec
+		fmt.Printf("  → %s\n", spec)
+		output, exitCode, err := runCmdInDir(runDir, cmd)
+		if err != nil || exitCode != 0 {
+			allPassed = false
+			results = append(results, fmt.Sprintf("FAIL: %s (exit %d)", spec, exitCode))
+			if len(output) > 500 {
+				output = output[len(output)-500:]
+			}
+			results = append(results, string(output))
+		} else {
+			results = append(results, fmt.Sprintf("PASS: %s", spec))
+		}
+	}
+
+	if allPassed {
+		return fmt.Sprintf("Post-deploy E2E: %d spec(s) passed against dev", len(specs))
+	}
+	return "Post-deploy E2E results:\n" + strings.Join(results, "\n")
+}
+
 // executeUATReview runs UAT, then enters a conversational loop where the user
 // can approve, reject, or give plain-text feedback that gets routed to claude.
 // Claude acts on the feedback (writes tests, fixes code, etc.), then UAT re-runs
 // and the updated report is shown. Loop continues until approve or reject.
 func executeUATReview(s *store.Store, cfg *config.Config, itemID, sprintID string, step config.RunStepDef, opts RunOpts, engine RunEngine, worktreeDir, claudeSessionID string) StepResult {
 	sr := StepResult{Step: step.Name(), Type: "uat_review"}
+
+	// Run post-deploy E2E on first iteration (before UAT assessment)
+	e2eSummary := postDeployE2E(cfg, itemID)
+	if e2eSummary != "" {
+		fmt.Printf("[%s] %s\n", itemID, e2eSummary)
+	}
 
 	for iteration := 1; ; iteration++ {
 		// Run UAT
@@ -1872,15 +1959,20 @@ func executeUATReview(s *store.Store, cfg *config.Config, itemID, sprintID strin
 		})
 
 		// Now launch claude to produce the UAT summary report
+		e2eContext := ""
+		if e2eSummary != "" {
+			e2eContext = fmt.Sprintf("\n\nPost-deploy E2E results:\n%s\n", e2eSummary)
+		}
 		reportPrompt := fmt.Sprintf(
-			"You just ran UAT for item %s. The UAT exit code was %d.\n\n"+
+			"You just ran UAT for item %s. The UAT exit code was %d.%s\n\n"+
 				"Produce a concise UAT summary report for the user. Include:\n"+
 				"1. WHAT CHANGED — describe the feature in 2-3 sentences\n"+
 				"2. WHAT WAS TESTED — list the test suites that passed, any coverage gaps\n"+
-				"3. ACCEPTANCE CRITERIA — how many passed/failed, highlight any failures\n"+
-				"4. RECOMMENDATION — should the user approve? Why or why not?\n\n"+
+				"3. POST-DEPLOY E2E — results of E2E tests run against dev (if any)\n"+
+				"4. ACCEPTANCE CRITERIA — how many passed/failed, highlight any failures\n"+
+				"5. RECOMMENDATION — should the user approve? Why or why not?\n\n"+
 				"Keep it brief and actionable. The user will read this and decide whether to approve.",
-			itemID, uatCode)
+			itemID, uatCode, e2eContext)
 
 		reportStep := config.RunStepDef{Type: "claude", Prompt: reportPrompt}
 		reportStep.SetName("uat_report")

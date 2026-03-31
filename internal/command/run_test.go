@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jfinlinson/agent-state/internal/config"
+	"github.com/jfinlinson/agent-state/internal/manifest"
 	"github.com/jfinlinson/agent-state/internal/registry"
 	"github.com/jfinlinson/agent-state/internal/store"
 )
@@ -1199,5 +1200,121 @@ func TestCloseGateRejectsMultipleSkips(t *testing.T) {
 	sr := executeClose(s, cfg, "T-001", step)
 	if sr.Passed {
 		t.Error("close should reject item with skipped deploy_watch in multi-skip list")
+	}
+}
+
+// --- Post-deploy E2E tests ---
+
+func TestPostDeployE2ENoManifest(t *testing.T) {
+	_, cfg := setupRunTestEnv(t)
+	result := postDeployE2E(cfg, "T-999")
+	if result != "" {
+		t.Errorf("expected empty result for missing manifest, got %q", result)
+	}
+}
+
+func TestPostDeployE2ENoPageFiles(t *testing.T) {
+	_, cfg := setupRunTestEnv(t)
+
+	// Create manifest with no page files
+	os.MkdirAll(cfg.ManifestDir(), 0755)
+	m := &manifest.Manifest{PRs: []manifest.PRRecord{{
+		Repo: "api", PRNumber: 42,
+		Files: []manifest.FileRecord{
+			{Path: "internal/db/billing.go", Action: "M", Type: "app"},
+		},
+	}}}
+	data, _ := json.Marshal(m)
+	os.WriteFile(filepath.Join(cfg.ManifestDir(), "T-001.json"), data, 0644)
+
+	result := postDeployE2E(cfg, "T-001")
+	if result != "" {
+		t.Errorf("expected empty result for non-page files, got %q", result)
+	}
+}
+
+func TestPostDeployE2EFindsPageSpecs(t *testing.T) {
+	_, cfg := setupRunTestEnv(t)
+
+	// Add post_deploy to scope suite config
+	cfg.Testing = &config.TestingConfig{
+		ScopeSuites: map[string]config.ScopeSuiteConfig{
+			"web_e2e": {
+				Command:       "scripts/e2e-local.sh run",
+				PostDeployCmd: "echo DEPLOY_TEST",
+			},
+		},
+	}
+
+	// Create manifest with page files
+	os.MkdirAll(cfg.ManifestDir(), 0755)
+	m := &manifest.Manifest{PRs: []manifest.PRRecord{{
+		Repo: "web", PRNumber: 15,
+		Files: []manifest.FileRecord{
+			{Path: "src/app/(app)/app/notes/page.tsx", Action: "M", Type: "app"},
+			{Path: "src/app/(app)/app/billing/page.tsx", Action: "M", Type: "app"},
+			{Path: "src/components/NoteCard.tsx", Action: "M", Type: "app"}, // not a page file
+		},
+	}}}
+	data, _ := json.Marshal(m)
+	os.WriteFile(filepath.Join(cfg.ManifestDir(), "T-001.json"), data, 0644)
+
+	result := postDeployE2E(cfg, "T-001")
+	if result == "" {
+		t.Fatal("expected post-deploy E2E result, got empty")
+	}
+	// Should have run 2 specs (notes.spec.ts and billing.spec.ts)
+	if !strings.Contains(result, "2 spec(s)") && !strings.Contains(result, "notes.spec.ts") {
+		t.Errorf("unexpected result: %s", result)
+	}
+}
+
+func TestPostDeployE2EDeletedFilesSkipped(t *testing.T) {
+	_, cfg := setupRunTestEnv(t)
+
+	cfg.Testing = &config.TestingConfig{
+		ScopeSuites: map[string]config.ScopeSuiteConfig{
+			"web_e2e": {PostDeployCmd: "echo DEPLOY_TEST"},
+		},
+	}
+
+	os.MkdirAll(cfg.ManifestDir(), 0755)
+	m := &manifest.Manifest{PRs: []manifest.PRRecord{{
+		Repo: "web", PRNumber: 15,
+		Files: []manifest.FileRecord{
+			{Path: "src/app/(app)/app/notes/page.tsx", Action: "D", Type: "app"}, // deleted
+		},
+	}}}
+	data, _ := json.Marshal(m)
+	os.WriteFile(filepath.Join(cfg.ManifestDir(), "T-001.json"), data, 0644)
+
+	result := postDeployE2E(cfg, "T-001")
+	if result != "" {
+		t.Errorf("expected empty result for deleted page file, got %q", result)
+	}
+}
+
+func TestPostDeployE2ENoPostDeployConfig(t *testing.T) {
+	_, cfg := setupRunTestEnv(t)
+
+	cfg.Testing = &config.TestingConfig{
+		ScopeSuites: map[string]config.ScopeSuiteConfig{
+			"web_e2e": {Command: "scripts/e2e-local.sh run"}, // no PostDeployCmd
+		},
+	}
+
+	os.MkdirAll(cfg.ManifestDir(), 0755)
+	m := &manifest.Manifest{PRs: []manifest.PRRecord{{
+		Repo: "web", PRNumber: 15,
+		Files: []manifest.FileRecord{
+			{Path: "src/app/(app)/app/notes/page.tsx", Action: "M", Type: "app"},
+		},
+	}}}
+	data, _ := json.Marshal(m)
+	os.WriteFile(filepath.Join(cfg.ManifestDir(), "T-001.json"), data, 0644)
+
+	result := postDeployE2E(cfg, "T-001")
+	if result != "" {
+		t.Errorf("expected empty when no PostDeployCmd configured, got %q", result)
 	}
 }
