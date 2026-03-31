@@ -41,6 +41,9 @@ type RunOpts struct {
 type RunEngine struct {
 	// RunClaude launches a claude -p subprocess and returns its output.
 	RunClaude func(cwd string, args []string, env []string) ([]byte, int, error)
+	// RunClaudeInteractive launches claude in interactive mode (stdin/stdout attached).
+	// Returns exit code. If nil, uses default exec.Command implementation.
+	RunClaudeInteractive func(cwd string, args []string) (int, error)
 	// PromptUser reads a line from stdin (for gate steps).
 	PromptUser func(prompt string) (string, error)
 }
@@ -1910,23 +1913,27 @@ func executeUATReview(s *store.Store, cfg *config.Config, itemID, sprintID strin
 			fmt.Println("  UAT will re-run automatically when you return.")
 			fmt.Println()
 
-			// Launch claude in interactive mode (no -p flag) with --resume
-			// so it has full context from the pipeline session
-			claudeBin, err := exec.LookPath("claude")
-			if err != nil {
-				fmt.Printf("[%s] claude not found in PATH\n", itemID)
-				continue
-			}
 			args := []string{"--resume", claudeSessionID}
 			if worktreeDir != "" {
 				args = append(args, "--add-dir", worktreeDir)
 			}
-			cmd := exec.Command(claudeBin, args...)
-			cmd.Dir = worktreeDir
-			cmd.Stdin = os.Stdin
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			cmd.Run()
+
+			if engine.RunClaudeInteractive != nil {
+				engine.RunClaudeInteractive(worktreeDir, args)
+			} else {
+				// Default: launch claude binary with stdin/stdout attached
+				claudeBin, err := exec.LookPath("claude")
+				if err != nil {
+					fmt.Printf("[%s] claude not found in PATH\n", itemID)
+					continue
+				}
+				cmd := exec.Command(claudeBin, args...)
+				cmd.Dir = worktreeDir
+				cmd.Stdin = os.Stdin
+				cmd.Stdout = os.Stdout
+				cmd.Stderr = os.Stderr
+				cmd.Run()
+			}
 
 			fmt.Printf("\n[%s] Interactive session ended. Re-running UAT...\n", itemID)
 			s, _ = store.New(cfg)

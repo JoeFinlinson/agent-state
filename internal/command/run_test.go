@@ -978,3 +978,129 @@ func TestUATReviewFeedbackLoop(t *testing.T) {
 		t.Error("expected non-zero cost from feedback claude call")
 	}
 }
+
+func TestUATReviewInteractiveChat(t *testing.T) {
+	s, cfg := setupRunTestEnv(t)
+
+	item, _ := s.Get("T-001")
+	item.Doc.SetField("status", "active")
+	item.Status = "active"
+	s.Write(item)
+
+	step := config.RunStepDef{Type: "uat_review"}
+	step.SetName("uat_review")
+
+	// Track interactive session launches
+	interactiveCalls := 0
+	var interactiveCwd string
+	var interactiveArgs []string
+
+	promptCount := 0
+	claudeCalls := 0
+	engine := RunEngine{
+		RunClaude: func(cwd string, args []string, env []string) ([]byte, int, error) {
+			claudeCalls++
+			result := ClaudeResult{Type: "result", Subtype: "success", TotalCostUSD: 0.01}
+			data, _ := json.Marshal(result)
+			return data, 0, nil
+		},
+		RunClaudeInteractive: func(cwd string, args []string) (int, error) {
+			interactiveCalls++
+			interactiveCwd = cwd
+			interactiveArgs = args
+			// Simulate user chatting and exiting
+			return 0, nil
+		},
+		PromptUser: func(prompt string) (string, error) {
+			promptCount++
+			if promptCount == 1 {
+				// First prompt: user selects chat
+				return "3", nil
+			}
+			if promptCount == 2 {
+				// Second prompt (after interactive returns): approve
+				return "1", nil
+			}
+			return "approve", nil
+		},
+	}
+
+	sr := executeUATReview(s, cfg, "T-001", "test-sprint", step, RunOpts{}, engine, cfg.Root(), "test-session")
+
+	// Verify interactive session was launched
+	if interactiveCalls != 1 {
+		t.Errorf("expected 1 interactive session, got %d", interactiveCalls)
+	}
+
+	// Verify correct args passed to interactive session
+	if interactiveCwd != cfg.Root() {
+		t.Errorf("interactive cwd = %q, want %q", interactiveCwd, cfg.Root())
+	}
+	foundResume := false
+	for i, arg := range interactiveArgs {
+		if arg == "--resume" && i+1 < len(interactiveArgs) && interactiveArgs[i+1] == "test-session" {
+			foundResume = true
+		}
+	}
+	if !foundResume {
+		t.Errorf("expected --resume test-session in args, got %v", interactiveArgs)
+	}
+
+	// Verify UAT re-ran after interactive session (claude called for report on iteration 2)
+	if claudeCalls < 2 {
+		t.Errorf("expected claude called at least twice (report iter 1 + report iter 2), got %d", claudeCalls)
+	}
+
+	// Verify overall result
+	if !sr.Passed {
+		t.Errorf("UAT review should pass after chat + approve, got error: %s", sr.Error)
+	}
+	if promptCount != 2 {
+		t.Errorf("expected 2 prompts (chat + approve), got %d", promptCount)
+	}
+}
+
+func TestUATReviewInteractiveThenReject(t *testing.T) {
+	s, cfg := setupRunTestEnv(t)
+
+	item, _ := s.Get("T-001")
+	item.Doc.SetField("status", "active")
+	item.Status = "active"
+	s.Write(item)
+
+	step := config.RunStepDef{Type: "uat_review"}
+	step.SetName("uat_review")
+
+	interactiveCalls := 0
+	promptCount := 0
+	engine := RunEngine{
+		RunClaude: func(cwd string, args []string, env []string) ([]byte, int, error) {
+			result := ClaudeResult{Type: "result", Subtype: "success"}
+			data, _ := json.Marshal(result)
+			return data, 0, nil
+		},
+		RunClaudeInteractive: func(cwd string, args []string) (int, error) {
+			interactiveCalls++
+			return 0, nil
+		},
+		PromptUser: func(prompt string) (string, error) {
+			promptCount++
+			if promptCount == 1 {
+				return "chat", nil // synonym for 3
+			}
+			return "reject", nil // reject after chatting
+		},
+	}
+
+	sr := executeUATReview(s, cfg, "T-001", "test-sprint", step, RunOpts{}, engine, cfg.Root(), "test-session")
+
+	if interactiveCalls != 1 {
+		t.Errorf("expected 1 interactive session, got %d", interactiveCalls)
+	}
+	if sr.Passed {
+		t.Error("UAT review should fail on reject after chat")
+	}
+	if sr.Error != "user rejected" {
+		t.Errorf("expected 'user rejected', got %q", sr.Error)
+	}
+}
