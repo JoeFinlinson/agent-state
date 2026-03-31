@@ -525,6 +525,91 @@ func RunStatus(s *store.Store, cfg *config.Config) int {
 	return 0
 }
 
+// autoParallelism determines how many items can safely run in parallel
+// by analyzing which repos each item touches. Items touching different
+// repos can run concurrently; items sharing a repo must be sequential.
+func autoParallelism(s *store.Store, cfg *config.Config, itemIDs []string) int {
+	if cfg.Worktree == nil || !cfg.Worktree.Enabled {
+		return 1
+	}
+
+	// Build a map of item -> repos it touches
+	itemRepos := make(map[string]map[string]bool)
+	for _, id := range itemIDs {
+		repos := make(map[string]bool)
+		item, ok := s.Get(id)
+		if !ok {
+			repos["unknown"] = true
+			itemRepos[id] = repos
+			continue
+		}
+
+		// Check PR manifest for repo info
+		if item.Manifest != nil {
+			if prsRaw, ok := item.Manifest["prs"]; ok {
+				if prsStr, ok := prsRaw.(string); ok {
+					for _, pr := range strings.Split(prsStr, ",") {
+						pr = strings.TrimSpace(pr)
+						if idx := strings.Index(pr, "#"); idx > 0 {
+							repos[pr[:idx]] = true
+						}
+					}
+				}
+			}
+		}
+
+		// If no PR yet, check which worktree dirs have changes
+		if len(repos) == 0 {
+			dirs := allWorktreeDirs(cfg, id)
+			for _, dir := range dirs {
+				out, _, _ := runCmdInDir(dir, "git diff --stat main 2>/dev/null")
+				if len(strings.TrimSpace(string(out))) > 0 {
+					repos[filepath.Base(dir)] = true
+				}
+			}
+		}
+
+		// If still empty (new item, no work yet), assume all repos
+		if len(repos) == 0 {
+			for _, r := range cfg.Worktree.Repos {
+				repos[r] = true
+			}
+		}
+
+		itemRepos[id] = repos
+	}
+
+	// Find max set of non-overlapping items (greedy)
+	used := make(map[string]bool) // repos already claimed
+	parallel := 0
+	for _, id := range itemIDs {
+		repos := itemRepos[id]
+		conflict := false
+		for repo := range repos {
+			if used[repo] {
+				conflict = true
+				break
+			}
+		}
+		if !conflict {
+			parallel++
+			for repo := range repos {
+				used[repo] = true
+			}
+		}
+	}
+
+	if parallel < 1 {
+		parallel = 1
+	}
+
+	if parallel > 1 {
+		fmt.Printf("  auto-parallel: %d items can run concurrently (no repo overlap)\n", parallel)
+	}
+
+	return parallel
+}
+
 func RunItem(s *store.Store, cfg *config.Config, itemID string, opts RunOpts, engine RunEngine) int {
 	pipeline := cfg.RunPipeline()
 	if len(pipeline) == 0 {
@@ -804,6 +889,12 @@ func runGroup(s *store.Store, cfg *config.Config, group []string, sprintID strin
 	if maxPar <= 0 {
 		maxPar = 1
 	}
+
+	// Auto-parallelism: analyze repo overlap to find safe concurrency
+	if maxPar == 1 && len(eligible) > 1 && cfg.Run != nil && cfg.Run.AutoParallel {
+		maxPar = autoParallelism(s, cfg, eligible)
+	}
+
 	if maxPar > len(eligible) {
 		maxPar = len(eligible)
 	}

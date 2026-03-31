@@ -206,6 +206,7 @@ type RunConfig struct {
 	StepOrder        []string              // ordered step names
 	Steps            map[string]RunStepDef // step name → definition
 	Breakpoints      []string              // step names where the pipeline pauses for user input
+	AutoParallel     bool                  // auto-determine parallelism based on repo overlap
 }
 
 // RunStepDef defines a single pipeline step for st run.
@@ -847,6 +848,8 @@ func applyValue(cfg *Config, levels [4]string, key, val string) {
 				if v, err := strconv.ParseFloat(val, 64); err == nil {
 					cfg.Run.DefaultBudgetUSD = v
 				}
+			case "auto_parallel":
+				cfg.Run.AutoParallel = val == "true"
 			}
 		case "steps":
 			// levels[2] = step name, key = field name
