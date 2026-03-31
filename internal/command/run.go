@@ -492,11 +492,15 @@ func RunStatus(s *store.Store, cfg *config.Config) int {
 					}
 				}
 
-				// Format line
-				fmt.Printf("    %-8s %s  %-24s %8s  %6s%s\n", itemID, bar, statusLabel, wallStr, costStr, inFlight)
+				// Format line — right-align wall time and cost
+				fmt.Printf("    %-8s %s  %-28s %12s  %8s%s\n", itemID, bar, statusLabel, wallStr, costStr, inFlight)
 			}
 		}
 	}
+	// Key
+	fmt.Println()
+	fmt.Println("  KEY: █ done  ░ remaining  << RUNNING = claimed by st run  << ACTIVE = touched <60s")
+	fmt.Printf("  PIPELINE: %s\n", strings.Join(stepNames, " > "))
 	fmt.Println()
 	return 0
 }
