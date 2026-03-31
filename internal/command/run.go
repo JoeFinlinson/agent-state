@@ -369,7 +369,7 @@ func RunStatus(s *store.Store, cfg *config.Config) int {
 				continue
 			}
 			if !epicHasItems {
-				fmt.Printf("\n%s\n", epic.Title)
+				fmt.Printf("\nEpic: %s\n", epic.Title)
 				epicHasItems = true
 			}
 
