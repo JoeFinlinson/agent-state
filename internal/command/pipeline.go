@@ -325,10 +325,13 @@ func watchMainCI(runCmd func(string) ([]byte, int, error)) error {
 
 	// Use gh run list to find the latest in-progress run, then watch it
 	// gh run list --branch main --limit 1 --json databaseId,status,conclusion
-	deadline := time.Now().Add(20 * time.Minute) // CI shouldn't take longer than 20m
+	deadline := time.Now().Add(20 * time.Minute)
 	lastStatus := ""
 	for time.Now().Before(deadline) {
-		out, exitCode, _ := runCmd(`gh run list --branch main --limit 1 --json databaseId,status,conclusion --jq '.[0] | "\(.databaseId) \(.status) \(.conclusion)"' 2>/dev/null`)
+		// Find the latest non-deploy workflow on main (tests or build).
+		// Deploy workflows depend on build, so if build passes, deploy will follow.
+		// Skip "Deploy to Dev", "CI Catch-Up", and similar auxiliary workflows.
+		out, exitCode, _ := runCmd(`gh run list --branch main --limit 5 --json databaseId,status,conclusion,name --jq '[.[] | select(.name | test("Test|Build|API Test|Web Test"; "i"))][0] | "\(.databaseId) \(.status) \(.conclusion)"' 2>/dev/null`)
 		if exitCode != 0 {
 			// gh not available or no runs — skip CI watch
 			fmt.Println("  could not query GH runs — skipping CI watch")
@@ -358,8 +361,13 @@ func watchMainCI(runCmd func(string) ([]byte, int, error)) error {
 		}
 
 		if status == "completed" {
-			if conclusion == "success" || conclusion == "skipped" {
+			if conclusion == "success" {
 				fmt.Println("  CI passed — proceeding to health checks")
+				return nil
+			}
+			if conclusion == "skipped" {
+				// Skipped means path filter didn't match — no CI needed, proceed
+				fmt.Println("  CI skipped (no matching changes) — proceeding to health checks")
 				return nil
 			}
 			return fmt.Errorf("CI run %s failed: %s", runID, conclusion)
