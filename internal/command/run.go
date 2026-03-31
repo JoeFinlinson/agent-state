@@ -504,12 +504,21 @@ func RunStatus(s *store.Store, cfg *config.Config) int {
 	fmt.Println("  Status:    << RUNNING   currently being processed by st run")
 	fmt.Println("             << ACTIVE    step completed in the last 60s")
 	fmt.Println()
+	// Wrap pipeline at ~70 chars
 	fmt.Printf("  Pipeline:  ")
+	col := 13 // "  Pipeline:  " is 13 chars
 	for i, name := range stepNames {
+		sep := ""
 		if i > 0 {
-			fmt.Print(" > ")
+			sep = " > "
 		}
-		fmt.Print(name)
+		if col+len(sep)+len(name) > 70 && i > 0 {
+			fmt.Printf("\n             ")
+			col = 13
+			sep = ""
+		}
+		fmt.Printf("%s%s", sep, name)
+		col += len(sep) + len(name)
 	}
 	fmt.Println()
 	fmt.Println("  ---------------------------------------------------------------")
