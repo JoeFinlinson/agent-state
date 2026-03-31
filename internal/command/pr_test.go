@@ -395,6 +395,34 @@ func TestResolveRepoDirNoWorktree(t *testing.T) {
 	}
 }
 
+func TestE2ESpecFor(t *testing.T) {
+	tests := []struct {
+		path string
+		want string
+	}{
+		{"src/app/(app)/app/notes/page.tsx", "tests/e2e/notes.spec.ts"},
+		{"src/app/(app)/app/clients/page.tsx", "tests/e2e/clients.spec.ts"},
+		{"src/app/(app)/app/clients/[clientId]/page.tsx", "tests/e2e/clients.spec.ts"},
+		{"src/app/(app)/app/clinical/sessions/[sessionId]/page.tsx", "tests/e2e/clinical-sessions.spec.ts"},
+		{"src/app/(app)/app/billing/page.tsx", "tests/e2e/billing.spec.ts"},
+		{"src/app/(app)/app/settings/page.tsx", "tests/e2e/settings.spec.ts"},
+		// Non-page files return empty
+		{"src/components/clinical/NotesSidebar.tsx", ""},
+		{"src/lib/hooks/useNotes.ts", ""},
+		{"src/app/(app)/app/layout.tsx", ""},
+		// Marketing pages
+		{"src/app/(marketing)/page.tsx", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			got := e2eSpecFor(tt.path)
+			if got != tt.want {
+				t.Errorf("e2eSpecFor(%q) = %q, want %q", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
 // setupPRTestEnvWithManifest creates a test env with .manifest dir pre-created
 func setupPRTestEnvWithManifest(t *testing.T) (*store.Store, *config.Config) {
 	t.Helper()

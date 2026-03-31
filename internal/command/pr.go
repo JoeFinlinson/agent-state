@@ -157,6 +157,28 @@ func PR(s *store.Store, cfg *config.Config, id string, opts PROpts) int {
 		fmt.Fprintln(os.Stderr, "  (per-file coverage will be enforced at test time)")
 	}
 
+	// E2E spec check: pages and key components should have E2E coverage
+	var missingE2E []string
+	for _, f := range files {
+		if f.Action == "D" {
+			continue
+		}
+		specPath := e2eSpecFor(f.Path)
+		if specPath == "" {
+			continue
+		}
+		if !opts.FileExists(filepath.Join(repoDir, specPath)) {
+			missingE2E = append(missingE2E, fmt.Sprintf("  %s → %s", f.Path, specPath))
+		}
+	}
+	if len(missingE2E) > 0 {
+		fmt.Fprintf(os.Stderr, "warning: %d UI file(s) missing E2E specs:\n", len(missingE2E))
+		for _, m := range missingE2E {
+			fmt.Fprintln(os.Stderr, m)
+		}
+		fmt.Fprintln(os.Stderr, "  (E2E tests should cover user-facing pages and workflows)")
+	}
+
 	// Compute scope suites
 	scopeSuites := computeScopeSuites(cfg, opts.Repo, files)
 
@@ -445,6 +467,64 @@ func testFileFor(path string) string {
 	}
 
 	return "" // no convention
+}
+
+// e2eSpecFor returns the expected E2E spec path for a page or key component file.
+// Returns "" if the file doesn't need E2E coverage.
+func e2eSpecFor(path string) string {
+	// Only check Next.js page files: src/app/(app)/app/{feature}/page.tsx
+	// Convention: page.tsx → tests/e2e/{feature}.spec.ts
+	if !strings.Contains(path, "/page.tsx") && !strings.Contains(path, "/page.ts") {
+		return ""
+	}
+	if !strings.Contains(path, "src/app/") {
+		return ""
+	}
+	// Skip layout files, error files, loading files
+	base := filepath.Base(path)
+	if base != "page.tsx" && base != "page.ts" {
+		return ""
+	}
+
+	// Extract feature name from path
+	// src/app/(app)/app/notes/page.tsx → notes
+	// src/app/(app)/app/clients/[clientId]/page.tsx → clients
+	// src/app/(app)/app/clinical/sessions/[sessionId]/page.tsx → clinical-sessions
+	dir := filepath.Dir(path)
+	parts := strings.Split(dir, "/")
+
+	// Find the segment(s) after "app" that aren't route groups or params
+	var featureParts []string
+	inApp := false
+	for _, p := range parts {
+		if p == "app" && !inApp {
+			inApp = true
+			continue
+		}
+		if !inApp {
+			continue
+		}
+		// Skip route groups like (app), (marketing)
+		if strings.HasPrefix(p, "(") && strings.HasSuffix(p, ")") {
+			continue
+		}
+		// Skip another "app" (nested)
+		if p == "app" {
+			continue
+		}
+		// Skip dynamic segments like [clientId]
+		if strings.HasPrefix(p, "[") {
+			continue
+		}
+		featureParts = append(featureParts, p)
+	}
+
+	if len(featureParts) == 0 {
+		return ""
+	}
+
+	feature := strings.Join(featureParts, "-")
+	return filepath.Join("tests", "e2e", feature+".spec.ts")
 }
 
 func computeScopeSuites(cfg *config.Config, repo string, files []fileEntry) []string {
