@@ -2450,14 +2450,66 @@ func executePlanWithOpts(s *store.Store, cfg *config.Config, itemID string, engi
 		fmt.Printf("Title: %s\n", item.Title)
 		fmt.Println(proposal)
 
-		if !engineConfirmPrompt(engine, fmt.Sprintf("\nAccept this plan for %s?", itemID)) {
-			sr.Error = "plan proposal rejected"
-			return sr
-		}
+		// Plan review loop — accept, reject, or chat to revise
+		for {
+			choice := engineSelectMenu(engine, fmt.Sprintf("[%s] Plan Review", itemID), []menuOption{
+				{"1", "Accept  — approve and proceed"},
+				{"2", "Reject  — stop and release"},
+				{"3", "Chat    — give feedback, claude revises plan"},
+			}, 0)
 
-		// Claude updated the item via st update and user approved.
-		// Trust the approval — the fields were visible in the proposal output.
-		// (store.New would trigger git pull which may race with claude's push)
+			if choice == "1" {
+				break // approved
+			}
+			if choice == "2" {
+				sr.Error = "plan proposal rejected"
+				return sr
+			}
+
+			// Option 3: launch interactive claude session for plan revision
+			fmt.Printf("\n[%s] Launching interactive session for plan revision...\n", itemID)
+			fmt.Println("  Discuss changes with claude. When done, exit (Ctrl+D or /exit).")
+			fmt.Println("  The revised plan will be shown when you return.")
+			fmt.Println()
+
+			cwd := worktreeDir
+			if cwd == "" {
+				cwd = cfg.Root()
+			}
+			args := []string{}
+			if engine.RunClaudeInteractive != nil {
+				engine.RunClaudeInteractive(cwd, args)
+			} else {
+				claudeBin, err := exec.LookPath("claude")
+				if err != nil {
+					fmt.Printf("[%s] claude not found in PATH\n", itemID)
+					continue
+				}
+				cmd := exec.Command(claudeBin, args...)
+				cmd.Dir = cwd
+				cmd.Stdin = os.Stdin
+				cmd.Stdout = os.Stdout
+				cmd.Stderr = os.Stderr
+				cmd.Run()
+			}
+
+			// Reload item after interactive session
+			s, _ = store.New(cfg)
+			item, _ = s.Get(itemID)
+
+			// Show updated plan
+			fmt.Printf("\n=== Revised Plan: %s ===\n", itemID)
+			fmt.Printf("Title: %s\n", item.Title)
+			if item.Summary != "" {
+				fmt.Printf("\nSummary:\n%s\n", item.Summary)
+			}
+			if len(item.AcceptanceCriteria) > 0 {
+				fmt.Printf("\nAcceptance Criteria:\n")
+				for i, ac := range item.AcceptanceCriteria {
+					fmt.Printf("  %d. %s\n", i+1, ac)
+				}
+			}
+		}
 	} else {
 		// Fields present — show for design review
 		fmt.Printf("\n=== Design Gate: %s ===\n", itemID)
@@ -2471,9 +2523,58 @@ func executePlanWithOpts(s *store.Store, cfg *config.Config, itemID string, engi
 			fmt.Printf("\nDepends on: %s\n", strings.Join(item.DependsOn, ", "))
 		}
 
-		if !engineConfirmPrompt(engine, fmt.Sprintf("\nApprove design for %s?", itemID)) {
-			sr.Error = "design not approved"
-			return sr
+		// Design review loop — same pattern
+		for {
+			choice := engineSelectMenu(engine, fmt.Sprintf("[%s] Design Review", itemID), []menuOption{
+				{"1", "Approve — accept and proceed"},
+				{"2", "Reject  — stop and release"},
+				{"3", "Chat    — give feedback, claude revises"},
+			}, 0)
+
+			if choice == "1" {
+				break // approved
+			}
+			if choice == "2" {
+				sr.Error = "design not approved"
+				return sr
+			}
+
+			// Option 3: interactive revision
+			fmt.Printf("\n[%s] Launching interactive session for design revision...\n", itemID)
+			fmt.Println("  Discuss changes with claude. When done, exit (Ctrl+D or /exit).")
+			fmt.Println()
+
+			cwd := worktreeDir
+			if cwd == "" {
+				cwd = cfg.Root()
+			}
+			if engine.RunClaudeInteractive != nil {
+				engine.RunClaudeInteractive(cwd, []string{})
+			} else {
+				claudeBin, err := exec.LookPath("claude")
+				if err != nil {
+					fmt.Printf("[%s] claude not found in PATH\n", itemID)
+					continue
+				}
+				cmd := exec.Command(claudeBin)
+				cmd.Dir = cwd
+				cmd.Stdin = os.Stdin
+				cmd.Stdout = os.Stdout
+				cmd.Stderr = os.Stderr
+				cmd.Run()
+			}
+
+			// Reload and show updated design
+			s, _ = store.New(cfg)
+			item, _ = s.Get(itemID)
+
+			fmt.Printf("\n=== Revised Design: %s ===\n", itemID)
+			fmt.Printf("Title: %s\n", item.Title)
+			fmt.Printf("\nSummary:\n%s\n", item.Summary)
+			fmt.Printf("\nAcceptance Criteria:\n")
+			for i, ac := range item.AcceptanceCriteria {
+				fmt.Printf("  %d. %s\n", i+1, ac)
+			}
 		}
 	}
 
