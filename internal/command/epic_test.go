@@ -546,6 +546,25 @@ func TestStartRecordsStartedAt(t *testing.T) {
 	}
 }
 
+func TestStartSetsLastTouchedBy(t *testing.T) {
+	s, cfg := setupTestEnv(t)
+
+	code := Start(s, cfg, "T-001", StartOpts{})
+	if code != 0 {
+		t.Fatalf("Start returned %d, want 0", code)
+	}
+
+	item, _ := s.Get("T-001")
+	ltb, ok := item.Doc.GetField("last_touched_by")
+	if !ok || ltb == "" {
+		t.Error("expected last_touched_by to be set after Start")
+	}
+	// Without AS_AGENT_ID set, should default to "user"
+	if ltb != "user" {
+		t.Errorf("last_touched_by = %q, want 'user'", ltb)
+	}
+}
+
 func TestStartNoSessionWhenUnset(t *testing.T) {
 	s, cfg := setupTestEnv(t)
 	t.Setenv("AS_SESSION_ID", "")

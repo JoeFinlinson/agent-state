@@ -118,6 +118,42 @@ func TestPRBasicFlow(t *testing.T) {
 	if prs != "api#42" {
 		t.Errorf("manifest.prs = %q, want api#42", prs)
 	}
+
+	// Verify code stats surfaced on item
+	filesChanged, _ := getNestedField(item, "manifest", "files_changed")
+	if filesChanged != "3" {
+		t.Errorf("manifest.files_changed = %q, want 3", filesChanged)
+	}
+	insertions, _ := getNestedField(item, "manifest", "insertions")
+	if insertions != "77" {
+		t.Errorf("manifest.insertions = %q, want 77", insertions)
+	}
+	deletions, _ := getNestedField(item, "manifest", "deletions")
+	if deletions != "13" {
+		t.Errorf("manifest.deletions = %q, want 13", deletions)
+	}
+	netLines, _ := getNestedField(item, "manifest", "net_lines")
+	if netLines != "+64" {
+		t.Errorf("manifest.net_lines = %q, want +64", netLines)
+	}
+
+	// Verify head SHA
+	headSHAVal, _ := getNestedField(item, "manifest", "head_sha")
+	if headSHAVal != "abc1234567890" {
+		t.Errorf("manifest.head_sha = %q, want abc1234567890", headSHAVal)
+	}
+
+	// Verify work_tracking.pr
+	raw := item.Doc.String()
+	if !strings.Contains(raw, "api#42") {
+		t.Error("work_tracking.pr should contain api#42")
+	}
+
+	// Verify tests_written — billing_test.go is both a test file in the PR
+	// and the 1:1 mapped test for billing.go
+	if !strings.Contains(raw, "billing_test.go") {
+		t.Error("testing_evidence.tests_written should contain billing_test.go")
+	}
 }
 
 func TestPRTestFileMissingWarns(t *testing.T) {
@@ -420,6 +456,57 @@ func TestE2ESpecFor(t *testing.T) {
 				t.Errorf("e2eSpecFor(%q) = %q, want %q", tt.path, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestPRDocChangesRecorded(t *testing.T) {
+	s, cfg := setupPRTestEnv(t)
+
+	opts := mockGitOpts(
+		"M\tinternal/db/billing.go\nA\tdocs/BILLING.md\nM\tREADME.md",
+		"10\t5\tinternal/db/billing.go\n50\t0\tdocs/BILLING.md\n5\t2\tREADME.md",
+		"sha123",
+		map[string]string{
+			"internal/db/billing.go": "h1",
+			"docs/BILLING.md":       "h2",
+			"README.md":             "h3",
+		},
+		map[string]bool{},
+	)
+
+	code := PR(s, cfg, "T-003", opts)
+	if code != 0 {
+		t.Fatalf("PR returned %d", code)
+	}
+
+	item, _ := s.Get("T-003")
+	raw := item.Doc.String()
+	// Both docs/BILLING.md and README.md are classified as "doc"
+	if !strings.Contains(raw, "BILLING.md") {
+		t.Error("doc_changes should contain BILLING.md")
+	}
+	if !strings.Contains(raw, "README.md") {
+		t.Error("doc_changes should contain README.md")
+	}
+}
+
+func TestPRLastTouchedBySet(t *testing.T) {
+	s, cfg := setupPRTestEnv(t)
+
+	opts := mockGitOpts(
+		"M\tinternal/db/billing.go",
+		"10\t5\tinternal/db/billing.go",
+		"sha123",
+		map[string]string{"internal/db/billing.go": "h1"},
+		map[string]bool{},
+	)
+
+	PR(s, cfg, "T-003", opts)
+
+	item, _ := s.Get("T-003")
+	lt, _ := item.Doc.GetField("last_touched")
+	if lt == "" {
+		t.Error("last_touched should be set after st pr")
 	}
 }
 
