@@ -1268,6 +1268,22 @@ func runSingleItem(s *store.Store, cfg *config.Config, itemID, sprintID string, 
 		return result
 	}
 
+	// Check if this is a verification-only item (no code changes needed).
+	// Plan sidecar exists with empty files lists → skip implement through merge.
+	if p, pErr := plan.Load(cfg.PlansDir(), itemID); pErr == nil && p != nil && p.Approved {
+		if len(p.FilesToCreate) == 0 && len(p.FilesToModify) == 0 {
+			lastStep, _ := getNestedField(item, "delivery", "last_completed_step")
+			if lastStep == "" || lastStep == "plan" {
+				fmt.Printf("[%s] Verification-only item (no code changes) — skipping to verify_tests\n", itemID)
+				setNestedField(item, "delivery", "last_completed_step", "merge")
+				setNestedField(item, "delivery", "stage", "verification")
+				item.Doc.SetField("last_touched", time.Now().Format(time.RFC3339))
+				localStore.Write(item)
+				localStore, _ = store.New(cfg)
+			}
+		}
+	}
+
 	// Check if PR is already merged — advance past merge and continue pipeline
 	// (still need deploy verification, smoke, UAT, and user approval)
 	if detectMergedPR(cfg, itemID, item) {
