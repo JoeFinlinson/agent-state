@@ -271,9 +271,20 @@ func prepItem(s *store.Store, cfg *config.Config, itemID string, item *model.Ite
 		reviewStep := config.RunStepDef{Type: "claude", Prompt: reviewPrompt}
 		reviewStep.SetName("plan_review")
 		runOpts := RunOpts{Model: opts.Model}
-		executeClaude(s, cfg, itemID, "", reviewStep, runOpts, engine, cwd, "", false)
+		reviewStart := time.Now()
+		reviewSR := executeClaude(s, cfg, itemID, "", reviewStep, runOpts, engine, cwd, "", false)
+		reviewDur := time.Since(reviewStart)
+		rec := extractRecommendation(reviewSR.Output)
 
-		choice := showReviewGate(itemID, "Plan Review", 1, []menuOption{
+		choice := showReviewGate(ReviewGateInfo{
+			ItemID:         itemID,
+			Title:          item.Title,
+			GateType:       "Plan Review",
+			Iteration:      1,
+			Recommendation: rec,
+			ReviewDuration: reviewDur,
+			AcsTotal:       len(p.ACs),
+		}, []menuOption{
 			{"1", "Accept  — save plan and proceed"},
 			{"2", "Reject  — skip this item"},
 			{"3", "Chat    — revise with claude"},

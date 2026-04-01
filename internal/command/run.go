@@ -404,6 +404,7 @@ func RunStatus(s *store.Store, cfg *config.Config) int {
 			}
 			stats := fmt.Sprintf("[%d/%d done, %d active]", done, len(sp.Items), active)
 		fmt.Printf("  %-40s  %-24s  (%s)\n", sp.Title, stats, label)
+			fmt.Printf("    %s\n", sp.ID)
 
 			for _, itemID := range sp.Items {
 				item, ok := s.Get(itemID)
@@ -2224,12 +2225,30 @@ func executeUATReview(s *store.Store, cfg *config.Config, itemID, sprintID strin
 
 		reportStep := config.RunStepDef{Type: "claude", Prompt: reportPrompt}
 		reportStep.SetName("uat_report")
+		reportStart := time.Now()
 		reportSR := executeClaude(s, cfg, itemID, sprintID, reportStep, opts, engine, worktreeDir, claudeSessionID, true)
-		_ = reportSR // report output goes to stdout via claude streaming
+		reviewDur := time.Since(reportStart)
 
-		// Prompt user for decision
+		// Reload item for current state
+		s, _ = store.New(cfg)
+		reviewItem, _ := s.Get(itemID)
+		itemTitle := ""
+		if reviewItem != nil {
+			itemTitle = reviewItem.Title
+		}
+
+		// Extract recommendation from claude's output
+		rec := extractRecommendation(reportSR.Output)
+
 		gateMu.Lock()
-		choice := showReviewGate(itemID, "UAT Review", iteration, []menuOption{
+		choice := showReviewGate(ReviewGateInfo{
+			ItemID:         itemID,
+			Title:          itemTitle,
+			GateType:       "UAT Review",
+			Iteration:      iteration,
+			Recommendation: rec,
+			ReviewDuration: reviewDur,
+		}, []menuOption{
 			{"1", "Approve — accept and close"},
 			{"2", "Reject  — stop and release for retry"},
 			{"3", "Chat    — give feedback, claude acts, UAT re-runs"},
@@ -2625,11 +2644,21 @@ func executePlanWithOpts(s *store.Store, cfg *config.Config, itemID string, engi
 			reviewPrompt := buildPlanReviewPrompt(itemID, item)
 			reviewStep := config.RunStepDef{Type: "claude", Prompt: reviewPrompt}
 			reviewStep.SetName("plan_review")
-			executeClaude(s, cfg, itemID, "", reviewStep, opts, engine, worktreeDir, "", false)
+			reviewStart := time.Now()
+			reviewSR := executeClaude(s, cfg, itemID, "", reviewStep, opts, engine, worktreeDir, "", false)
+			reviewDur := time.Since(reviewStart)
+			rec := extractRecommendation(reviewSR.Output)
 
-			// Show separator + menu (same rendering as UAT)
 			gateMu.Lock()
-			choice := showReviewGate(itemID, "Plan Review", iteration, []menuOption{
+			choice := showReviewGate(ReviewGateInfo{
+				ItemID:         itemID,
+				Title:          item.Title,
+				GateType:       "Plan Review",
+				Iteration:      iteration,
+				Recommendation: rec,
+				ReviewDuration: reviewDur,
+				AcsTotal:       len(item.AcceptanceCriteria),
+			}, []menuOption{
 				{"1", "Accept  — approve and proceed"},
 				{"2", "Reject  — stop and release"},
 				{"3", "Chat    — give feedback, claude revises plan"},
@@ -2709,10 +2738,21 @@ func executePlanWithOpts(s *store.Store, cfg *config.Config, itemID string, engi
 			reviewPrompt := buildPlanReviewPrompt(itemID, item)
 			reviewStep := config.RunStepDef{Type: "claude", Prompt: reviewPrompt}
 			reviewStep.SetName("design_review")
-			executeClaude(s, cfg, itemID, "", reviewStep, opts, engine, worktreeDir, "", false)
+			reviewStart := time.Now()
+			reviewSR := executeClaude(s, cfg, itemID, "", reviewStep, opts, engine, worktreeDir, "", false)
+			reviewDur := time.Since(reviewStart)
+			rec := extractRecommendation(reviewSR.Output)
 
 			gateMu.Lock()
-			choice := showReviewGate(itemID, "Design Review", iteration, []menuOption{
+			choice := showReviewGate(ReviewGateInfo{
+				ItemID:         itemID,
+				Title:          item.Title,
+				GateType:       "Design Review",
+				Iteration:      iteration,
+				Recommendation: rec,
+				ReviewDuration: reviewDur,
+				AcsTotal:       len(item.AcceptanceCriteria),
+			}, []menuOption{
 				{"1", "Approve — accept and proceed"},
 				{"2", "Reject  — stop and release"},
 				{"3", "Chat    — give feedback, claude revises"},
@@ -4004,10 +4044,82 @@ func shortenPath(p string) string {
 	return p
 }
 
-// showReviewGate renders a boxed gate header and returns the user's menu choice.
-func showReviewGate(itemID, gateType string, iteration int, options []menuOption, engine RunEngine) string {
-	title := fmt.Sprintf("%s: %s (iteration %d)", gateType, itemID, iteration)
-	content := []string{title}
+// ReviewGateInfo holds context for rendering a review gate box.
+type ReviewGateInfo struct {
+	ItemID        string
+	Title         string
+	GateType      string // "Plan Review", "Design Review", "UAT Review"
+	Iteration     int
+	Recommendation string // one-line recommendation from claude's review
+	ReviewDuration time.Duration
+	AcsPassed     int
+	AcsTotal      int
+}
+
+// showReviewGate renders a boxed gate with context and returns the user's menu choice.
+func showReviewGate(info ReviewGateInfo, options []menuOption, engine RunEngine) string {
+	content := []string{
+		fmt.Sprintf("%s: %s", info.GateType, info.ItemID),
+	}
+	if info.Title != "" {
+		title := info.Title
+		if len(title) > 60 {
+			title = title[:57] + "..."
+		}
+		content = append(content, fmt.Sprintf("  %s", title))
+	}
+	content = append(content, "")
+
+	// Info section
+	var infoLine string
+	if info.ReviewDuration > 0 {
+		infoLine = fmt.Sprintf("Review: %s", formatDuration(info.ReviewDuration))
+	}
+	if info.AcsTotal > 0 {
+		acStr := fmt.Sprintf("ACs: %d/%d pass", info.AcsPassed, info.AcsTotal)
+		if infoLine != "" {
+			infoLine += "  |  " + acStr
+		} else {
+			infoLine = acStr
+		}
+	}
+	if infoLine != "" {
+		content = append(content, infoLine)
+	}
+
+	if info.Recommendation != "" {
+		content = append(content, "")
+		// Wrap long recommendations
+		rec := info.Recommendation
+		if len(rec) > 65 {
+			// Simple word-wrap at 65 chars
+			words := strings.Fields(rec)
+			var lines []string
+			current := ">>> "
+			for _, word := range words {
+				if len(current)+len(word)+1 > 65 && len(current) > 4 {
+					lines = append(lines, current)
+					current = "    " + word
+				} else {
+					if len(current) > 4 {
+						current += " "
+					}
+					current += word
+				}
+			}
+			if current != "" {
+				lines = append(lines, current)
+			}
+			content = append(content, lines...)
+		} else {
+			content = append(content, ">>> "+rec)
+		}
+	}
+
+	content = append(content, "")
+	for _, opt := range options {
+		content = append(content, fmt.Sprintf("[%s] %s", opt.Key, opt.Label))
+	}
 
 	// Find widest line
 	w := 0
@@ -4016,12 +4128,8 @@ func showReviewGate(itemID, gateType string, iteration int, options []menuOption
 			w = len(l)
 		}
 	}
-	// Ensure minimum width for the menu options
-	for _, opt := range options {
-		optLen := len(opt.Key) + len(opt.Label) + 5
-		if optLen > w {
-			w = optLen
-		}
+	if w < 50 {
+		w = 50
 	}
 
 	hline := func(l, m, r string) {
@@ -4035,10 +4143,13 @@ func showReviewGate(itemID, gateType string, iteration int, options []menuOption
 	fmt.Println()
 	hline("╔", "═", "╗")
 	for _, l := range content {
-		fmt.Printf("║  %-*s  ║\n", w, l)
+		if l == "" {
+			hline("╠", "═", "╣")
+		} else {
+			fmt.Printf("║  %-*s  ║\n", w, l)
+		}
 	}
 	hline("╚", "═", "╝")
-	fmt.Println()
 
 	return engineSelectMenu(engine, "", options, 0)
 }
@@ -4057,19 +4168,65 @@ func buildPlanReviewPrompt(itemID string, item *model.Item) string {
 			b.WriteString(fmt.Sprintf("  %d. %s\n", i+1, ac))
 		}
 	}
-	b.WriteString("\nProduce a concise plan review report for the user. Include:\n")
-	b.WriteString("1. SCOPE — is the scope appropriate? Too broad, too narrow, or about right?\n")
-	b.WriteString("2. APPROACH — does the technical approach make sense? Any risks or alternatives?\n")
-	b.WriteString("3. ACCEPTANCE CRITERIA — are the ACs meaningful? Do they test the right things?\n")
-	b.WriteString("   Flag any that are trivial (just grep existence), overly broad, or missing.\n")
-	b.WriteString("4. GAPS — anything missing? Edge cases, error handling, tests, docs?\n")
-	b.WriteString("5. RECOMMENDATION — should the user accept this plan? Why or why not?\n\n")
-	b.WriteString("Keep it brief and actionable. The user will read this and decide whether to accept.\n")
+	b.WriteString("\nReview the implementation plan and FIX any gaps you find before reporting.\n\n")
+	b.WriteString("## Instructions\n\n")
+	b.WriteString("1. Evaluate the plan across these dimensions:\n")
+	b.WriteString("   - SCOPE — is it appropriate? Too broad, too narrow, or about right?\n")
+	b.WriteString("   - APPROACH — does the technical approach make sense? Any risks or alternatives?\n")
+	b.WriteString("   - ACCEPTANCE CRITERIA — are the ACs meaningful? Do they test the right things?\n")
+	b.WriteString("     Flag any that are trivial (just grep existence), overly broad, or missing.\n")
+	b.WriteString("   - GAPS — anything missing? Edge cases, error handling, tests, docs?\n\n")
+	b.WriteString("2. If you find actionable gaps (missing ACs, unclear approach, missing error handling\n")
+	b.WriteString("   considerations, untested edge cases, etc.), FIX THEM NOW:\n")
+	b.WriteString("   - Use `st edit " + itemID + " summary` to clarify or expand the approach\n")
+	b.WriteString("   - Use `st edit " + itemID + " acceptance_criteria` to add missing ACs or fix weak ones\n")
+	b.WriteString("   - Use `st update` to fix other fields as needed\n")
+	b.WriteString("   Do NOT just list problems for the user to fix — resolve them yourself.\n\n")
+	b.WriteString("3. Then produce a concise report for the user:\n")
+	b.WriteString("   - SCOPE — assessment (1 line)\n")
+	b.WriteString("   - APPROACH — assessment (1-2 lines)\n")
+	b.WriteString("   - CHANGES MADE — list what you fixed (if anything)\n")
+	b.WriteString("   - REMAINING CONCERNS — only issues you could NOT fix (e.g., design decisions\n")
+	b.WriteString("     that require user input, architectural trade-offs with no clear winner)\n")
+	b.WriteString("   - RECOMMENDATION — accept, or chat to resolve remaining concerns\n\n")
+	b.WriteString("The goal: the user should be able to accept the plan without a follow-up revision session.\n")
 	b.WriteString("Be critical but constructive — flag real issues, not style preferences.\n")
 	return b.String()
 }
 
 // planRecommendation evaluates a plan/design and returns a recommendation string.
+// extractRecommendation pulls the recommendation line from claude's review output.
+func extractRecommendation(output string) string {
+	// Look for "RECOMMENDATION" section or "Accept"/"Reject" keywords
+	for _, line := range strings.Split(output, "\n") {
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "recommendation") && strings.Contains(lower, "—") {
+			// e.g., "### 5. RECOMMENDATION — Accept with minor additions"
+			if idx := strings.Index(line, "—"); idx >= 0 {
+				return strings.TrimSpace(line[idx+len("—"):])
+			}
+		}
+		if strings.Contains(lower, "recommendation") && strings.Contains(lower, ":") {
+			if idx := strings.LastIndex(line, ":"); idx >= 0 {
+				rest := strings.TrimSpace(line[idx+1:])
+				if rest != "" {
+					return rest
+				}
+			}
+		}
+	}
+	// Fallback: look for bold recommendation patterns
+	for _, line := range strings.Split(output, "\n") {
+		if strings.Contains(line, "**Accept") || strings.Contains(line, "**Approve") {
+			return strings.ReplaceAll(strings.ReplaceAll(line, "**", ""), "*", "")
+		}
+		if strings.Contains(line, "**Do not") || strings.Contains(line, "**Reject") {
+			return strings.ReplaceAll(strings.ReplaceAll(line, "**", ""), "*", "")
+		}
+	}
+	return ""
+}
+
 func planRecommendation(item *model.Item) string {
 	var issues []string
 
