@@ -44,8 +44,14 @@ type RunEngine struct {
 	// RunClaudeInteractive launches claude in interactive mode (stdin/stdout attached).
 	// Returns exit code. If nil, uses default exec.Command implementation.
 	RunClaudeInteractive func(cwd string, args []string) (int, error)
-	// PromptUser reads a line from stdin (for gate steps).
+	// PromptUser reads a line from stdin (for gate steps and free-text input).
 	PromptUser func(prompt string) (string, error)
+	// SelectMenu overrides the interactive arrow-key menu (for testing).
+	// If nil, uses the real terminal-based selectMenu.
+	SelectMenu func(prompt string, options []menuOption, defaultIdx int) string
+	// ConfirmPrompt overrides the y/N confirmation prompt (for testing).
+	// If nil, uses the real terminal-based confirmPrompt.
+	ConfirmPrompt func(prompt string) bool
 }
 
 // ClaudeResult represents parsed JSON output from claude -p --output-format json.
@@ -274,14 +280,16 @@ func RunInteractive(s *store.Store, cfg *config.Config, opts RunOpts, engine Run
 	}
 
 	// Prompt for selection
-	fmt.Printf("\nWhich sprint? [1-%d]: ", len(candidates))
-	response, err := engine.PromptUser("")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "prompt error: %v\n", err)
-		return 1
+	var sprintOpts []menuOption
+	for i, c := range candidates {
+		sprintOpts = append(sprintOpts, menuOption{
+			Key:   fmt.Sprintf("%d", i+1),
+			Label: c.sprint.Title,
+		})
 	}
+	choiceKey := engineSelectMenu(engine, "Which sprint?", sprintOpts, 0)
 	choice := 0
-	fmt.Sscanf(strings.TrimSpace(response), "%d", &choice)
+	fmt.Sscanf(choiceKey, "%d", &choice)
 	if choice < 1 || choice > len(candidates) {
 		fmt.Fprintln(os.Stderr, "invalid selection")
 		return 1
@@ -298,13 +306,7 @@ func RunInteractive(s *store.Store, cfg *config.Config, opts RunOpts, engine Run
 		for i, step := range pipeline {
 			fmt.Printf("  %d. [%s] %s\n", i+1, step.Type, step.Name())
 		}
-		fmt.Printf("\nApprove this plan? [y/N]: ")
-		resp, err := engine.PromptUser("")
-		if err != nil {
-			return 1
-		}
-		answer := strings.TrimSpace(strings.ToLower(resp))
-		if answer != "y" && answer != "yes" {
+		if !engineConfirmPrompt(engine, "\nApprove this plan?") {
 			fmt.Println("Plan not approved. Exiting.")
 			return 0
 		}
@@ -1870,14 +1872,7 @@ func executeGate(itemID string, engine RunEngine) StepResult {
 	defer gateMu.Unlock()
 
 	sr := StepResult{Step: "approval", Type: "gate"}
-	fmt.Printf("\nApprove %s? [y/N]: ", itemID)
-	response, err := engine.PromptUser("")
-	if err != nil {
-		sr.Error = fmt.Sprintf("prompt error: %v", err)
-		return sr
-	}
-	answer := strings.TrimSpace(strings.ToLower(response))
-	if answer == "y" || answer == "yes" {
+	if engineConfirmPrompt(engine, fmt.Sprintf("\nApprove %s?", itemID)) {
 		sr.Passed = true
 	} else {
 		sr.Error = "user rejected"
@@ -2016,36 +2011,25 @@ func executeUATReview(s *store.Store, cfg *config.Config, itemID, sprintID strin
 		// Prompt user for decision
 		gateMu.Lock()
 		fmt.Println()
-		fmt.Println("  ─────────────────────────────────────────────────────────")
-		fmt.Printf("  [%s] UAT Review (iteration %d)\n", itemID, iteration)
-		fmt.Println()
-		fmt.Println("  (1) Approve — accept and close")
-		fmt.Println("  (2) Reject  — stop and release for retry")
-		fmt.Println("  (3) Chat    — give feedback, claude acts, UAT re-runs")
-		fmt.Println("  ─────────────────────────────────────────────────────────")
-		fmt.Printf("\n  [1/2/3]: ")
-		response, err := engine.PromptUser("")
+		fmt.Printf("  ─── [%s] UAT Review (iteration %d) ───\n\n", itemID, iteration)
+		choice := engineSelectMenu(engine, "", []menuOption{
+			{"1", "Approve — accept and close"},
+			{"2", "Reject  — stop and release for retry"},
+			{"3", "Chat    — give feedback, claude acts, UAT re-runs"},
+		}, 0)
 		gateMu.Unlock()
 
-		if err != nil {
-			sr.Error = fmt.Sprintf("prompt error: %v", err)
-			return sr
-		}
-
-		input := strings.TrimSpace(response)
-		lower := strings.ToLower(input)
-
-		if lower == "1" || lower == "approve" || lower == "y" || lower == "yes" {
+		if choice == "1" {
 			sr.Passed = true
 			return sr
 		}
-		if lower == "2" || lower == "reject" || lower == "n" || lower == "no" {
+		if choice == "2" {
 			sr.Error = "user rejected"
 			return sr
 		}
 
-		// Option 3 or free text — launch interactive claude session
-		if lower == "3" || lower == "chat" {
+		// Option 3 — launch interactive claude session
+		if choice == "3" {
 			fmt.Printf("\n[%s] Launching interactive claude session...\n", itemID)
 			fmt.Println("  Chat with claude to make changes. When done, exit claude (Ctrl+D or /exit).")
 			fmt.Println("  UAT will re-run automatically when you return.")
@@ -2076,27 +2060,6 @@ func executeUATReview(s *store.Store, cfg *config.Config, itemID, sprintID strin
 			fmt.Printf("\n[%s] Interactive session ended. Re-running UAT...\n", itemID)
 			s, _ = store.New(cfg)
 			continue
-		}
-
-		// Free text typed directly (not option 3) — route as prompt
-		fmt.Printf("\n[%s] Acting on feedback...\n", itemID)
-		feedbackPrompt := fmt.Sprintf(
-			"The user reviewed the UAT report for %s and gave this feedback:\n\n"+
-				"%s\n\n"+
-				"Act on this feedback. If they want more tests, write them. If they want "+
-				"something verified differently, do it. Commit and push any changes.\n\n"+
-				"IMPORTANT: The goal is to verify the IMPLEMENTATION is correct. "+
-				"Never weaken tests to make them pass. Follow CLAUDE.md procedures.",
-			itemID, input)
-
-		feedbackStep := config.RunStepDef{Type: "claude", Prompt: feedbackPrompt}
-		feedbackStep.SetName(fmt.Sprintf("uat_feedback_%d", iteration))
-		feedbackSR := executeClaude(s, cfg, itemID, sprintID, feedbackStep, opts, engine, worktreeDir, claudeSessionID, true)
-		sr.CostUSD += feedbackSR.CostUSD
-		sr.CostUSD += reportSR.CostUSD
-
-		if !feedbackSR.Passed {
-			fmt.Printf("[%s] Feedback action failed: %s\n", itemID, feedbackSR.Error)
 		}
 
 		// Reload store and loop back to re-run UAT
@@ -2189,25 +2152,12 @@ func showPauseMenu(itemID, lastStep, nextStep string, result ItemResult, engine 
 	}
 	hline("╚", "═", "╝")
 
-	for {
-		fmt.Printf("\nAction [c/s/a]: ")
-		response, err := engine.PromptUser("")
-		if err != nil {
-			// If stdin is closed or Ctrl+C during prompt, abort
-			return "abort"
-		}
-		answer := strings.TrimSpace(strings.ToLower(response))
-		switch answer {
-		case "c", "continue":
-			return "continue"
-		case "s", "skip":
-			return "skip"
-		case "a", "abort":
-			return "abort"
-		default:
-			fmt.Printf("  Unknown option: %q (use c, s, or a)\n", answer)
-		}
-	}
+	choice := engineSelectMenu(engine, "", []menuOption{
+		{"c", "continue — resume pipeline"},
+		{"s", "skip     — skip next step, continue"},
+		{"a", "abort    — stop, release item for retry"},
+	}, 0)
+	return map[string]string{"c": "continue", "s": "skip", "a": "abort"}[choice]
 }
 
 func executeClose(s *store.Store, cfg *config.Config, itemID string, step config.RunStepDef) StepResult {
@@ -2430,14 +2380,7 @@ func executePlanWithOpts(s *store.Store, cfg *config.Config, itemID string, engi
 		fmt.Printf("Title: %s\n", item.Title)
 		fmt.Println(proposal)
 
-		fmt.Printf("\nAccept this plan for %s? [y/N]: ", itemID)
-		response, err := engine.PromptUser("")
-		if err != nil {
-			sr.Error = fmt.Sprintf("prompt error: %v", err)
-			return sr
-		}
-		answer := strings.TrimSpace(strings.ToLower(response))
-		if answer != "y" && answer != "yes" {
+		if !engineConfirmPrompt(engine, fmt.Sprintf("\nAccept this plan for %s?", itemID)) {
 			sr.Error = "plan proposal rejected"
 			return sr
 		}
@@ -2458,14 +2401,7 @@ func executePlanWithOpts(s *store.Store, cfg *config.Config, itemID string, engi
 			fmt.Printf("\nDepends on: %s\n", strings.Join(item.DependsOn, ", "))
 		}
 
-		fmt.Printf("\nApprove design for %s? [y/N]: ", itemID)
-		response, err := engine.PromptUser("")
-		if err != nil {
-			sr.Error = fmt.Sprintf("prompt error: %v", err)
-			return sr
-		}
-		answer := strings.TrimSpace(strings.ToLower(response))
-		if answer != "y" && answer != "yes" {
+		if !engineConfirmPrompt(engine, fmt.Sprintf("\nApprove design for %s?", itemID)) {
 			sr.Error = "design not approved"
 			return sr
 		}
@@ -3702,6 +3638,22 @@ func shortenPath(p string) string {
 func defaultPromptUser(_ string) (string, error) {
 	reader := bufio.NewReader(os.Stdin)
 	return reader.ReadString('\n')
+}
+
+// engineSelectMenu uses the engine override if set, otherwise the real terminal menu.
+func engineSelectMenu(engine RunEngine, prompt string, options []menuOption, defaultIdx int) string {
+	if engine.SelectMenu != nil {
+		return engine.SelectMenu(prompt, options, defaultIdx)
+	}
+	return selectMenu(prompt, options, defaultIdx)
+}
+
+// engineConfirmPrompt uses the engine override if set, otherwise the real terminal prompt.
+func engineConfirmPrompt(engine RunEngine, prompt string) bool {
+	if engine.ConfirmPrompt != nil {
+		return engine.ConfirmPrompt(prompt)
+	}
+	return confirmPrompt(prompt)
 }
 
 // --- Sprint loading ---

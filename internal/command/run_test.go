@@ -130,6 +130,15 @@ func mockRunEngine(approved bool) RunEngine {
 			}
 			return "n\n", nil
 		},
+		SelectMenu: func(prompt string, options []menuOption, defaultIdx int) string {
+			if len(options) > 0 {
+				return options[0].Key
+			}
+			return ""
+		},
+		ConfirmPrompt: func(prompt string) bool {
+			return approved
+		},
 	}
 }
 
@@ -201,15 +210,16 @@ func TestRunInteractivePlanApproval(t *testing.T) {
 	reg.Save(cfg.EpicsPath())
 
 	// Mock: select sprint 2 (needs-approval), then approve plan
-	callCount := 0
 	engine := RunEngine{
 		RunClaude: mockRunEngine(true).RunClaude,
 		PromptUser: func(prompt string) (string, error) {
-			callCount++
-			if callCount == 1 {
-				return "2\n", nil // select second sprint
-			}
-			return "y\n", nil // approve plan
+			return "y\n", nil
+		},
+		SelectMenu: func(prompt string, options []menuOption, defaultIdx int) string {
+			return "2" // select second sprint
+		},
+		ConfirmPrompt: func(prompt string) bool {
+			return true // approve plan
 		},
 	}
 
@@ -691,6 +701,7 @@ summary: Has a summary but no acceptance criteria
 			return data, 0, nil
 		},
 		PromptUser: func(prompt string) (string, error) { return "y\n", nil },
+		ConfirmPrompt: func(prompt string) bool { return true },
 	}
 
 	sr := executePlan(s, cfg, "T-050", engine)
@@ -734,6 +745,7 @@ acceptance_criteria:
 			return data, 0, nil
 		},
 		PromptUser: func(prompt string) (string, error) { return "y\n", nil },
+		ConfirmPrompt: func(prompt string) bool { return true },
 	}
 
 	sr := executePlan(s, cfg, "T-051", engine)
@@ -897,7 +909,10 @@ func TestUATReviewApprove(t *testing.T) {
 			return data, 0, nil
 		},
 		PromptUser: func(prompt string) (string, error) {
-			return "approve", nil
+			return "y\n", nil
+		},
+		SelectMenu: func(prompt string, options []menuOption, defaultIdx int) string {
+			return "1" // approve
 		},
 	}
 
@@ -928,7 +943,10 @@ func TestUATReviewReject(t *testing.T) {
 			return data, 0, nil
 		},
 		PromptUser: func(prompt string) (string, error) {
-			return "reject", nil
+			return "n\n", nil
+		},
+		SelectMenu: func(prompt string, options []menuOption, defaultIdx int) string {
+			return "2" // reject
 		},
 	}
 
@@ -941,7 +959,7 @@ func TestUATReviewReject(t *testing.T) {
 	}
 }
 
-func TestUATReviewFeedbackLoop(t *testing.T) {
+func TestUATReviewChatThenApprove(t *testing.T) {
 	s, cfg := setupRunTestEnv(t)
 
 	item, _ := s.Get("T-001")
@@ -952,31 +970,39 @@ func TestUATReviewFeedbackLoop(t *testing.T) {
 	step := config.RunStepDef{Type: "uat_review"}
 	step.SetName("uat_review")
 
-	promptCount := 0
+	selectCount := 0
+	interactiveCalls := 0
 	engine := RunEngine{
 		RunClaude: func(cwd string, args []string, env []string) ([]byte, int, error) {
 			result := ClaudeResult{Type: "result", Subtype: "success", TotalCostUSD: 0.02}
 			data, _ := json.Marshal(result)
 			return data, 0, nil
 		},
+		RunClaudeInteractive: func(cwd string, args []string) (int, error) {
+			interactiveCalls++
+			return 0, nil
+		},
 		PromptUser: func(prompt string) (string, error) {
-			promptCount++
-			if promptCount == 1 {
-				return "add a test for the empty case", nil
+			return "y\n", nil
+		},
+		SelectMenu: func(prompt string, options []menuOption, defaultIdx int) string {
+			selectCount++
+			if selectCount == 1 {
+				return "3" // chat first
 			}
-			return "approve", nil
+			return "1" // then approve
 		},
 	}
 
 	sr := executeUATReview(s, cfg, "T-001", "test-sprint", step, RunOpts{}, engine, cfg.Root(), "test-session")
 	if !sr.Passed {
-		t.Errorf("UAT review should pass after feedback + approve, got error: %s", sr.Error)
+		t.Errorf("UAT review should pass after chat + approve, got error: %s", sr.Error)
 	}
-	if promptCount != 2 {
-		t.Errorf("expected 2 prompts (feedback + approve), got %d", promptCount)
+	if interactiveCalls != 1 {
+		t.Errorf("expected 1 interactive session, got %d", interactiveCalls)
 	}
-	if sr.CostUSD == 0 {
-		t.Error("expected non-zero cost from feedback claude call")
+	if selectCount != 2 {
+		t.Errorf("expected 2 menu selections (chat + approve), got %d", selectCount)
 	}
 }
 
@@ -996,7 +1022,7 @@ func TestUATReviewInteractiveChat(t *testing.T) {
 	var interactiveCwd string
 	var interactiveArgs []string
 
-	promptCount := 0
+	selectCount := 0
 	claudeCalls := 0
 	engine := RunEngine{
 		RunClaude: func(cwd string, args []string, env []string) ([]byte, int, error) {
@@ -1009,31 +1035,25 @@ func TestUATReviewInteractiveChat(t *testing.T) {
 			interactiveCalls++
 			interactiveCwd = cwd
 			interactiveArgs = args
-			// Simulate user chatting and exiting
 			return 0, nil
 		},
 		PromptUser: func(prompt string) (string, error) {
-			promptCount++
-			if promptCount == 1 {
-				// First prompt: user selects chat
-				return "3", nil
+			return "y\n", nil
+		},
+		SelectMenu: func(prompt string, options []menuOption, defaultIdx int) string {
+			selectCount++
+			if selectCount == 1 {
+				return "3" // chat
 			}
-			if promptCount == 2 {
-				// Second prompt (after interactive returns): approve
-				return "1", nil
-			}
-			return "approve", nil
+			return "1" // approve
 		},
 	}
 
 	sr := executeUATReview(s, cfg, "T-001", "test-sprint", step, RunOpts{}, engine, cfg.Root(), "test-session")
 
-	// Verify interactive session was launched
 	if interactiveCalls != 1 {
 		t.Errorf("expected 1 interactive session, got %d", interactiveCalls)
 	}
-
-	// Verify correct args passed to interactive session
 	if interactiveCwd != cfg.Root() {
 		t.Errorf("interactive cwd = %q, want %q", interactiveCwd, cfg.Root())
 	}
@@ -1046,18 +1066,11 @@ func TestUATReviewInteractiveChat(t *testing.T) {
 	if !foundResume {
 		t.Errorf("expected --resume test-session in args, got %v", interactiveArgs)
 	}
-
-	// Verify UAT re-ran after interactive session (claude called for report on iteration 2)
 	if claudeCalls < 2 {
 		t.Errorf("expected claude called at least twice (report iter 1 + report iter 2), got %d", claudeCalls)
 	}
-
-	// Verify overall result
 	if !sr.Passed {
 		t.Errorf("UAT review should pass after chat + approve, got error: %s", sr.Error)
-	}
-	if promptCount != 2 {
-		t.Errorf("expected 2 prompts (chat + approve), got %d", promptCount)
 	}
 }
 
@@ -1073,7 +1086,7 @@ func TestUATReviewInteractiveThenReject(t *testing.T) {
 	step.SetName("uat_review")
 
 	interactiveCalls := 0
-	promptCount := 0
+	selectCount := 0
 	engine := RunEngine{
 		RunClaude: func(cwd string, args []string, env []string) ([]byte, int, error) {
 			result := ClaudeResult{Type: "result", Subtype: "success"}
@@ -1085,11 +1098,14 @@ func TestUATReviewInteractiveThenReject(t *testing.T) {
 			return 0, nil
 		},
 		PromptUser: func(prompt string) (string, error) {
-			promptCount++
-			if promptCount == 1 {
-				return "chat", nil // synonym for 3
+			return "n\n", nil
+		},
+		SelectMenu: func(prompt string, options []menuOption, defaultIdx int) string {
+			selectCount++
+			if selectCount == 1 {
+				return "3" // chat
 			}
-			return "reject", nil // reject after chatting
+			return "2" // reject after chatting
 		},
 	}
 
