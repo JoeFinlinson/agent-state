@@ -78,7 +78,11 @@ func TestExists(t *testing.T) {
 		t.Error("should not exist")
 	}
 
-	Save(dir, "T-001", &Plan{Approach: "test"})
+	Save(dir, "T-001", &Plan{
+		Approach:   "test",
+		ScopeRepos: []string{"api"},
+		ACs:        []string{"cmd: echo ok"},
+	})
 	if !Exists(dir, "T-001") {
 		t.Error("should exist after save")
 	}
@@ -134,11 +138,47 @@ func TestParseFrontmatter(t *testing.T) {
 
 func TestSaveCreatesDir(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "nested", "plans")
-	err := Save(dir, "T-001", &Plan{Approach: "test"})
+	err := Save(dir, "T-001", &Plan{
+		Approach:   "test",
+		ScopeRepos: []string{"api"},
+		ACs:        []string{"cmd: echo ok"},
+	})
 	if err != nil {
 		t.Fatalf("Save should create nested dirs: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "T-001.md")); err != nil {
 		t.Error("file should exist")
+	}
+}
+
+func TestSaveRejectsIncomplete(t *testing.T) {
+	dir := t.TempDir()
+
+	// Missing scope_repos
+	err := Save(dir, "T-001", &Plan{Approach: "test", ACs: []string{"cmd: echo ok"}})
+	if err == nil {
+		t.Error("should reject plan missing scope_repos")
+	}
+
+	// Missing approach
+	err = Save(dir, "T-002", &Plan{ScopeRepos: []string{"api"}, ACs: []string{"cmd: echo ok"}})
+	if err == nil {
+		t.Error("should reject plan missing approach")
+	}
+
+	// Missing ACs
+	err = Save(dir, "T-003", &Plan{Approach: "test", ScopeRepos: []string{"api"}})
+	if err == nil {
+		t.Error("should reject plan missing ACs")
+	}
+
+	// Complete plan should succeed
+	err = Save(dir, "T-004", &Plan{
+		Approach:   "test",
+		ScopeRepos: []string{"api"},
+		ACs:        []string{"cmd: echo ok"},
+	})
+	if err != nil {
+		t.Errorf("complete plan should save: %v", err)
 	}
 }

@@ -52,7 +52,23 @@ func Load(dir, id string) (*Plan, error) {
 }
 
 // Save writes a plan sidecar to .plans/<id>.md.
+// Returns an error if required fields are missing — caller must fill them.
 func Save(dir, id string, p *Plan) error {
+	// Validate required fields — reject incomplete plans
+	var missing []string
+	if len(p.ScopeRepos) == 0 {
+		missing = append(missing, "scope_repos")
+	}
+	if p.Approach == "" {
+		missing = append(missing, "approach")
+	}
+	if len(p.ACs) == 0 {
+		missing = append(missing, "acceptance_criteria")
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("plan %s incomplete — missing: %s", id, strings.Join(missing, ", "))
+	}
+
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
