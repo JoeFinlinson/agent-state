@@ -597,7 +597,7 @@ func RunStatus(s *store.Store, cfg *config.Config) int {
 				if sprintCost > 0 {
 					sprintCostStr = fmt.Sprintf("$%.2f", sprintCost)
 				}
-				fmt.Printf("    %s\n", strings.Repeat("─", 100))
+				fmt.Printf("    %s\n", strings.Repeat("─", 112))
 				fmt.Printf("    %-8s %-15s %-22s %-8s  %12s  %12s  %10s  %10s\n",
 					"", "", fmt.Sprintf("%d/%d done", done, len(sp.Items)), "", sprintWallStr, sprintSTStr, sprintAIStr, sprintCostStr)
 			}
@@ -627,10 +627,10 @@ func RunStatus(s *store.Store, cfg *config.Config) int {
 			if epicCost > 0 {
 				epicCostStr = fmt.Sprintf("$%.2f", epicCost)
 			}
-			fmt.Printf("\n    %s\n", strings.Repeat("═", 100))
+			fmt.Printf("\n    %s\n", strings.Repeat("═", 112))
 			fmt.Printf("    %-8s %-15s %-22s %-8s  %12s  %12s  %10s  %10s\n",
 				"TOTAL", "", epic.Title, "", epicWallStr, epicSTStr, epicAIStr, epicCostStr)
-			fmt.Printf("    %s\n", strings.Repeat("═", 100))
+			fmt.Printf("    %s\n", strings.Repeat("═", 112))
 		}
 	}
 	// Legend
