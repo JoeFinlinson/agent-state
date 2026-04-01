@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -38,9 +39,17 @@ func UAT(s *store.Store, cfg *config.Config, id string, opts UATOpts) int {
 
 	runCmd := opts.RunCmd
 	if runCmd == nil {
-		root := cfg.Root()
+		// Determine best CWD: worktree base if exists, else project root
+		runDir := cfg.Root()
+		if cfg.Worktree != nil && cfg.Worktree.Enabled && cfg.Worktree.BaseDir != "" {
+			wtBase := filepath.Join(cfg.Root(), cfg.Worktree.BaseDir, id)
+			if _, err := os.Stat(wtBase); err == nil {
+				runDir = wtBase
+			}
+		}
 		runCmd = func(cmd string) ([]byte, int, error) {
-			return runCmdInDir(root, cmd)
+			cmd = rewriteACPaths(cfg, id, runDir, cmd)
+			return runCmdInDir(runDir, cmd)
 		}
 	}
 

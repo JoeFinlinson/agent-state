@@ -2074,12 +2074,15 @@ func executeUATReview(s *store.Store, cfg *config.Config, itemID, sprintID strin
 		}
 		uatCode := UAT(s, cfg, itemID, UATOpts{
 			RunCmd: func(cmd string) ([]byte, int, error) {
+				// Rewrite ../repo paths for worktree context
+				cmd = rewriteACPaths(cfg, itemID, uatDir, cmd)
 				return runCmdInDir(uatDir, cmd)
 			},
 		})
 
 		// Now launch claude to produce the UAT summary report
 		e2eContext := ""
+
 		if e2eSummary != "" {
 			e2eContext = fmt.Sprintf("\n\nPost-deploy E2E results:\n%s\n", e2eSummary)
 		}
@@ -3854,6 +3857,42 @@ func shortenPath(p string) string {
 		return ".../" + strings.Join(parts[len(parts)-3:], "/")
 	}
 	return p
+}
+
+// rewriteACPaths rewrites ../repo-name paths in acceptance criteria commands
+// to use the worktree path. From the worktree base (worktrees/T-095/),
+// repos are direct subdirectories (theraprac-web/), not siblings (../theraprac-web).
+func rewriteACPaths(cfg *config.Config, itemID, uatDir, cmd string) string {
+	if cfg.Worktree == nil || !cfg.Worktree.Enabled {
+		return cmd
+	}
+
+	// Check if the worktree base exists for this item
+	wtBase := filepath.Join(cfg.Root(), cfg.Worktree.BaseDir, itemID)
+	if _, err := os.Stat(wtBase); err != nil {
+		return cmd
+	}
+
+	// Rewrite ../repo-name → repo-name (direct subdirectory of worktree base)
+	for _, repo := range cfg.Worktree.Repos {
+		for _, pattern := range []string{
+			"cd ../" + repo + " ",
+			"cd ../" + repo + "/",
+			"../" + repo + "/",
+		} {
+			if strings.Contains(cmd, pattern) {
+				replacement := strings.Replace(pattern, "../"+repo, repo, 1)
+				cmd = strings.ReplaceAll(cmd, pattern, replacement)
+			}
+		}
+		// Also handle "cd ../repo &&" (no trailing space before &&)
+		pattern := "cd ../" + repo + " &&"
+		if strings.Contains(cmd, pattern) {
+			cmd = strings.ReplaceAll(cmd, pattern, "cd "+repo+" &&")
+		}
+	}
+
+	return cmd
 }
 
 func defaultPromptUser(_ string) (string, error) {

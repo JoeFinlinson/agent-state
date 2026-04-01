@@ -1334,3 +1334,47 @@ func TestPostDeployE2ENoPostDeployConfig(t *testing.T) {
 		t.Errorf("expected empty when no PostDeployCmd configured, got %q", result)
 	}
 }
+
+// --- AC path rewriting tests ---
+
+func TestRewriteACPathsRelativeToWorktree(t *testing.T) {
+	root := t.TempDir()
+	for _, dir := range []string{".as", "worktrees/T-001/theraprac-web", "worktrees/T-001/theraprac-api"} {
+		os.MkdirAll(filepath.Join(root, dir), 0755)
+	}
+	os.WriteFile(filepath.Join(root, ".as", "config.yaml"), []byte(`paths:
+  root: .
+
+worktree:
+  enabled: true
+  base_dir: worktrees
+  repos: [theraprac-api, theraprac-web]
+`), 0644)
+
+	cfg, _ := config.LoadFrom(filepath.Join(root, ".as", "config.yaml"))
+	uatDir := filepath.Join(root, "worktrees", "T-001")
+
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"cd ../theraprac-web && npx vitest run test.ts", "cd theraprac-web && npx vitest run test.ts"},
+		{"cd ../theraprac-api && make test-unit", "cd theraprac-api && make test-unit"},
+		{"grep -q 'foo' ../theraprac-web/src/lib/hooks.ts", "grep -q 'foo' theraprac-web/src/lib/hooks.ts"},
+		{"echo no repo path", "echo no repo path"},
+	}
+	for _, tt := range tests {
+		got := rewriteACPaths(cfg, "T-001", uatDir, tt.input)
+		if got != tt.want {
+			t.Errorf("rewriteACPaths(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestRewriteACPathsNoWorktree(t *testing.T) {
+	cfg := &config.Config{}
+	got := rewriteACPaths(cfg, "T-001", "/tmp", "cd ../theraprac-web && test")
+	if got != "cd ../theraprac-web && test" {
+		t.Errorf("should not rewrite without worktree config, got %q", got)
+	}
+}
