@@ -57,14 +57,15 @@ type RunEngine struct {
 
 // ClaudeResult represents parsed JSON output from claude -p --output-format json.
 type ClaudeResult struct {
-	Type         string  `json:"type"`
-	Subtype      string  `json:"subtype"`
-	TotalCostUSD float64 `json:"total_cost_usd"`
-	DurationMs   int64   `json:"duration_ms"`
-	SessionID    string  `json:"session_id"`
-	NumTurns     int     `json:"num_turns"`
-	Result       string  `json:"result"`
-	IsError      bool    `json:"is_error"`
+	Type         string   `json:"type"`
+	Subtype      string   `json:"subtype"`
+	TotalCostUSD float64  `json:"total_cost_usd"`
+	DurationMs   int64    `json:"duration_ms"`
+	SessionID    string   `json:"session_id"`
+	NumTurns     int      `json:"num_turns"`
+	Result       string   `json:"result"`
+	IsError      bool     `json:"is_error"`
+	Errors       []string `json:"errors"`
 }
 
 // StepResult captures the outcome of a single pipeline step.
@@ -1841,6 +1842,50 @@ func executeClaude(s *store.Store, cfg *config.Config, itemID, sprintID string, 
 	sr.FullOutput = claudeResult.Result
 
 	if exitCode != 0 || (claudeResult.Subtype != "" && claudeResult.Subtype != "success") {
+		// Check for expired/invalid session — retry with fresh session
+		if isResume && claudeResult.Subtype == "error_during_execution" {
+			for _, errMsg := range claudeResult.Errors {
+				if strings.Contains(errMsg, "No conversation found") {
+					fmt.Fprintf(os.Stderr, "[%s] Session expired — retrying with fresh session\n", itemID)
+					// Remove --resume and --session-id args, start fresh
+					var freshArgs []string
+					for i := 0; i < len(args); i++ {
+						if args[i] == "--resume" || args[i] == "--session-id" {
+							i++ // skip the value too
+							continue
+						}
+						freshArgs = append(freshArgs, args[i])
+					}
+					newSessionID := generateSessionID()
+					freshArgs = append(freshArgs, "--session-id", newSessionID)
+					output2, exitCode2, err2 := engine.RunClaude(worktreeDir, freshArgs, env)
+					if err2 != nil {
+						sr.Error = fmt.Sprintf("fresh session exec error: %v", err2)
+						return sr
+					}
+					cr2, pe2 := parseClaudeOutput(output2)
+					if pe2 != nil {
+						if exitCode2 != 0 {
+							sr.Error = fmt.Sprintf("claude exited %d (fresh)", exitCode2)
+							return sr
+						}
+						sr.Passed = true
+						sr.Output = truncate(string(output2), 500)
+						return sr
+					}
+					sr.CostUSD = cr2.TotalCostUSD
+					sr.AIDurationMs = cr2.DurationMs
+					sr.Output = truncate(cr2.Result, 500)
+					sr.FullOutput = cr2.Result
+					if exitCode2 == 0 && (cr2.Subtype == "" || cr2.Subtype == "success") {
+						sr.Passed = true
+					} else {
+						sr.Error = fmt.Sprintf("claude exited %d (subtype: %s)", exitCode2, cr2.Subtype)
+					}
+					return sr
+				}
+			}
+		}
 		sr.Error = fmt.Sprintf("claude exited %d (subtype: %s)", exitCode, claudeResult.Subtype)
 		return sr
 	}
