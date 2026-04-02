@@ -587,7 +587,7 @@ func RunStatus(s *store.Store, cfg *config.Config) int {
 				if item.PlanApproved && !isDone && completed == 0 {
 					planBadge = fmt.Sprintf("  %s󰙅%s", "\033[32m", "\033[0m")
 				}
-				fmt.Printf("      %s%s\n", title, planBadge)
+				fmt.Printf("      %-80s%s\n", title, planBadge)
 				fmt.Printf("    %-8s %-15s %-22s %-8s  %12s  %12s  %10s  %10s%s\n",
 					itemID, bar, statusLabel, createdStr, wallStr, stStr, aiStr, costStr, inFlight)
 			}
@@ -1601,12 +1601,10 @@ func recordRunMetrics(cfg *config.Config, itemID string, result ItemResult) {
 		setNestedField(item, "time_tracking", "ai_cost_usd", fmt.Sprintf("%.4f", prev+result.TotalCost))
 	}
 
-	// Accumulate AI duration from claude's reported duration_ms (not wall clock)
+	// Accumulate AI duration from all steps that report it (claude, plan, uat_review, etc.)
 	var aiDurationMs int64
 	for _, sr := range result.Steps {
-		if sr.Type == "claude" {
-			aiDurationMs += sr.AIDurationMs
-		}
+		aiDurationMs += sr.AIDurationMs
 	}
 	if aiDurationMs > 0 {
 		prev := readIntField(item, "time_tracking", "ai_duration_seconds")
@@ -1756,38 +1754,49 @@ func readIntField(item *model.Item, parent, key string) int {
 
 // executeStepWithSession dispatches to the appropriate step executor, with claude session reuse.
 func executeStepWithSession(s *store.Store, cfg *config.Config, itemID, sprintID string, step config.RunStepDef, opts RunOpts, engine RunEngine, worktreeDir, claudeSessionID string, isResume bool) StepResult {
+	stepStart := time.Now()
+
+	var sr StepResult
 	switch step.Type {
 	case "plan":
-		return executePlanWithOpts(s, cfg, itemID, engine, opts, worktreeDir)
+		sr = executePlanWithOpts(s, cfg, itemID, engine, opts, worktreeDir)
 	case "claude":
-		return executeClaude(s, cfg, itemID, sprintID, step, opts, engine, worktreeDir, claudeSessionID, isResume)
+		sr = executeClaude(s, cfg, itemID, sprintID, step, opts, engine, worktreeDir, claudeSessionID, isResume)
 	case "test":
-		return executeTest(s, cfg, itemID, step, worktreeDir)
+		sr = executeTest(s, cfg, itemID, step, worktreeDir)
 	case "verify_tests":
-		return executeVerifyTests(s, cfg, itemID)
+		sr = executeVerifyTests(s, cfg, itemID)
 	case "pr":
-		return executePR(s, cfg, itemID, step, worktreeDir)
+		sr = executePR(s, cfg, itemID, step, worktreeDir)
 	case "merge":
-		return executeMerge(s, cfg, itemID, worktreeDir)
+		sr = executeMerge(s, cfg, itemID, worktreeDir)
 	case "merge_precheck":
-		return executeMergePrecheck(cfg, itemID, worktreeDir)
+		sr = executeMergePrecheck(cfg, itemID, worktreeDir)
 	case "deploy":
-		return executeDeploy(s, cfg, itemID, worktreeDir)
+		sr = executeDeploy(s, cfg, itemID, worktreeDir)
 	case "smoke":
-		return executeSmoke(s, cfg, itemID, worktreeDir)
+		sr = executeSmoke(s, cfg, itemID, worktreeDir)
 	case "uat":
-		return executeUAT(s, cfg, itemID, worktreeDir)
+		sr = executeUAT(s, cfg, itemID, worktreeDir)
 	case "gate":
-		return executeGate(itemID, engine)
+		sr = executeGate(itemID, engine)
 	case "uat_review":
-		return executeUATReview(s, cfg, itemID, sprintID, step, opts, engine, worktreeDir, claudeSessionID)
+		sr = executeUATReview(s, cfg, itemID, sprintID, step, opts, engine, worktreeDir, claudeSessionID)
 	case "close":
-		return executeClose(s, cfg, itemID, step)
+		sr = executeClose(s, cfg, itemID, step)
 	case "command":
-		return executeCommand(cfg, itemID, sprintID, step, worktreeDir)
+		sr = executeCommand(cfg, itemID, sprintID, step, worktreeDir)
 	default:
-		return StepResult{Step: step.Name(), Type: step.Type, Error: fmt.Sprintf("unknown step type: %s", step.Type)}
+		sr = StepResult{Step: step.Name(), Type: step.Type, Error: fmt.Sprintf("unknown step type: %s", step.Type)}
 	}
+
+	// Ensure every step has wall-clock duration recorded.
+	// Steps that already set Duration (e.g. claude) keep theirs.
+	if sr.Duration == 0 {
+		sr.Duration = time.Since(stepStart)
+	}
+
+	return sr
 }
 
 // --- Step executors ---
@@ -2295,6 +2304,8 @@ func executeUATReview(s *store.Store, cfg *config.Config, itemID, sprintID strin
 		reportStart := time.Now()
 		reportSR := executeClaude(s, cfg, itemID, sprintID, reportStep, opts, engine, worktreeDir, claudeSessionID, true)
 		reviewDur := time.Since(reportStart)
+		sr.CostUSD += reportSR.CostUSD
+		sr.AIDurationMs += reportSR.AIDurationMs
 
 		// Reload item for current state
 		s, _ = store.New(cfg)
@@ -2707,15 +2718,17 @@ func executePlanWithOpts(s *store.Store, cfg *config.Config, itemID string, engi
 		fmt.Printf("\n[%s] Item missing %s — asking Claude to propose a plan...\n",
 			itemID, planMissingFields(needsSummary, needsACs))
 
-		proposal, err := proposePlan(cfg, itemID, item, engine, opts, worktreeDir, needsSummary, needsACs)
+		proposalResult, err := proposePlan(cfg, itemID, item, engine, opts, worktreeDir, needsSummary, needsACs)
 		if err != nil {
 			sr.Error = fmt.Sprintf("plan proposal failed: %v", err)
 			return sr
 		}
+		sr.CostUSD += proposalResult.CostUSD
+		sr.AIDurationMs += proposalResult.AIDurationMs
 
 		fmt.Printf("\n=== Proposed Plan: %s ===\n", itemID)
 		fmt.Printf("Title: %s\n", item.Title)
-		fmt.Println(proposal)
+		fmt.Println(proposalResult.Text)
 
 		// Plan review loop — claude reviews, user decides
 		for iteration := 1; ; iteration++ {
@@ -2729,6 +2742,8 @@ func executePlanWithOpts(s *store.Store, cfg *config.Config, itemID string, engi
 			reviewStart := time.Now()
 			reviewSR := executeClaude(s, cfg, itemID, "", reviewStep, opts, engine, worktreeDir, "", false)
 			reviewDur := time.Since(reviewStart)
+			sr.CostUSD += reviewSR.CostUSD
+			sr.AIDurationMs += reviewSR.AIDurationMs
 			rec := extractRecommendation(reviewSR.FullOutput)
 
 			gateMu.Lock()
@@ -2827,6 +2842,8 @@ func executePlanWithOpts(s *store.Store, cfg *config.Config, itemID string, engi
 			reviewStart := time.Now()
 			reviewSR := executeClaude(s, cfg, itemID, "", reviewStep, opts, engine, worktreeDir, "", false)
 			reviewDur := time.Since(reviewStart)
+			sr.CostUSD += reviewSR.CostUSD
+			sr.AIDurationMs += reviewSR.AIDurationMs
 			rec := extractRecommendation(reviewSR.FullOutput)
 
 			gateMu.Lock()
@@ -2959,7 +2976,14 @@ func executePlanWithOpts(s *store.Store, cfg *config.Config, itemID string, engi
 }
 
 // proposePlan launches claude -p to analyze the item and propose summary + ACs.
-func proposePlan(cfg *config.Config, itemID string, item *model.Item, engine RunEngine, opts RunOpts, worktreeDir string, needsSummary, needsACs bool) (string, error) {
+// proposePlanResult holds the text output and cost data from a proposePlan call.
+type proposePlanResult struct {
+	Text         string
+	CostUSD      float64
+	AIDurationMs int64
+}
+
+func proposePlan(cfg *config.Config, itemID string, item *model.Item, engine RunEngine, opts RunOpts, worktreeDir string, needsSummary, needsACs bool) (proposePlanResult, error) {
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("Analyze item %s and propose a plan.\n\n", itemID))
 	b.WriteString(fmt.Sprintf("Title: %s\n", item.Title))
@@ -3014,23 +3038,27 @@ func proposePlan(cfg *config.Config, itemID string, item *model.Item, engine Run
 
 	output, exitCode, err := engine.RunClaude(cwd, args, env)
 	if err != nil {
-		return "", fmt.Errorf("claude exec error: %v", err)
+		return proposePlanResult{}, fmt.Errorf("claude exec error: %v", err)
 	}
 
 	// Parse JSON to extract the text result
 	claudeResult, parseErr := parseClaudeOutput(output)
 	if parseErr != nil {
 		if exitCode != 0 {
-			return "", fmt.Errorf("claude exited %d", exitCode)
+			return proposePlanResult{}, fmt.Errorf("claude exited %d", exitCode)
 		}
-		return string(output), nil
+		return proposePlanResult{Text: string(output)}, nil
 	}
 
 	if exitCode != 0 || (claudeResult.Subtype != "" && claudeResult.Subtype != "success") {
-		return "", fmt.Errorf("claude exited %d (subtype: %s)", exitCode, claudeResult.Subtype)
+		return proposePlanResult{}, fmt.Errorf("claude exited %d (subtype: %s)", exitCode, claudeResult.Subtype)
 	}
 
-	return claudeResult.Result, nil
+	return proposePlanResult{
+		Text:         claudeResult.Result,
+		CostUSD:      claudeResult.TotalCostUSD,
+		AIDurationMs: claudeResult.DurationMs,
+	}, nil
 }
 
 func planMissingFields(needsSummary, needsACs bool) string {
