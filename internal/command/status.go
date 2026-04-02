@@ -330,8 +330,12 @@ func printIssues(s *store.Store, cfg *config.Config, g *deps.Graph) {
 			}
 
 			touched := item.LastTouched.Format("2006-01-02")
-			fmt.Printf("    %s%-8s%s %s  %s%s%s  %s\n",
-				idColor, item.ID, cReset, padRight(truncate(item.Title, 45), 45), cDim, touched, cReset, sevLabel(sev))
+			planBadge := ""
+			if item.PlanApproved {
+				planBadge = fmt.Sprintf("  %s󰙅%s", cGreen, cReset)
+			}
+			fmt.Printf("    %s%-8s%s %s  %s%s%s  %s%s\n",
+				idColor, item.ID, cReset, padRight(truncate(item.Title, 45), 45), cDim, touched, cReset, sevLabel(sev), planBadge)
 
 			blocksItems := g.BlocksItems(item.ID)
 			if len(blocksItems) > 0 {
@@ -526,10 +530,14 @@ func printQueuedTasks(s *store.Store, cfg *config.Config, g *deps.Graph, filterT
 				idColor = cRed
 			}
 
-			// Item line: ID + fixed-width title + last touched + colored priority
+			// Item line: ID + fixed-width title + last touched + colored priority + plan badge
 			touched := item.LastTouched.Format("2006-01-02")
-			fmt.Printf("    %s%-8s%s %s  %s%s%s  %s(p%d)%s\n",
-				idColor, item.ID, cReset, padRight(truncate(item.Title, 45), 45), cDim, touched, cReset, pColor, p, cReset)
+			planBadge := ""
+			if item.PlanApproved {
+				planBadge = fmt.Sprintf("  %s󰙅%s", cGreen, cReset)
+			}
+			fmt.Printf("    %s%-8s%s %s  %s%s%s  %s(p%d)%s%s\n",
+				idColor, item.ID, cReset, padRight(truncate(item.Title, 45), 45), cDim, touched, cReset, pColor, p, cReset, planBadge)
 
 			// Blocks line (separate, indented)
 			blocksItems := g.BlocksItems(item.ID)
