@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"golang.org/x/term"
 )
@@ -70,9 +71,11 @@ func selectMenu(prompt string, options []menuOption, defaultIdx int) string {
 			break
 		}
 
-		// Ctrl+C
+		// Ctrl+C — return sentinel so callers can distinguish interrupt from selection
 		if n == 1 && buf[0] == 3 {
-			return options[selected].Key
+			fmt.Fprintln(os.Stderr)
+			fmt.Fprintf(os.Stderr, "  [Ctrl+C] interrupted\n")
+			return "^C"
 		}
 
 		// Enter — confirm current selection
@@ -112,7 +115,136 @@ func selectMenu(prompt string, options []menuOption, defaultIdx int) string {
 		}
 	}
 
-	return options[selected].Key
+	// EOF or read error — treat as interrupt
+	return "^C"
+}
+
+// selectMenuTimed is like selectMenu but auto-selects the default option after
+// the given timeout. A countdown is displayed below the menu. If timeout <= 0,
+// it falls through to the normal (blocking) selectMenu.
+func selectMenuTimed(prompt string, options []menuOption, defaultIdx int, timeout time.Duration) string {
+	if timeout <= 0 {
+		return selectMenu(prompt, options, defaultIdx)
+	}
+
+	fd := int(os.Stdin.Fd())
+	if !term.IsTerminal(fd) {
+		return selectMenuFallback(prompt, options)
+	}
+
+	oldState, err := term.MakeRaw(fd)
+	if err != nil {
+		return selectMenuFallback(prompt, options)
+	}
+	defer term.Restore(fd, oldState)
+
+	selected := defaultIdx
+	if selected < 0 || selected >= len(options) {
+		selected = 0
+	}
+
+	remaining := int(timeout.Seconds())
+
+	renderMenu := func() {
+		for i, opt := range options {
+			if i == selected {
+				fmt.Fprintf(os.Stderr, "\r\033[K  \033[1;7m ▸ %s  %s \033[0m\n", opt.Key, opt.Label)
+			} else {
+				fmt.Fprintf(os.Stderr, "\r\033[K    %s  %s\n", opt.Key, opt.Label)
+			}
+		}
+	}
+
+	renderCountdown := func() {
+		fmt.Fprintf(os.Stderr, "\r\033[K  \033[33mAuto-selecting [%s] in %ds…\033[0m", options[selected].Key, remaining)
+	}
+
+	if prompt != "" {
+		fmt.Fprintf(os.Stderr, "\n  %s\n\n", prompt)
+	}
+	renderMenu()
+	renderCountdown()
+
+	fmt.Fprint(os.Stderr, "\033[?25l")
+	defer fmt.Fprint(os.Stderr, "\033[?25h")
+
+	// Read input in a goroutine so we can race against the timer.
+	type keyEvent struct {
+		buf [3]byte
+		n   int
+		err error
+	}
+	keyCh := make(chan keyEvent, 1)
+	go func() {
+		for {
+			var ev keyEvent
+			ev.n, ev.err = os.Stdin.Read(ev.buf[:])
+			keyCh <- ev
+			if ev.err != nil {
+				return
+			}
+		}
+	}()
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+	deadline := time.After(timeout)
+
+	for {
+		select {
+		case <-deadline:
+			fmt.Fprintf(os.Stderr, "\r\033[K  \033[1mAuto-selected [%s]\033[0m\n", options[selected].Key)
+			return options[selected].Key
+
+		case <-ticker.C:
+			remaining--
+			if remaining < 0 {
+				remaining = 0
+			}
+			renderCountdown()
+
+		case ev := <-keyCh:
+			if ev.err != nil {
+				fmt.Fprintf(os.Stderr, "\r\033[K\n")
+				return "^C"
+			}
+			if ev.n == 1 && ev.buf[0] == 3 { // Ctrl+C
+				fmt.Fprintf(os.Stderr, "\r\033[K\n")
+				fmt.Fprintf(os.Stderr, "  [Ctrl+C] interrupted\n")
+				return "^C"
+			}
+			if ev.n == 1 && (ev.buf[0] == '\r' || ev.buf[0] == '\n') { // Enter
+				fmt.Fprintf(os.Stderr, "\r\033[K\n")
+				return options[selected].Key
+			}
+			if ev.n == 3 && ev.buf[0] == 0x1b && ev.buf[1] == '[' { // Arrow keys
+				switch ev.buf[2] {
+				case 'A':
+					if selected > 0 {
+						selected--
+					}
+				case 'B':
+					if selected < len(options)-1 {
+						selected++
+					}
+				}
+				fmt.Fprintf(os.Stderr, "\r")
+				fmt.Fprintf(os.Stderr, "\033[%dA", len(options))
+				renderMenu()
+				renderCountdown()
+				continue
+			}
+			if ev.n == 1 { // Hotkey
+				key := strings.ToLower(string(ev.buf[0]))
+				for _, opt := range options {
+					if strings.ToLower(opt.Key) == key {
+						fmt.Fprintf(os.Stderr, "\r\033[K\n")
+						return opt.Key
+					}
+				}
+			}
+		}
+	}
 }
 
 // selectMenuFallback is a simple line-based fallback for non-terminal input.
