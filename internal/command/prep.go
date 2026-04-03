@@ -3,7 +3,6 @@ package command
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -285,9 +284,10 @@ func prepItem(s *store.Store, cfg *config.Config, itemID string, item *model.Ite
 			ReviewDuration: reviewDur,
 			AcsTotal:       len(p.ACs),
 		}, []menuOption{
-			{"1", "Accept  — save plan and proceed"},
-			{"2", "Reject  — skip this item"},
-			{"3", "Chat    — revise with claude"},
+			{"1", "Accept      — save plan and proceed"},
+			{"2", "Reject      — skip this item"},
+			{"3", "Feedback    — type direction, claude revises (constrained)"},
+			{"4", "Interactive — full claude session (escape hatch)"},
 		}, engine)
 
 		if choice == "^C" {
@@ -327,9 +327,12 @@ func prepItem(s *store.Store, cfg *config.Config, itemID string, item *model.Ite
 				item.Doc.ReplaceList("acceptance_criteria", p.ACs)
 			}
 			item.Doc.SetField("last_touched", time.Now().Format(time.RFC3339))
-			s.Write(item)
+			if err := s.Write(item); err != nil {
+				fmt.Fprintf(os.Stderr, "[%s] ERROR: failed to save plan approval: %v\n", itemID, err)
+				return "rejected"
+			}
 
-			fmt.Printf("[%s] Plan accepted and saved\n", itemID)
+			fmt.Printf("[%s] Plan accepted — plan_approved: true written to item\n", itemID)
 			return "accepted"
 		}
 
@@ -337,29 +340,16 @@ func prepItem(s *store.Store, cfg *config.Config, itemID string, item *model.Ite
 			return "rejected"
 		}
 
-		// Option 3: Chat — launch interactive claude for revision
-		fmt.Printf("\n[%s] Launching interactive session for plan revision...\n", itemID)
-		fmt.Println("  Discuss changes with claude. Use st update to modify the item.")
-		fmt.Println("  When done, exit (Ctrl+D or /exit). The revised plan will be shown.")
-		fmt.Println()
-
-		if engine.RunClaudeInteractive != nil {
-			engine.RunClaudeInteractive(cwd, []string{})
+		if choice == "3" {
+			// Constrained feedback
+			var sr StepResult
+			runConstrainedFeedback(s, cfg, itemID, "", item, "plan review", RunOpts{Model: opts.Model}, engine, cwd, "", &sr)
 		} else {
-			claudeBin, lookErr := exec.LookPath("claude")
-			if lookErr != nil {
-				fmt.Printf("[%s] claude not found in PATH\n", itemID)
-				continue
-			}
-			cmd := exec.Command(claudeBin)
-			cmd.Dir = cwd
-			cmd.Stdin = os.Stdin
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			cmd.Run()
+			// Option 4: interactive escape hatch
+			runInteractiveEscapeHatch(itemID, cwd, engine, cfg)
 		}
 
-		// Reload after interactive session
+		// Reload after revision
 		s, _ = store.New(cfg)
 		item, _ = s.Get(itemID)
 
@@ -373,7 +363,7 @@ func prepItem(s *store.Store, cfg *config.Config, itemID string, item *model.Ite
 
 		p.Revisions = append(p.Revisions, plan.Revision{
 			Timestamp: plan.Now(),
-			Summary:   "Revised after interactive session",
+			Summary:   "Revised after feedback",
 		})
 	}
 }
