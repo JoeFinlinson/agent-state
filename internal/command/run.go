@@ -4858,8 +4858,10 @@ func extractRecommendation(output string) string {
 			continue
 		}
 
-		// Try to extract from same line after "—" or ":"
-		for _, sep := range []string{"—", ":"} {
+		// Try to extract from same line after ":" or "—".
+		// ":" first because "RECOMMENDATION: Accept — reason" needs the colon
+		// to capture "Accept", not the em dash which loses it.
+		for _, sep := range []string{":", "—"} {
 			if idx := strings.LastIndex(line, sep); idx >= 0 {
 				rest := strings.TrimSpace(line[idx+len(sep):])
 				rest = strings.ReplaceAll(rest, "**", "")
