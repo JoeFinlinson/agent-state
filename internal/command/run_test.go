@@ -959,7 +959,7 @@ func TestUATReviewReject(t *testing.T) {
 	}
 }
 
-func TestUATReviewChatThenApprove(t *testing.T) {
+func TestUATReviewFeedbackThenApprove(t *testing.T) {
 	s, cfg := setupRunTestEnv(t)
 
 	item, _ := s.Get("T-001")
@@ -972,8 +972,10 @@ func TestUATReviewChatThenApprove(t *testing.T) {
 
 	selectCount := 0
 	interactiveCalls := 0
+	claudeCalls := 0
 	engine := RunEngine{
 		RunClaude: func(cwd string, args []string, env []string) ([]byte, int, error) {
+			claudeCalls++
 			result := ClaudeResult{Type: "result", Subtype: "success", TotalCostUSD: 0.02}
 			data, _ := json.Marshal(result)
 			return data, 0, nil
@@ -983,12 +985,12 @@ func TestUATReviewChatThenApprove(t *testing.T) {
 			return 0, nil
 		},
 		PromptUser: func(prompt string) (string, error) {
-			return "y\n", nil
+			return "fix the ACs\n", nil
 		},
 		SelectMenu: func(prompt string, options []menuOption, defaultIdx int) string {
 			selectCount++
 			if selectCount == 1 {
-				return "3" // chat first
+				return "3" // feedback first (constrained)
 			}
 			return "1" // then approve
 		},
@@ -996,17 +998,21 @@ func TestUATReviewChatThenApprove(t *testing.T) {
 
 	sr := executeUATReview(s, cfg, "T-001", "test-sprint", step, RunOpts{}, engine, cfg.Root(), "test-session")
 	if !sr.Passed {
-		t.Errorf("UAT review should pass after chat + approve, got error: %s", sr.Error)
+		t.Errorf("UAT review should pass after feedback + approve, got error: %s", sr.Error)
 	}
-	if interactiveCalls != 1 {
-		t.Errorf("expected 1 interactive session, got %d", interactiveCalls)
+	if interactiveCalls != 0 {
+		t.Errorf("feedback should not launch interactive session, got %d calls", interactiveCalls)
 	}
 	if selectCount != 2 {
-		t.Errorf("expected 2 menu selections (chat + approve), got %d", selectCount)
+		t.Errorf("expected 2 menu selections (feedback + approve), got %d", selectCount)
+	}
+	// Expect at least 3 claude calls: UAT report iter 1 + feedback subprocess + UAT report iter 2
+	if claudeCalls < 3 {
+		t.Errorf("expected at least 3 claude calls (report + feedback + report), got %d", claudeCalls)
 	}
 }
 
-func TestUATReviewInteractiveChat(t *testing.T) {
+func TestUATReviewInteractiveEscapeHatch(t *testing.T) {
 	s, cfg := setupRunTestEnv(t)
 
 	item, _ := s.Get("T-001")
@@ -1020,7 +1026,6 @@ func TestUATReviewInteractiveChat(t *testing.T) {
 	// Track interactive session launches
 	interactiveCalls := 0
 	var interactiveCwd string
-	var interactiveArgs []string
 
 	selectCount := 0
 	claudeCalls := 0
@@ -1034,7 +1039,6 @@ func TestUATReviewInteractiveChat(t *testing.T) {
 		RunClaudeInteractive: func(cwd string, args []string) (int, error) {
 			interactiveCalls++
 			interactiveCwd = cwd
-			interactiveArgs = args
 			return 0, nil
 		},
 		PromptUser: func(prompt string) (string, error) {
@@ -1043,7 +1047,7 @@ func TestUATReviewInteractiveChat(t *testing.T) {
 		SelectMenu: func(prompt string, options []menuOption, defaultIdx int) string {
 			selectCount++
 			if selectCount == 1 {
-				return "3" // chat
+				return "4" // interactive escape hatch
 			}
 			return "1" // approve
 		},
@@ -1057,20 +1061,11 @@ func TestUATReviewInteractiveChat(t *testing.T) {
 	if interactiveCwd != cfg.Root() {
 		t.Errorf("interactive cwd = %q, want %q", interactiveCwd, cfg.Root())
 	}
-	foundResume := false
-	for i, arg := range interactiveArgs {
-		if arg == "--resume" && i+1 < len(interactiveArgs) && interactiveArgs[i+1] == "test-session" {
-			foundResume = true
-		}
-	}
-	if !foundResume {
-		t.Errorf("expected --resume test-session in args, got %v", interactiveArgs)
-	}
 	if claudeCalls < 2 {
 		t.Errorf("expected claude called at least twice (report iter 1 + report iter 2), got %d", claudeCalls)
 	}
 	if !sr.Passed {
-		t.Errorf("UAT review should pass after chat + approve, got error: %s", sr.Error)
+		t.Errorf("UAT review should pass after interactive + approve, got error: %s", sr.Error)
 	}
 }
 
@@ -1103,9 +1098,9 @@ func TestUATReviewInteractiveThenReject(t *testing.T) {
 		SelectMenu: func(prompt string, options []menuOption, defaultIdx int) string {
 			selectCount++
 			if selectCount == 1 {
-				return "3" // chat
+				return "4" // interactive escape hatch
 			}
-			return "2" // reject after chatting
+			return "2" // reject after interactive
 		},
 	}
 
@@ -1115,7 +1110,7 @@ func TestUATReviewInteractiveThenReject(t *testing.T) {
 		t.Errorf("expected 1 interactive session, got %d", interactiveCalls)
 	}
 	if sr.Passed {
-		t.Error("UAT review should fail on reject after chat")
+		t.Error("UAT review should fail on reject after interactive")
 	}
 	if sr.Error != "user rejected" {
 		t.Errorf("expected 'user rejected', got %q", sr.Error)

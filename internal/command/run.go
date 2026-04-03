@@ -2528,9 +2528,10 @@ func executeUATReview(s *store.Store, cfg *config.Config, itemID, sprintID strin
 			Recommendation: rec,
 			ReviewDuration: reviewDur,
 		}, []menuOption{
-			{"1", "Approve — accept and close"},
-			{"2", "Reject  — stop and release for retry"},
-			{"3", "Chat    — give feedback, claude acts, UAT re-runs"},
+			{"1", "Approve     — accept and close"},
+			{"2", "Reject      — stop and release for retry"},
+			{"3", "Feedback    — type direction, claude acts, UAT re-runs"},
+			{"4", "Interactive — full claude session (escape hatch)"},
 		}, engine)
 		gateMu.Unlock()
 
@@ -2558,35 +2559,18 @@ func executeUATReview(s *store.Store, cfg *config.Config, itemID, sprintID strin
 			return sr
 		}
 
-		// Option 3 — launch interactive claude session
 		if choice == "3" {
-			fmt.Printf("\n[%s] Launching interactive claude session...\n", itemID)
-			fmt.Println("  Chat with claude to make changes. When done, exit claude (Ctrl+D or /exit).")
-			fmt.Println("  UAT will re-run automatically when you return.")
-			fmt.Println()
+			// Constrained feedback: user types direction, claude acts under pipeline rules
+			reviewItem, _ := s.Get(itemID)
+			runConstrainedFeedback(s, cfg, itemID, "", reviewItem, "UAT review", opts, engine, worktreeDir, claudeSessionID, &sr)
+			fmt.Printf("\n[%s] Feedback applied. Re-running UAT...\n", itemID)
+			s, _ = store.New(cfg)
+			continue
+		}
 
-			args := []string{"--resume", claudeSessionID}
-			if worktreeDir != "" {
-				args = append(args, "--add-dir", worktreeDir)
-			}
-
-			if engine.RunClaudeInteractive != nil {
-				engine.RunClaudeInteractive(worktreeDir, args)
-			} else {
-				// Default: launch claude binary with stdin/stdout attached
-				claudeBin, err := exec.LookPath("claude")
-				if err != nil {
-					fmt.Printf("[%s] claude not found in PATH\n", itemID)
-					continue
-				}
-				cmd := exec.Command(claudeBin, args...)
-				cmd.Dir = worktreeDir
-				cmd.Stdin = os.Stdin
-				cmd.Stdout = os.Stdout
-				cmd.Stderr = os.Stderr
-				cmd.Run()
-			}
-
+		if choice == "4" {
+			// Interactive escape hatch
+			runInteractiveEscapeHatch(itemID, worktreeDir, engine, cfg)
 			fmt.Printf("\n[%s] Interactive session ended. Re-running UAT...\n", itemID)
 			s, _ = store.New(cfg)
 			continue
@@ -2957,9 +2941,10 @@ func executePlanWithOpts(s *store.Store, cfg *config.Config, itemID string, engi
 				ReviewDuration: reviewDur,
 				AcsTotal:       len(item.AcceptanceCriteria),
 			}, []menuOption{
-				{"1", "Accept  — approve and proceed"},
-				{"2", "Reject  — stop and release"},
-				{"3", "Chat    — give feedback, claude revises plan"},
+				{"1", "Accept      — approve and proceed"},
+				{"2", "Reject      — stop and release"},
+				{"3", "Feedback    — type direction, claude revises (constrained)"},
+				{"4", "Interactive — full claude session (escape hatch)"},
 			}, engine)
 			gateMu.Unlock()
 
@@ -2975,34 +2960,15 @@ func executePlanWithOpts(s *store.Store, cfg *config.Config, itemID string, engi
 				return sr
 			}
 
-			// Option 3: launch interactive claude session for plan revision
-			fmt.Printf("\n[%s] Launching interactive session for plan revision...\n", itemID)
-			fmt.Println("  Discuss changes with claude. When done, exit (Ctrl+D or /exit).")
-			fmt.Println("  The revised plan will be shown when you return.")
-			fmt.Println()
-
-			cwd := worktreeDir
-			if cwd == "" {
-				cwd = cfg.Root()
-			}
-			args := []string{}
-			if engine.RunClaudeInteractive != nil {
-				engine.RunClaudeInteractive(cwd, args)
+			if choice == "3" {
+				// Constrained feedback: user types direction, claude acts under pipeline rules
+				runConstrainedFeedback(s, cfg, itemID, "", item, "plan review", opts, engine, worktreeDir, "", &sr)
 			} else {
-				claudeBin, err := exec.LookPath("claude")
-				if err != nil {
-					fmt.Printf("[%s] claude not found in PATH\n", itemID)
-					continue
-				}
-				cmd := exec.Command(claudeBin, args...)
-				cmd.Dir = cwd
-				cmd.Stdin = os.Stdin
-				cmd.Stdout = os.Stdout
-				cmd.Stderr = os.Stderr
-				cmd.Run()
+				// Option 4: interactive escape hatch
+				runInteractiveEscapeHatch(itemID, worktreeDir, engine, cfg)
 			}
 
-			// Reload item after interactive session
+			// Reload item after revision
 			s, _ = store.New(cfg)
 			item, _ = s.Get(itemID)
 
@@ -3057,9 +3023,10 @@ func executePlanWithOpts(s *store.Store, cfg *config.Config, itemID string, engi
 				ReviewDuration: reviewDur,
 				AcsTotal:       len(item.AcceptanceCriteria),
 			}, []menuOption{
-				{"1", "Approve — accept and proceed"},
-				{"2", "Reject  — stop and release"},
-				{"3", "Chat    — give feedback, claude revises"},
+				{"1", "Approve     — accept and proceed"},
+				{"2", "Reject      — stop and release"},
+				{"3", "Feedback    — type direction, claude revises (constrained)"},
+				{"4", "Interactive — full claude session (escape hatch)"},
 			}, engine)
 			gateMu.Unlock()
 
@@ -3075,29 +3042,10 @@ func executePlanWithOpts(s *store.Store, cfg *config.Config, itemID string, engi
 				return sr
 			}
 
-			// Option 3: interactive revision
-			fmt.Printf("\n[%s] Launching interactive session for design revision...\n", itemID)
-			fmt.Println("  Discuss changes with claude. When done, exit (Ctrl+D or /exit).")
-			fmt.Println()
-
-			cwd := worktreeDir
-			if cwd == "" {
-				cwd = cfg.Root()
-			}
-			if engine.RunClaudeInteractive != nil {
-				engine.RunClaudeInteractive(cwd, []string{})
+			if choice == "3" {
+				runConstrainedFeedback(s, cfg, itemID, "", item, "design review", opts, engine, worktreeDir, "", &sr)
 			} else {
-				claudeBin, err := exec.LookPath("claude")
-				if err != nil {
-					fmt.Printf("[%s] claude not found in PATH\n", itemID)
-					continue
-				}
-				cmd := exec.Command(claudeBin)
-				cmd.Dir = cwd
-				cmd.Stdin = os.Stdin
-				cmd.Stdout = os.Stdout
-				cmd.Stderr = os.Stderr
-				cmd.Run()
+				runInteractiveEscapeHatch(itemID, worktreeDir, engine, cfg)
 			}
 
 			// Reload and show updated design
@@ -4802,10 +4750,17 @@ func buildPlanReviewPrompt(itemID string, item *model.Item) string {
 	b.WriteString("   - CHANGES MADE — list what you fixed (if anything)\n")
 	b.WriteString("   - REMAINING CONCERNS — only issues you could NOT fix (e.g., design decisions\n")
 	b.WriteString("     that require user input, architectural trade-offs with no clear winner)\n")
-	b.WriteString("   - RECOMMENDATION — MUST be exactly one of these three:\n")
+	b.WriteString("   - RECOMMENDATION — MUST be exactly one of these four:\n")
 	b.WriteString("     a) \"Accept\" — plan is ready, no issues remain\n")
-	b.WriteString("     b) \"Reject\" — plan is fundamentally flawed, needs complete rethink\n")
-	b.WriteString("     c) \"Chat\" — plan is mostly good but has concerns that need user input\n")
+	b.WriteString("     b) \"Accept with notes\" — plan is ready, but there are informational notes\n")
+	b.WriteString("        the user should be aware of (e.g., operational steps, coordination needs,\n")
+	b.WriteString("        caveats). These notes do NOT change the plan — they are context, not blockers.\n")
+	b.WriteString("        Format: RECOMMENDATION: Accept with notes — <one-line summary>\\n<bullet notes>\n")
+	b.WriteString("     c) \"Reject\" — plan is fundamentally flawed, needs complete rethink\n")
+	b.WriteString("     d) \"Feedback\" — plan has design problems that need user input to resolve.\n")
+	b.WriteString("        Use Feedback ONLY when the plan itself needs to change. If the concern is\n")
+	b.WriteString("        informational (who runs it, when to deploy, what to coordinate), use\n")
+	b.WriteString("        \"Accept with notes\" instead.\n")
 	b.WriteString("     State which one and why in one sentence.\n\n")
 	b.WriteString("The goal: the user should be able to accept the plan without a follow-up revision session.\n")
 	b.WriteString("Be critical but constructive — flag real issues, not style preferences.\n\n")
@@ -4868,18 +4823,112 @@ func extractRecommendation(output string) string {
 		return ""
 	}
 
-	// Map to menu option
+	// Map to menu option.
+	// Check "accept with notes" before plain "accept" since both contain "accept".
 	lower := strings.ToLower(recLine)
+	if strings.Contains(lower, "accept with notes") || strings.Contains(lower, "accept with note") {
+		return "[1] Accept (with notes) — " + recLine
+	}
 	if strings.Contains(lower, "accept") || strings.Contains(lower, "approve") {
 		return "[1] Accept — " + recLine
 	}
 	if strings.Contains(lower, "reject") {
 		return "[2] Reject — " + recLine
 	}
-	if strings.Contains(lower, "chat") {
-		return "[3] Chat — " + recLine
+	if strings.Contains(lower, "chat") || strings.Contains(lower, "feedback") {
+		return "[3] Feedback — " + recLine
 	}
 	return recLine
+}
+
+// buildFeedbackPrompt creates a constrained prompt for claude to act on user feedback
+// during a review gate. The prompt includes the item context and the user's feedback,
+// and instructs claude to make changes and report what was done.
+func buildFeedbackPrompt(itemID string, item *model.Item, gateType, userFeedback string) string {
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("You are revising item %s based on user feedback during %s.\n\n", itemID, gateType))
+	b.WriteString(fmt.Sprintf("Title: %s\n", item.Title))
+	if item.Summary != "" {
+		b.WriteString(fmt.Sprintf("\nCurrent Summary:\n%s\n", item.Summary))
+	}
+	if len(item.AcceptanceCriteria) > 0 {
+		b.WriteString("\nCurrent Acceptance Criteria:\n")
+		for i, ac := range item.AcceptanceCriteria {
+			b.WriteString(fmt.Sprintf("  %d. %s\n", i+1, ac))
+		}
+	}
+	b.WriteString(fmt.Sprintf("\n## User Feedback\n\n%s\n\n", userFeedback))
+	b.WriteString("## Instructions\n\n")
+	b.WriteString("Act on the user's feedback. Make the requested changes using st commands:\n")
+	b.WriteString("- `st edit " + itemID + " summary` to update the approach/summary\n")
+	b.WriteString("- `st edit " + itemID + " acceptance_criteria` to add/fix/remove ACs\n")
+	b.WriteString("- `st update " + itemID + " <field> <value>` for other fields\n\n")
+	b.WriteString("After making changes, produce a brief summary of what you changed (2-3 lines max).\n")
+	b.WriteString("Do NOT produce a full review report — the review will re-run automatically after your changes.\n")
+	return b.String()
+}
+
+// runConstrainedFeedback prompts the user for feedback, sends it to claude as a
+// constrained subprocess (with full pipeline rules), and returns the step result.
+// Returns true if feedback was given and processed, false if user cancelled.
+func runConstrainedFeedback(s *store.Store, cfg *config.Config, itemID, sprintID string, item *model.Item,
+	gateType string, opts RunOpts, engine RunEngine, worktreeDir, claudeSessionID string, sr *StepResult) bool {
+
+	// Prompt user for feedback
+	prompt := "What changes? (empty to cancel): "
+	var feedback string
+	var err error
+	if engine.PromptUser != nil {
+		feedback, err = engine.PromptUser(prompt)
+	} else {
+		fmt.Print(prompt)
+		reader := bufio.NewReader(os.Stdin)
+		feedback, err = reader.ReadString('\n')
+	}
+	if err != nil || strings.TrimSpace(feedback) == "" {
+		return false
+	}
+	feedback = strings.TrimSpace(feedback)
+
+	fmt.Printf("\n[%s] Applying feedback...\n", itemID)
+
+	feedbackPrompt := buildFeedbackPrompt(itemID, item, gateType, feedback)
+	feedbackStep := config.RunStepDef{Type: "claude", Prompt: feedbackPrompt}
+	feedbackStep.SetName("feedback")
+	feedbackSR := executeClaude(s, cfg, itemID, sprintID, feedbackStep, opts, engine, worktreeDir, claudeSessionID, true)
+	sr.CostUSD += feedbackSR.CostUSD
+	sr.AIDurationMs += feedbackSR.AIDurationMs
+
+	return true
+}
+
+// runInteractiveEscapeHatch launches an ungoverned interactive claude session.
+// This is the escape hatch for when the user needs full control.
+func runInteractiveEscapeHatch(itemID, worktreeDir string, engine RunEngine, cfg *config.Config) {
+	fmt.Printf("\n[%s] Launching interactive session (escape hatch)...\n", itemID)
+	fmt.Println("  Full interactive claude — no pipeline constraints.")
+	fmt.Println("  When done, exit (Ctrl+D or /exit). Review will re-run.")
+	fmt.Println()
+
+	cwd := worktreeDir
+	if cwd == "" {
+		cwd = cfg.Root()
+	}
+	if engine.RunClaudeInteractive != nil {
+		engine.RunClaudeInteractive(cwd, []string{})
+	} else {
+		claudeBin, err := exec.LookPath("claude")
+		if err != nil {
+			fmt.Printf("[%s] claude not found in PATH\n", itemID)
+			return
+		}
+		cmd := exec.Command(claudeBin)
+		cmd.Dir = cwd
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.Run()
+	}
 }
 
 func planRecommendation(item *model.Item) string {
