@@ -376,9 +376,9 @@ func RunStatus(s *store.Store, cfg *config.Config) int {
 	now := time.Now()
 
 	// Header
-	fmt.Printf("\n    %-8s %-15s %-22s %-8s  %12s  %12s  %10s  %10s  %15s\n",
-		"ITEM", "PROGRESS", "STATUS", "CREATED", "WALL", "ST TIME", "AI TIME", "COST", "TOKENS (I/O)")
-	fmt.Println("    " + strings.Repeat("-", 130))
+	fmt.Printf("\n    %-8s %-15s %-22s %-8s  %12s  %12s  %10s  %10s  %15s  %10s\n",
+		"ITEM", "PROGRESS", "STATUS", "CREATED", "WALL", "ST TIME", "AI TIME", "COST", "TOKENS (I/O)", "NET LOC")
+	fmt.Println("    " + strings.Repeat("-", 142))
 
 	for _, epic := range reg.Epics {
 		if epic.Status != "active" {
@@ -388,6 +388,7 @@ func RunStatus(s *store.Store, cfg *config.Config) int {
 		var epicWall, epicST, epicAI time.Duration
 		var epicCost float64
 		var epicInTok, epicOutTok int
+		var epicNetLOC int
 
 		for _, sp := range reg.Sprints {
 			if sp.Epic != epic.ID || len(sp.Items) == 0 {
@@ -400,6 +401,7 @@ func RunStatus(s *store.Store, cfg *config.Config) int {
 			var sprintWall, sprintST, sprintAI time.Duration
 			var sprintCost float64
 			var sprintInTok, sprintOutTok int
+			var sprintNetLOC int
 
 			done := 0
 			active := 0
@@ -608,6 +610,18 @@ func RunStatus(s *store.Store, cfg *config.Config) int {
 					tokStr = fmt.Sprintf("%s/%s", formatTokens(itemInTok), formatTokens(itemOutTok))
 				}
 
+				// Net LOC from PR manifest
+				var itemNetLOC int
+				if m, err := manifest.Load(cfg.ManifestDir(), itemID); err == nil {
+					for _, pr := range m.PRs {
+						itemNetLOC += pr.CodeStats.Insertions - pr.CodeStats.Deletions
+					}
+				}
+				locStr := ""
+				if itemNetLOC != 0 {
+					locStr = formatLOC(itemNetLOC)
+				}
+
 				// Accumulate sprint totals
 				sprintWall += wallDur
 				sprintST += stDur
@@ -615,6 +629,7 @@ func RunStatus(s *store.Store, cfg *config.Config) int {
 				sprintCost += itemCost
 				sprintInTok += itemInTok
 				sprintOutTok += itemOutTok
+				sprintNetLOC += itemNetLOC
 
 				// Created date
 				createdStr := ""
@@ -634,8 +649,8 @@ func RunStatus(s *store.Store, cfg *config.Config) int {
 					planBadge = fmt.Sprintf("  %s󰙅%s", "\033[32m", "\033[0m")
 				}
 				fmt.Printf("      %-80s%s\n", title, planBadge)
-				fmt.Printf("    %-8s %-15s %-22s %-8s  %12s  %12s  %10s  %10s  %15s%s\n",
-					itemID, bar, statusLabel, createdStr, wallStr, stStr, aiStr, costStr, tokStr, inFlight)
+				fmt.Printf("    %-8s %-15s %-22s %-8s  %12s  %12s  %10s  %10s  %15s  %10s%s\n",
+					itemID, bar, statusLabel, createdStr, wallStr, stStr, aiStr, costStr, tokStr, locStr, inFlight)
 			}
 
 			// Sprint subtotal (always printed)
@@ -660,9 +675,13 @@ func RunStatus(s *store.Store, cfg *config.Config) int {
 				if sprintInTok > 0 || sprintOutTok > 0 {
 					sprintTokStr = fmt.Sprintf("%s/%s", formatTokens(sprintInTok), formatTokens(sprintOutTok))
 				}
-				fmt.Printf("    %s\n", strings.Repeat("─", 130))
-				fmt.Printf("    %-8s %-15s %-22s %-8s  %12s  %12s  %10s  %10s  %15s\n",
-					"", "", fmt.Sprintf("%d/%d done", done, len(sp.Items)), "", sprintWallStr, sprintSTStr, sprintAIStr, sprintCostStr, sprintTokStr)
+				sprintLOCStr := ""
+				if sprintNetLOC != 0 {
+					sprintLOCStr = formatLOC(sprintNetLOC)
+				}
+				fmt.Printf("    %s\n", strings.Repeat("─", 142))
+				fmt.Printf("    %-8s %-15s %-22s %-8s  %12s  %12s  %10s  %10s  %15s  %10s\n",
+					"", "", fmt.Sprintf("%d/%d done", done, len(sp.Items)), "", sprintWallStr, sprintSTStr, sprintAIStr, sprintCostStr, sprintTokStr, sprintLOCStr)
 			}
 
 			// Accumulate epic totals
@@ -672,6 +691,7 @@ func RunStatus(s *store.Store, cfg *config.Config) int {
 			epicCost += sprintCost
 			epicInTok += sprintInTok
 			epicOutTok += sprintOutTok
+			epicNetLOC += sprintNetLOC
 		}
 
 		// Epic grand total
@@ -696,10 +716,14 @@ func RunStatus(s *store.Store, cfg *config.Config) int {
 			if epicInTok > 0 || epicOutTok > 0 {
 				epicTokStr = fmt.Sprintf("%s/%s", formatTokens(epicInTok), formatTokens(epicOutTok))
 			}
-			fmt.Printf("\n    %s\n", strings.Repeat("═", 130))
-			fmt.Printf("    %-8s %-15s %-22s %-8s  %12s  %12s  %10s  %10s  %15s\n",
-				"TOTAL", "", epic.Title, "", epicWallStr, epicSTStr, epicAIStr, epicCostStr, epicTokStr)
-			fmt.Printf("    %s\n", strings.Repeat("═", 130))
+			epicLOCStr := ""
+			if epicNetLOC != 0 {
+				epicLOCStr = formatLOC(epicNetLOC)
+			}
+			fmt.Printf("\n    %s\n", strings.Repeat("═", 142))
+			fmt.Printf("    %-8s %-15s %-22s %-8s  %12s  %12s  %10s  %10s  %15s  %10s\n",
+				"TOTAL", "", epic.Title, "", epicWallStr, epicSTStr, epicAIStr, epicCostStr, epicTokStr, epicLOCStr)
+			fmt.Printf("    %s\n", strings.Repeat("═", 142))
 		}
 	}
 	// Standalone items — active items not in any sprint
@@ -849,9 +873,20 @@ func RunStatus(s *store.Store, cfg *config.Config) int {
 				}
 			}
 
+			locStr := ""
+			if m, err := manifest.Load(cfg.ManifestDir(), item.ID); err == nil {
+				var netLOC int
+				for _, pr := range m.PRs {
+					netLOC += pr.CodeStats.Insertions - pr.CodeStats.Deletions
+				}
+				if netLOC != 0 {
+					locStr = formatLOC(netLOC)
+				}
+			}
+
 			fmt.Printf("      %s\n", title)
-			fmt.Printf("    %-8s %-15s %-22s %-8s  %12s  %12s  %10s  %10s  %15s%s\n",
-				item.ID, bar, statusLabel, createdStr, wallStr, stStr, aiStr, costStr, tokStr, inFlight)
+			fmt.Printf("    %-8s %-15s %-22s %-8s  %12s  %12s  %10s  %10s  %15s  %10s%s\n",
+				item.ID, bar, statusLabel, createdStr, wallStr, stStr, aiStr, costStr, tokStr, locStr, inFlight)
 		}
 	}
 
