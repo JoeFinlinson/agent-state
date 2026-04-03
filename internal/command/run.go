@@ -4364,10 +4364,14 @@ func defaultRunClaude(cwd string, args []string, env []string) ([]byte, int, err
 	}
 	go activity.watch()
 
-	// Read stream-json events, echo text, capture final result
+	// Read stream-json events, echo text, capture final result.
+	// When we see a "result" event, claude is done producing output.
+	// We break out of the scanner loop immediately rather than waiting for
+	// the pipe to close (which may take seconds while claude finalizes).
 	var lastResult []byte
 	scanner := bufio.NewScanner(stdoutPipe)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	gotResult := false
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
@@ -4408,13 +4412,42 @@ func defaultRunClaude(cwd string, args []string, env []string) ([]byte, int, err
 		case "result":
 			lastResult = make([]byte, len(line))
 			copy(lastResult, line)
+			gotResult = true
+		}
+		// Once we have the result, stop reading — claude is done.
+		// Don't wait for the pipe to close (claude may linger for cache/cleanup).
+		if gotResult {
+			break
 		}
 	}
 	activity.stop()
 
-	err = cmd.Wait()
+	// Wait for process to exit, but with a short timeout if we already got the result.
+	// Claude may linger after emitting the result (cache writes, cleanup). Don't block.
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- cmd.Wait() }()
+
+	waitTimeout := maxWallTimeout
+	if gotResult {
+		waitTimeout = 10 * time.Second // result received — process should exit quickly
+	}
+
+	var waitErr error
+	select {
+	case waitErr = <-waitDone:
+		// Process exited normally
+	case <-time.After(waitTimeout):
+		// Process didn't exit in time — kill it
+		cancel()
+		waitErr = <-waitDone // collect after kill
+		if gotResult {
+			// We have the result, the linger is harmless
+			waitErr = nil
+		}
+	}
+
 	exitCode := 0
-	if err != nil {
+	if waitErr != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			idle := time.Since(activity.lastSeen)
 			if idle >= activity.idleTimeout {
@@ -4422,16 +4455,16 @@ func defaultRunClaude(cwd string, args []string, env []string) ([]byte, int, err
 			}
 			return lastResult, 1, fmt.Errorf("killed: wall time limit (%s)", maxWallTimeout)
 		}
-		if exitErr, ok := err.(*exec.ExitError); ok {
+		if exitErr, ok := waitErr.(*exec.ExitError); ok {
 			exitCode = exitErr.ExitCode()
-			err = nil
+			waitErr = nil
 		}
 	}
 
 	if len(lastResult) > 0 {
-		return lastResult, exitCode, err
+		return lastResult, exitCode, waitErr
 	}
-	return nil, exitCode, err
+	return nil, exitCode, waitErr
 }
 
 // activityTracker monitors a subprocess for idle timeout.
