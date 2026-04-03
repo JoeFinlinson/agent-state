@@ -38,11 +38,12 @@ func Update(s *store.Store, cfg *config.Config, id, field, value string) int {
 
 	var oldValue string
 	if listFields[field] && strings.Contains(value, "\n") {
-		// Multiline value = list replacement
+		// Multiline value = list replacement.
+		// Preserve indentation — TrimSpace would destroy YAML structure
+		// for continuation lines (e.g., "  command:" under "- description:").
 		var lines []string
 		for _, line := range strings.Split(value, "\n") {
-			line = strings.TrimSpace(line)
-			if line != "" {
+			if strings.TrimSpace(line) != "" {
 				lines = append(lines, line)
 			}
 		}

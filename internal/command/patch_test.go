@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/jfinlinson/agent-state/internal/changelog"
@@ -219,6 +220,54 @@ func TestEditFromStdinEmpty(t *testing.T) {
 	code := Edit(s, cfg, "T-001", "title", true)
 	if code != 1 {
 		t.Errorf("Edit --stdin with empty input returned %d, want 1", code)
+	}
+}
+
+func TestEditListFieldPreservesIndentation(t *testing.T) {
+	s, cfg := setupTestEnvWithChangelog(t)
+
+	// First, set some initial ACs via stdin
+	input1 := "- description: \"first check\"\n  command: \"echo test1\"\n- description: \"second check\"\n  command: \"echo test2\"\n"
+	oldStdin := os.Stdin
+	r, w, _ := os.Pipe()
+	os.Stdin = r
+	w.WriteString(input1)
+	w.Close()
+
+	code := Edit(s, cfg, "T-001", "acceptance_criteria", true)
+	os.Stdin = oldStdin
+	if code != 0 {
+		t.Fatalf("first Edit --stdin returned %d, want 0", code)
+	}
+
+	// Now replace with different content via stdin — this should REPLACE, not append
+	input2 := "- description: \"replaced check\"\n  command: \"echo replaced\"\n"
+	r2, w2, _ := os.Pipe()
+	os.Stdin = r2
+	w2.WriteString(input2)
+	w2.Close()
+
+	code = Edit(s, cfg, "T-001", "acceptance_criteria", true)
+	os.Stdin = oldStdin
+	if code != 0 {
+		t.Fatalf("second Edit --stdin returned %d, want 0", code)
+	}
+
+	// Re-read item and verify: should have only the replacement, not both
+	item, _ := s.Get("T-001")
+	raw := item.Doc.String()
+	// Count occurrences of "description:" in the acceptance_criteria block
+	descCount := strings.Count(raw, "description:")
+	if descCount != 1 {
+		t.Errorf("expected 1 description in ACs after replacement, got %d.\nRaw doc:\n%s", descCount, raw)
+	}
+	// Verify the old content is gone
+	if strings.Contains(raw, "first check") {
+		t.Error("old AC content 'first check' still present after replacement")
+	}
+	// Verify indentation preserved (command should be indented under description)
+	if strings.Contains(raw, "\ncommand:") {
+		t.Error("continuation line 'command:' lost indentation — should be '  command:'")
 	}
 }
 
