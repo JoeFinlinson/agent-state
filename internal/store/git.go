@@ -43,10 +43,21 @@ func acquireGitLock(dir string) (func(), error) {
 }
 
 // GitPull pulls latest changes from remote before reading items.
-// Preserves any uncommitted local changes (e.g., test evidence written
-// but not yet synced) by committing them first, then pulling with rebase.
-// Item-level locks: files for locked items are snapshotted before the pull
-// and restored after, so concurrent pulls can't revert active item state.
+// Never destroys local work: uses git pull --ff-only, which refuses to
+// advance when it would overwrite uncommitted changes or when history
+// has diverged. Both failure modes are silent and safe — we just skip
+// the pull and continue with current state; any subsequent GitSync
+// will reconcile local and remote.
+//
+// History: earlier versions auto-committed uncommitted changes before
+// pulling, which caused rebase conflicts when remote had archived a
+// file locally still present in issues/. The fix for that was to
+// aggressively `git checkout -- . && git clean -fd` before pulling,
+// but that silently discarded in-progress mutations from state-changing
+// commands (e.g. `st close` writes the move, the next command's pre-run
+// GitPull then reverts it — the item pops back into issues/ and the
+// close is lost). --ff-only is the conservative middle: no rebase,
+// no destructive cleanup; just fetch and fast-forward when it's safe.
 func GitPull(cfg *config.Config) error {
 	if cfg.Git == nil || !cfg.Git.AutoPush {
 		return nil
@@ -62,24 +73,16 @@ func GitPull(cfg *config.Config) error {
 
 	// Snapshot locked item files before any git operations.
 	// These are items currently being worked on by a pipeline —
-	// we must not let a pull overwrite their state.
+	// we must not let a pull overwrite their state even if ff-only
+	// would cleanly advance through them.
 	lockedSnapshots := snapshotLockedItems(cfg, root)
 
-	// Commit any uncommitted local changes BEFORE pulling,
-	// so they don't get overwritten by the remote.
-	out, err := gitOutput(root, "status", "--porcelain")
-	if err == nil && strings.TrimSpace(out) != "" {
-		_ = gitCmdQuiet(root, "add", "-A")
-		_ = gitCmdQuiet(root, "commit", "-m", "auto-save: preserve local changes before pull")
-	}
-
-	// Pull with rebase to avoid merge commits
-	if err := gitCmdQuiet(root, "pull", "--rebase"); err != nil {
-		// If rebase fails (conflict), abort and continue with local state
-		_ = gitCmdQuiet(root, "rebase", "--abort")
-		restoreLockedItems(lockedSnapshots)
-		return nil
-	}
+	// Fast-forward-only pull. Git refuses the fast-forward if:
+	//   - history has diverged (local commits not on remote), or
+	//   - uncommitted working-tree changes conflict with files the
+	//     merge would touch.
+	// In either case we silently skip; the next sync will reconcile.
+	_ = gitCmdQuiet(root, "pull", "--ff-only")
 
 	// Restore locked item files if the pull changed them.
 	restoreLockedItems(lockedSnapshots)
