@@ -175,5 +175,17 @@ func Close(s *store.Store, cfg *config.Config, id, resolution string, opts Close
 		}
 	}
 
+	// Commit + push the close to git immediately. Previously the move to
+	// archive/ and status change sat uncommitted until the caller happened
+	// to run `st sync` or until `st run`'s deferred sync caught it. That
+	// gap allowed silent-revert incidents (e.g. I-164): a subsequent st
+	// command's PersistentPreRunE → GitPull destroyed the uncommitted
+	// move, and "Closed" turned out to be a lie. GitSync is best-effort —
+	// a failure here only warns, because the filesystem mutation already
+	// succeeded and a later sync will carry the commit forward.
+	if err := s.GitSync(fmt.Sprintf("st close: %s (%s)", id, resolution)); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: sync after close failed: %v\n", err)
+	}
+
 	return 0
 }
