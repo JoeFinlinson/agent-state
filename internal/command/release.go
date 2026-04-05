@@ -63,5 +63,12 @@ func Release(s *store.Store, cfg *config.Config, id string) int {
 	} else {
 		fmt.Printf("Released %s — was claimed by session %s\n", id, oldClaim)
 	}
+
+	// Commit + push so the claim release is visible to other sessions
+	// immediately. Best-effort — on failure the on-disk state is still
+	// correct and a later sync will propagate it.
+	if err := s.GitSync(fmt.Sprintf("st release: %s", id)); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: sync after release failed: %v\n", err)
+	}
 	return 0
 }

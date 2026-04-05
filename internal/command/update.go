@@ -67,5 +67,13 @@ func Update(s *store.Store, cfg *config.Config, id, field, value string) int {
 	})
 
 	fmt.Printf("Updated %s.%s\n", id, field)
+
+	// Commit + push the update so it can't be silently reverted by a
+	// subsequent command's pre-run GitPull or lost to a multi-agent race.
+	// Best-effort: a sync failure still returns 0 because the disk state
+	// is correct and a later sync will carry the commit forward.
+	if err := s.GitSync(fmt.Sprintf("st update: %s.%s", id, field)); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: sync after update failed: %v\n", err)
+	}
 	return 0
 }

@@ -157,5 +157,14 @@ func Create(s *store.Store, cfg *config.Config, itemType, title string, opts Cre
 	if opts.Sprint != "" {
 		fmt.Printf("  Sprint: %s\n", opts.Sprint)
 	}
+
+	// Commit + push the new item so it can't be silently deleted by a
+	// subsequent command's pre-run GitPull (untracked file) and so other
+	// agents see it immediately. Best-effort: a sync failure still
+	// returns 0; the on-disk file is correct and a later sync will
+	// carry the commit forward.
+	if err := s.GitSync(fmt.Sprintf("st create: %s — %s", id, title)); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: sync after create failed: %v\n", err)
+	}
 	return 0
 }
