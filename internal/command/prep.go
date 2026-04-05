@@ -15,9 +15,10 @@ import (
 
 // PrepOpts holds flags for the prep command.
 type PrepOpts struct {
-	DryRun     bool
-	Model      string
-	ItemFilter string // --item: prep only this item
+	DryRun          bool
+	Model           string
+	ItemFilter      string // --item: prep only this item
+	IncludeRejected bool   // --include-rejected: re-process rejected plans
 }
 
 // PrepInteractive shows sprint selection and runs prep on the selected sprint.
@@ -41,12 +42,17 @@ func PrepInteractive(s *store.Store, cfg *config.Config, opts PrepOpts, engine R
 		}
 		unplanned := 0
 		for _, itemID := range sp.Items {
-			if !plan.Exists(cfg.PlansDir(), itemID) {
-				item, ok := s.Get(itemID)
-				if ok && !cfg.IsTerminalStatus(item.Type, item.Status) {
-					unplanned++
+			item, ok := s.Get(itemID)
+			if !ok || cfg.IsTerminalStatus(item.Type, item.Status) {
+				continue
+			}
+			if plan.Exists(cfg.PlansDir(), itemID) {
+				p, _ := plan.Load(cfg.PlansDir(), itemID)
+				if p != nil && (p.Approved || (p.Rejected && !opts.IncludeRejected)) {
+					continue
 				}
 			}
+			unplanned++
 		}
 		if unplanned > 0 || sp.Status == "active" {
 			candidates = append(candidates, candidate{sprint: sp, unplanned: unplanned})
@@ -92,10 +98,14 @@ func Prep(s *store.Store, cfg *config.Config, sprintID string, opts PrepOpts, en
 		return 1
 	}
 
-	// Find unplanned items
+	// Find unplanned items (skip approved and rejected plans)
 	var unplanned []string
 	for _, itemID := range sp.Items {
 		if opts.ItemFilter != "" && itemID != opts.ItemFilter {
+			continue
+		}
+		item, ok := s.Get(itemID)
+		if !ok || cfg.IsTerminalStatus(item.Type, item.Status) {
 			continue
 		}
 		if plan.Exists(cfg.PlansDir(), itemID) {
@@ -103,10 +113,9 @@ func Prep(s *store.Store, cfg *config.Config, sprintID string, opts PrepOpts, en
 			if p != nil && p.Approved {
 				continue // already planned and approved
 			}
-		}
-		item, ok := s.Get(itemID)
-		if !ok || cfg.IsTerminalStatus(item.Type, item.Status) {
-			continue
+			if p != nil && p.Rejected && !opts.IncludeRejected {
+				continue // explicitly rejected — skip unless overridden
+			}
 		}
 		unplanned = append(unplanned, itemID)
 	}
@@ -165,76 +174,93 @@ func Prep(s *store.Store, cfg *config.Config, sprintID string, opts PrepOpts, en
 // prepItem runs the plan proposal + review loop for a single item.
 // Returns "accepted", "rejected", or "abort".
 func prepItem(s *store.Store, cfg *config.Config, itemID string, item *model.Item, opts PrepOpts, engine RunEngine, worktreeDir string) string {
-	// Build the exploration prompt
-	prompt := buildPrepPrompt(cfg, itemID, item)
-
 	cwd := worktreeDir
 	if cwd == "" {
 		cwd = cfg.Root()
 	}
 
-	runOpts := RunOpts{Model: opts.Model}
-	args := buildClaudeArgs(cfg, prompt, runOpts, cwd)
-	sessionID := generateSessionID()
-	env := []string{
-		"AS_SESSION_ID=" + sessionID,
-		"ST_RUN_ITEM=" + itemID,
-		"ST_RUN_STEP=prep",
-	}
-	if agentID := cfg.AgentID(); agentID != "" {
-		env = append(env, "AS_AGENT_ID="+agentID)
-	}
-
-	fmt.Printf("[%s] Exploring codebase and generating plan...\n\n", itemID)
-	output, exitCode, err := engine.RunClaude(cwd, args, env)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[%s] claude error: %v\n", itemID, err)
-		return "rejected"
+	// Check for an existing draft plan — resume review instead of re-running Claude
+	var p *plan.Plan
+	if plan.Exists(cfg.PlansDir(), itemID) {
+		draft, _ := plan.Load(cfg.PlansDir(), itemID)
+		if draft != nil && !draft.Approved {
+			fmt.Printf("[%s] Resuming from existing draft plan\n", itemID)
+			p = draft
+			// Clear rejected state if we're re-processing
+			if p.Rejected {
+				p.Rejected = false
+				p.RejectedAt = ""
+			}
+		}
 	}
 
-	// Parse claude output for the plan text
-	planText := ""
-	claudeResult, parseErr := parseClaudeOutput(output)
-	if parseErr == nil {
-		planText = claudeResult.Result
-	} else if exitCode == 0 {
-		planText = string(output)
-	} else {
-		fmt.Fprintf(os.Stderr, "[%s] claude exited %d\n", itemID, exitCode)
-		return "rejected"
-	}
-
-	// Parse the plan from claude's output
-	p, _ := plan.Parse(planText)
+	// No draft — run Claude to generate a new plan
 	if p == nil {
-		p = &plan.Plan{RawText: planText}
-	}
+		prompt := buildPrepPrompt(cfg, itemID, item)
 
-	// Reload item (claude may have updated it via st update)
-	s, _ = store.New(cfg)
-	item, _ = s.Get(itemID)
+		runOpts := RunOpts{Model: opts.Model}
+		args := buildClaudeArgs(cfg, prompt, runOpts, cwd)
+		sessionID := generateSessionID()
+		env := []string{
+			"AS_SESSION_ID=" + sessionID,
+			"ST_RUN_ITEM=" + itemID,
+			"ST_RUN_STEP=prep",
+		}
+		if agentID := cfg.AgentID(); agentID != "" {
+			env = append(env, "AS_AGENT_ID="+agentID)
+		}
 
-	// Fill in ACs from item if claude set them there
-	if len(p.ACs) == 0 && len(item.AcceptanceCriteria) > 0 {
-		p.ACs = item.AcceptanceCriteria
-	}
+		fmt.Printf("[%s] Exploring codebase and generating plan...\n\n", itemID)
+		output, exitCode, err := engine.RunClaude(cwd, args, env)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[%s] claude error: %v\n", itemID, err)
+			return "rejected"
+		}
 
-	// Infer scope repos from plan text if not explicitly set
-	if len(p.ScopeRepos) == 0 {
-		p.ScopeRepos = inferRepos(cfg, p)
-	}
+		// Parse claude output for the plan text
+		planText := ""
+		claudeResult, parseErr := parseClaudeOutput(output)
+		if parseErr == nil {
+			planText = claudeResult.Result
+		} else if exitCode == 0 {
+			planText = string(output)
+		} else {
+			fmt.Fprintf(os.Stderr, "[%s] claude exited %d\n", itemID, exitCode)
+			return "rejected"
+		}
 
-	p.Revisions = append(p.Revisions, plan.Revision{
-		Timestamp: plan.Now(),
-		Summary:   "Initial plan generated by claude",
-	})
+		// Parse the plan from claude's output
+		p, _ = plan.Parse(planText)
+		if p == nil {
+			p = &plan.Plan{RawText: planText}
+		}
 
-	// Save plan as draft immediately — don't wait for approval.
-	// If the session is killed, the draft is on disk for next run.
-	if err := plan.Save(cfg.PlansDir(), itemID, p); err != nil {
-		fmt.Fprintf(os.Stderr, "[%s] Warning: failed to save draft plan: %v\n", itemID, err)
-	} else {
-		fmt.Printf("[%s] Draft plan saved\n", itemID)
+		// Reload item (claude may have updated it via st update)
+		s, _ = store.New(cfg)
+		item, _ = s.Get(itemID)
+
+		// Fill in ACs from item if claude set them there
+		if len(p.ACs) == 0 && len(item.AcceptanceCriteria) > 0 {
+			p.ACs = item.AcceptanceCriteria
+		}
+
+		// Infer scope repos from plan text if not explicitly set
+		if len(p.ScopeRepos) == 0 {
+			p.ScopeRepos = inferRepos(cfg, p)
+		}
+
+		p.Revisions = append(p.Revisions, plan.Revision{
+			Timestamp: plan.Now(),
+			Summary:   "Initial plan generated by claude",
+		})
+
+		// Save plan as draft immediately — don't wait for approval.
+		// If the session is killed, the draft is on disk for next run.
+		if err := plan.Save(cfg.PlansDir(), itemID, p); err != nil {
+			fmt.Fprintf(os.Stderr, "[%s] Warning: failed to save draft plan: %v\n", itemID, err)
+		} else {
+			fmt.Printf("[%s] Draft plan saved\n", itemID)
+		}
 	}
 
 	// Review loop
@@ -345,6 +371,13 @@ func prepItem(s *store.Store, cfg *config.Config, itemID string, item *model.Ite
 		}
 
 		if choice == "2" {
+			// Mark plan as rejected so it's skipped on future runs
+			p.Rejected = true
+			p.RejectedAt = plan.Now()
+			if err := plan.Save(cfg.PlansDir(), itemID, p); err != nil {
+				fmt.Fprintf(os.Stderr, "[%s] Warning: failed to save rejected plan: %v\n", itemID, err)
+			}
+			fmt.Printf("[%s] Plan rejected — will skip on future runs (use --include-rejected to re-process)\n", itemID)
 			return "rejected"
 		}
 

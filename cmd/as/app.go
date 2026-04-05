@@ -731,10 +731,12 @@ implement step during st run.`,
 			dryRun, _ := cmd.Flags().GetBool("dry-run")
 			item, _ := cmd.Flags().GetString("item")
 			model, _ := cmd.Flags().GetString("model")
+			includeRejected, _ := cmd.Flags().GetBool("include-rejected")
 			opts := command.PrepOpts{
-				DryRun:     dryRun,
-				Model:      model,
-				ItemFilter: item,
+				DryRun:          dryRun,
+				Model:           model,
+				ItemFilter:      item,
+				IncludeRejected: includeRejected,
 			}
 			engine := command.DefaultRunEngine()
 			if len(args) == 0 {
@@ -747,6 +749,7 @@ implement step during st run.`,
 	prepCmd.Flags().Bool("dry-run", false, "show which items would be planned")
 	prepCmd.Flags().String("item", "", "prep only this item ID")
 	prepCmd.Flags().String("model", "", "model to use (overrides config)")
+	prepCmd.Flags().Bool("include-rejected", false, "re-process previously rejected plans")
 	root.AddCommand(prepCmd)
 
 	advanceCmd := &cobra.Command{

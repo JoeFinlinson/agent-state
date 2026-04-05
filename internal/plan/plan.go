@@ -16,6 +16,8 @@ type Plan struct {
 	ScopeRepos  []string   // which repos this item touches
 	Approved    bool       // user accepted the plan
 	ApprovedAt  string     // timestamp of approval
+	Rejected    bool       // user explicitly rejected the plan
+	RejectedAt  string     // timestamp of rejection
 	Approach    string     // high-level approach description
 	Steps       []string   // ordered implementation steps
 	FilesToCreate []string // new files to create
@@ -53,20 +55,23 @@ func Load(dir, id string) (*Plan, error) {
 
 // Save writes a plan sidecar to .plans/<id>.md.
 // Returns an error if required fields are missing — caller must fill them.
+// Rejected plans are saved without validation (they may be incomplete).
 func Save(dir, id string, p *Plan) error {
-	// Validate required fields — reject incomplete plans
-	var missing []string
-	if len(p.ScopeRepos) == 0 {
-		missing = append(missing, "scope_repos")
-	}
-	if p.Approach == "" {
-		missing = append(missing, "approach")
-	}
-	if len(p.ACs) == 0 {
-		missing = append(missing, "acceptance_criteria")
-	}
-	if len(missing) > 0 {
-		return fmt.Errorf("plan %s incomplete — missing: %s", id, strings.Join(missing, ", "))
+	// Skip validation for rejected plans — they may be incomplete drafts
+	if !p.Rejected {
+		var missing []string
+		if len(p.ScopeRepos) == 0 {
+			missing = append(missing, "scope_repos")
+		}
+		if p.Approach == "" {
+			missing = append(missing, "approach")
+		}
+		if len(p.ACs) == 0 {
+			missing = append(missing, "acceptance_criteria")
+		}
+		if len(missing) > 0 {
+			return fmt.Errorf("plan %s incomplete — missing: %s", id, strings.Join(missing, ", "))
+		}
 	}
 
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -134,6 +139,12 @@ func Render(p *Plan) string {
 	b.WriteString(fmt.Sprintf("plan_approved: %v\n", p.Approved))
 	if p.ApprovedAt != "" {
 		b.WriteString(fmt.Sprintf("approved_at: %s\n", p.ApprovedAt))
+	}
+	if p.Rejected {
+		b.WriteString(fmt.Sprintf("rejected: %v\n", p.Rejected))
+	}
+	if p.RejectedAt != "" {
+		b.WriteString(fmt.Sprintf("rejected_at: %s\n", p.RejectedAt))
 	}
 	b.WriteString("---\n\n")
 
@@ -266,6 +277,13 @@ func parseFrontmatter(p *Plan, text string) {
 		}
 		if strings.HasPrefix(line, "approved_at:") {
 			p.ApprovedAt = strings.TrimSpace(strings.TrimPrefix(line, "approved_at:"))
+		}
+		if strings.HasPrefix(line, "rejected:") {
+			val := strings.TrimSpace(strings.TrimPrefix(line, "rejected:"))
+			p.Rejected = val == "true"
+		}
+		if strings.HasPrefix(line, "rejected_at:") {
+			p.RejectedAt = strings.TrimSpace(strings.TrimPrefix(line, "rejected_at:"))
 		}
 	}
 }
