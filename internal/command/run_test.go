@@ -1437,3 +1437,424 @@ func TestStripBugbotMarkup(t *testing.T) {
 		})
 	}
 }
+
+// TestRecordSessionReloadsFreshState verifies that recordSession reads the
+// current on-disk state rather than using the caller's (potentially stale)
+// store. This prevents overwriting fields added by pipeline steps or Claude
+// subprocesses during fix cycles (I-169).
+func TestRecordSessionReloadsFreshState(t *testing.T) {
+	root := t.TempDir()
+	for _, dir := range []string{"tasks", "issues", "archive", ".as"} {
+		os.MkdirAll(filepath.Join(root, dir), 0755)
+	}
+	os.WriteFile(filepath.Join(root, ".as", "config.yaml"), []byte("paths:\n  root: .\n"), 0644)
+
+	// Create an item with basic fields
+	writeFile(t, filepath.Join(root, "tasks", "T-100-test.md"), `id: T-100
+type: task
+status: active
+created: 2026-04-06T10:00:00-06:00
+last_touched: 2026-04-06T10:00:00-06:00
+
+title: Test item
+
+sessions:
+- []
+
+depends_on:
+- []
+`)
+
+	cfg, err := config.LoadFrom(filepath.Join(root, ".as", "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Load a "stale" store — this represents the function parameter `s`
+	// that is never refreshed during the pipeline.
+	staleStore, err := store.New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Now simulate pipeline steps adding fields by writing directly to disk.
+	// This is what happens when localStore or subprocess `st` commands modify
+	// the item between pipeline steps.
+	freshStore, _ := store.New(cfg)
+	item, _ := freshStore.Get("T-100")
+	setNestedField(item, "delivery", "stage", "implement")
+	setNestedField(item, "testing_evidence", "api_unit", "pass abc123 2026-04-06T12:00:00-06:00")
+	freshStore.Write(item)
+
+	// Call recordSession with the STALE store. Before the fix, this would
+	// overwrite the delivery and testing_evidence fields. After the fix,
+	// it should reload from disk and preserve them.
+	recordSession(staleStore, cfg, "T-100", "session-new", "ci_fix_1")
+
+	// Reload from disk and verify fields were preserved
+	verifyStore, _ := store.New(cfg)
+	result, ok := verifyStore.Get("T-100")
+	if !ok {
+		t.Fatal("item T-100 not found after recordSession")
+	}
+
+	// Check that delivery fields survived
+	if result.Delivery == nil {
+		t.Fatal("delivery section was stripped by recordSession")
+	}
+	stage, _ := result.Delivery["stage"].(string)
+	if stage != "implement" {
+		t.Errorf("delivery.stage = %q, want %q", stage, "implement")
+	}
+
+	// Check that testing_evidence survived
+	if result.TestingEvidence == nil {
+		t.Fatal("testing_evidence section was stripped by recordSession")
+	}
+	apiUnit, _ := result.TestingEvidence["api_unit"].(string)
+	if !strings.HasPrefix(apiUnit, "pass") {
+		t.Errorf("testing_evidence.api_unit = %q, want prefix %q", apiUnit, "pass")
+	}
+
+	// Check that the session WAS recorded
+	found := false
+	for _, s := range result.Sessions {
+		if s == "session-new" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("session 'session-new' was not recorded")
+	}
+
+	// Check time_tracking was set
+	if result.TimeTracking == nil {
+		t.Fatal("time_tracking should be set")
+	}
+	lastStep, _ := result.TimeTracking["last_step"].(string)
+	if lastStep != "ci_fix_1" {
+		t.Errorf("time_tracking.last_step = %q, want %q", lastStep, "ci_fix_1")
+	}
+}
+
+// TestEnsureActiveUpdatesDoc verifies that the status guard updates both the
+// struct field AND the Doc so the write actually persists to disk (I-169).
+func TestEnsureActiveUpdatesDoc(t *testing.T) {
+	root := t.TempDir()
+	for _, dir := range []string{"tasks", "issues", "archive", ".as"} {
+		os.MkdirAll(filepath.Join(root, dir), 0755)
+	}
+	os.WriteFile(filepath.Join(root, ".as", "config.yaml"), []byte("paths:\n  root: .\n"), 0644)
+
+	// Create an item with status "queued" (simulating status drift)
+	writeFile(t, filepath.Join(root, "tasks", "T-200-drift.md"), `id: T-200
+type: task
+status: queued
+created: 2026-04-06T10:00:00-06:00
+last_touched: 2026-04-06T10:00:00-06:00
+
+title: Drifted item
+
+delivery:
+  stage: implement
+
+depends_on:
+- []
+`)
+
+	cfg, err := config.LoadFrom(filepath.Join(root, ".as", "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate the status guard logic (mirrors lines 1679-1691 in run.go)
+	refreshStore, err := store.New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refreshItem, ok := refreshStore.Get("T-200")
+	if !ok {
+		t.Fatal("T-200 not found")
+	}
+	if refreshItem.Status != "active" {
+		refreshItem.Status = "active"
+		refreshItem.Doc.SetField("status", "active")
+		refreshStore.Write(refreshItem)
+	}
+
+	// Reload and verify status persisted to disk
+	verifyStore, _ := store.New(cfg)
+	result, ok := verifyStore.Get("T-200")
+	if !ok {
+		t.Fatal("T-200 not found after write")
+	}
+	if result.Status != "active" {
+		t.Errorf("status = %q, want %q (Doc.SetField was missing)", result.Status, "active")
+	}
+
+	// Also verify via Doc to be thorough
+	docStatus, _ := result.Doc.GetField("status")
+	if docStatus != "active" {
+		t.Errorf("Doc status = %q, want %q", docStatus, "active")
+	}
+
+	// Verify delivery fields weren't stripped
+	if result.Delivery == nil {
+		t.Fatal("delivery section was stripped by status guard")
+	}
+	stage, _ := result.Delivery["stage"].(string)
+	if stage != "implement" {
+		t.Errorf("delivery.stage = %q, want %q", stage, "implement")
+	}
+}
+
+// TestRunResumeCheckpointAfterStep verifies that after each step completes,
+// last_completed_step is recorded so a subsequent run resumes from that point.
+func TestRunResumeCheckpointAfterStep(t *testing.T) {
+	root := t.TempDir()
+	for _, dir := range []string{"tasks", ".as"} {
+		os.MkdirAll(filepath.Join(root, dir), 0755)
+	}
+
+	// Pipeline: step_a → step_b → step_c (all simple commands)
+	os.WriteFile(filepath.Join(root, ".as", "config.yaml"), []byte(`paths:
+  root: .
+
+run:
+  permission_mode: dangerously-skip-permissions
+  default_model: sonnet
+  max_parallelism: 1
+  default_budget_usd: 2.00
+  step_order: [step_a, step_b, step_c]
+  steps:
+    step_a:
+      type: command
+      command: echo step_a
+    step_b:
+      type: command
+      command: echo step_b
+    step_c:
+      type: command
+      command: echo step_c
+`), 0644)
+
+	reg := &registry.Registry{}
+	reg.Epics = append(reg.Epics, registry.Epic{
+		ID: "ep", Title: "Epic", Status: "active",
+	})
+	reg.Sprints = append(reg.Sprints, registry.Sprint{
+		ID: "sp-ckpt", Title: "Checkpoint Sprint", Epic: "ep",
+		Status: "active", Items: []string{"T-100"},
+		PlanApproved: true,
+	})
+	reg.Save(filepath.Join(root, ".as", "epics.yaml"))
+
+	writeFile(t, filepath.Join(root, "tasks", "T-100-ckpt.md"), `id: T-100
+type: task
+status: active
+created: 2026-04-01T10:00:00-06:00
+last_touched: 2026-04-01T10:00:00-06:00
+completed: null
+title: Checkpoint test item
+depends_on:
+- []
+sprint: sp-ckpt
+time_tracking:
+  started_at: 2026-04-01T10:00:00-06:00
+`)
+
+	cfg, err := config.LoadFrom(filepath.Join(root, ".as", "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, _ := store.New(cfg)
+	pipeline := cfg.RunPipeline()
+
+	// Run with StepFilter to stop after step_b
+	result := runSingleItem(s, cfg, "T-100", "sp-ckpt", pipeline, RunOpts{StepFilter: "step_b"}, mockRunEngine(true))
+	if !result.Success {
+		// Command steps don't set result.Success (only set at end), but steps should pass
+		for _, sr := range result.Steps {
+			if !sr.Passed {
+				t.Fatalf("step %s failed: %s", sr.Step, sr.Error)
+			}
+		}
+	}
+
+	// Verify last_completed_step was set to step_b
+	s2, _ := store.New(cfg)
+	item, ok := s2.Get("T-100")
+	if !ok {
+		t.Fatal("item not found after run")
+	}
+	lastStep, _ := getNestedField(item, "delivery", "last_completed_step")
+	if lastStep != "step_b" {
+		t.Errorf("last_completed_step = %q, want %q", lastStep, "step_b")
+	}
+
+	// Now run again WITHOUT --fresh — should resume after step_b (only step_c runs)
+	s3, _ := store.New(cfg)
+	result2 := runSingleItem(s3, cfg, "T-100", "sp-ckpt", pipeline, RunOpts{}, mockRunEngine(true))
+
+	// Should have exactly one step executed: step_c
+	executedSteps := []string{}
+	for _, sr := range result2.Steps {
+		executedSteps = append(executedSteps, sr.Step)
+	}
+	if len(executedSteps) != 1 || executedSteps[0] != "step_c" {
+		t.Errorf("expected only [step_c] to run on resume, got %v", executedSteps)
+	}
+}
+
+// TestRunResumeNoRegression verifies that resume does not re-execute
+// already-completed steps — only steps after the checkpoint run.
+func TestRunResumeNoRegression(t *testing.T) {
+	root := t.TempDir()
+	for _, dir := range []string{"tasks", ".as"} {
+		os.MkdirAll(filepath.Join(root, dir), 0755)
+	}
+
+	// Track which steps actually execute via temp file side-effects
+	logFile := filepath.Join(root, "step_log.txt")
+
+	os.WriteFile(filepath.Join(root, ".as", "config.yaml"), []byte(fmt.Sprintf(`paths:
+  root: .
+
+run:
+  permission_mode: dangerously-skip-permissions
+  default_model: sonnet
+  max_parallelism: 1
+  default_budget_usd: 2.00
+  step_order: [alpha, beta, gamma]
+  steps:
+    alpha:
+      type: command
+      command: echo alpha >> %s
+    beta:
+      type: command
+      command: echo beta >> %s
+    gamma:
+      type: command
+      command: echo gamma >> %s
+`, logFile, logFile, logFile)), 0644)
+
+	reg := &registry.Registry{}
+	reg.Epics = append(reg.Epics, registry.Epic{
+		ID: "ep", Title: "Epic", Status: "active",
+	})
+	reg.Sprints = append(reg.Sprints, registry.Sprint{
+		ID: "sp-noreg", Title: "No Regression Sprint", Epic: "ep",
+		Status: "active", Items: []string{"T-200"},
+		PlanApproved: true,
+	})
+	reg.Save(filepath.Join(root, ".as", "epics.yaml"))
+
+	writeFile(t, filepath.Join(root, "tasks", "T-200-noreg.md"), `id: T-200
+type: task
+status: active
+created: 2026-04-01T10:00:00-06:00
+last_touched: 2026-04-01T10:00:00-06:00
+completed: null
+title: No regression test item
+depends_on:
+- []
+sprint: sp-noreg
+time_tracking:
+  started_at: 2026-04-01T10:00:00-06:00
+`)
+
+	cfg, err := config.LoadFrom(filepath.Join(root, ".as", "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, _ := store.New(cfg)
+	pipeline := cfg.RunPipeline()
+
+	// Run 1: execute all steps (alpha, beta, gamma)
+	runSingleItem(s, cfg, "T-200", "sp-noreg", pipeline, RunOpts{StepFilter: "beta"}, mockRunEngine(true))
+
+	// Clear the log file
+	os.WriteFile(logFile, nil, 0644)
+
+	// Run 2: resume — only gamma should execute
+	s2, _ := store.New(cfg)
+	runSingleItem(s2, cfg, "T-200", "sp-noreg", pipeline, RunOpts{}, mockRunEngine(true))
+
+	// Read log — should only contain "gamma"
+	logData, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logContent := strings.TrimSpace(string(logData))
+	lines := strings.Split(logContent, "\n")
+
+	// Filter empty lines
+	var nonEmpty []string
+	for _, l := range lines {
+		l = strings.TrimSpace(l)
+		if l != "" {
+			nonEmpty = append(nonEmpty, l)
+		}
+	}
+
+	if len(nonEmpty) != 1 || nonEmpty[0] != "gamma" {
+		t.Errorf("expected only [gamma] in log after resume, got %v (raw: %q)", nonEmpty, logContent)
+	}
+}
+
+// TestDetectMergedPR_FallbackToManifest verifies that detectMergedPR falls back
+// to checking all worktree directories when no PRs are recorded in the manifest.
+func TestDetectMergedPR_FallbackToManifest(t *testing.T) {
+	root := t.TempDir()
+	for _, dir := range []string{"tasks", ".as"} {
+		os.MkdirAll(filepath.Join(root, dir), 0755)
+	}
+
+	os.WriteFile(filepath.Join(root, ".as", "config.yaml"), []byte(`paths:
+  root: .
+`), 0644)
+
+	// Item with NO manifest (no PRs recorded)
+	writeFile(t, filepath.Join(root, "tasks", "T-300-fallback.md"), `id: T-300
+type: task
+status: active
+created: 2026-04-01T10:00:00-06:00
+last_touched: 2026-04-01T10:00:00-06:00
+completed: null
+title: Fallback test item
+`)
+
+	cfg, err := config.LoadFrom(filepath.Join(root, ".as", "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, _ := store.New(cfg)
+
+	item, ok := s.Get("T-300")
+	if !ok {
+		t.Fatal("item not found")
+	}
+
+	// Without worktree config and no gh CLI, detectMergedPR should return false
+	// (fallback to allWorktreeDirs which returns cfg.Root(), but gh pr view fails)
+	result := detectMergedPR(cfg, "T-300", item)
+	if result {
+		t.Error("detectMergedPR should return false when gh pr view fails (no git repo)")
+	}
+
+	// Verify allWorktreeDirsWithPR returns the root when no worktree config
+	dirs := allWorktreeDirsWithPR(cfg, "T-300")
+	if len(dirs) == 0 {
+		t.Error("allWorktreeDirsWithPR should fall back to root dir")
+	}
+
+	// Verify allWorktreeDirs also returns the root as fallback
+	fallbackDirs := allWorktreeDirs(cfg, "T-300")
+	if len(fallbackDirs) == 0 {
+		t.Error("allWorktreeDirs should return root dir as fallback")
+	}
+	if fallbackDirs[0] != cfg.Root() {
+		t.Errorf("allWorktreeDirs fallback = %q, want %q", fallbackDirs[0], cfg.Root())
+	}
+}
