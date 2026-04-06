@@ -1437,3 +1437,174 @@ func TestStripBugbotMarkup(t *testing.T) {
 		})
 	}
 }
+
+// TestRecordSessionReloadsFreshState verifies that recordSession reads the
+// current on-disk state rather than using the caller's (potentially stale)
+// store. This prevents overwriting fields added by pipeline steps or Claude
+// subprocesses during fix cycles (I-169).
+func TestRecordSessionReloadsFreshState(t *testing.T) {
+	root := t.TempDir()
+	for _, dir := range []string{"tasks", "issues", "archive", ".as"} {
+		os.MkdirAll(filepath.Join(root, dir), 0755)
+	}
+	os.WriteFile(filepath.Join(root, ".as", "config.yaml"), []byte("paths:\n  root: .\n"), 0644)
+
+	// Create an item with basic fields
+	writeFile(t, filepath.Join(root, "tasks", "T-100-test.md"), `id: T-100
+type: task
+status: active
+created: 2026-04-06T10:00:00-06:00
+last_touched: 2026-04-06T10:00:00-06:00
+
+title: Test item
+
+sessions:
+- []
+
+depends_on:
+- []
+`)
+
+	cfg, err := config.LoadFrom(filepath.Join(root, ".as", "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Load a "stale" store — this represents the function parameter `s`
+	// that is never refreshed during the pipeline.
+	staleStore, err := store.New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Now simulate pipeline steps adding fields by writing directly to disk.
+	// This is what happens when localStore or subprocess `st` commands modify
+	// the item between pipeline steps.
+	freshStore, _ := store.New(cfg)
+	item, _ := freshStore.Get("T-100")
+	setNestedField(item, "delivery", "stage", "implement")
+	setNestedField(item, "testing_evidence", "api_unit", "pass abc123 2026-04-06T12:00:00-06:00")
+	freshStore.Write(item)
+
+	// Call recordSession with the STALE store. Before the fix, this would
+	// overwrite the delivery and testing_evidence fields. After the fix,
+	// it should reload from disk and preserve them.
+	recordSession(staleStore, cfg, "T-100", "session-new", "ci_fix_1")
+
+	// Reload from disk and verify fields were preserved
+	verifyStore, _ := store.New(cfg)
+	result, ok := verifyStore.Get("T-100")
+	if !ok {
+		t.Fatal("item T-100 not found after recordSession")
+	}
+
+	// Check that delivery fields survived
+	if result.Delivery == nil {
+		t.Fatal("delivery section was stripped by recordSession")
+	}
+	stage, _ := result.Delivery["stage"].(string)
+	if stage != "implement" {
+		t.Errorf("delivery.stage = %q, want %q", stage, "implement")
+	}
+
+	// Check that testing_evidence survived
+	if result.TestingEvidence == nil {
+		t.Fatal("testing_evidence section was stripped by recordSession")
+	}
+	apiUnit, _ := result.TestingEvidence["api_unit"].(string)
+	if !strings.HasPrefix(apiUnit, "pass") {
+		t.Errorf("testing_evidence.api_unit = %q, want prefix %q", apiUnit, "pass")
+	}
+
+	// Check that the session WAS recorded
+	found := false
+	for _, s := range result.Sessions {
+		if s == "session-new" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("session 'session-new' was not recorded")
+	}
+
+	// Check time_tracking was set
+	if result.TimeTracking == nil {
+		t.Fatal("time_tracking should be set")
+	}
+	lastStep, _ := result.TimeTracking["last_step"].(string)
+	if lastStep != "ci_fix_1" {
+		t.Errorf("time_tracking.last_step = %q, want %q", lastStep, "ci_fix_1")
+	}
+}
+
+// TestEnsureActiveUpdatesDoc verifies that the status guard updates both the
+// struct field AND the Doc so the write actually persists to disk (I-169).
+func TestEnsureActiveUpdatesDoc(t *testing.T) {
+	root := t.TempDir()
+	for _, dir := range []string{"tasks", "issues", "archive", ".as"} {
+		os.MkdirAll(filepath.Join(root, dir), 0755)
+	}
+	os.WriteFile(filepath.Join(root, ".as", "config.yaml"), []byte("paths:\n  root: .\n"), 0644)
+
+	// Create an item with status "queued" (simulating status drift)
+	writeFile(t, filepath.Join(root, "tasks", "T-200-drift.md"), `id: T-200
+type: task
+status: queued
+created: 2026-04-06T10:00:00-06:00
+last_touched: 2026-04-06T10:00:00-06:00
+
+title: Drifted item
+
+delivery:
+  stage: implement
+
+depends_on:
+- []
+`)
+
+	cfg, err := config.LoadFrom(filepath.Join(root, ".as", "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate the status guard logic (mirrors lines 1679-1691 in run.go)
+	refreshStore, err := store.New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refreshItem, ok := refreshStore.Get("T-200")
+	if !ok {
+		t.Fatal("T-200 not found")
+	}
+	if refreshItem.Status != "active" {
+		refreshItem.Status = "active"
+		refreshItem.Doc.SetField("status", "active")
+		refreshStore.Write(refreshItem)
+	}
+
+	// Reload and verify status persisted to disk
+	verifyStore, _ := store.New(cfg)
+	result, ok := verifyStore.Get("T-200")
+	if !ok {
+		t.Fatal("T-200 not found after write")
+	}
+	if result.Status != "active" {
+		t.Errorf("status = %q, want %q (Doc.SetField was missing)", result.Status, "active")
+	}
+
+	// Also verify via Doc to be thorough
+	docStatus, _ := result.Doc.GetField("status")
+	if docStatus != "active" {
+		t.Errorf("Doc status = %q, want %q", docStatus, "active")
+	}
+
+	// Verify delivery fields weren't stripped
+	if result.Delivery == nil {
+		t.Fatal("delivery section was stripped by status guard")
+	}
+	stage, _ := result.Delivery["stage"].(string)
+	if stage != "implement" {
+		t.Errorf("delivery.stage = %q, want %q", stage, "implement")
+	}
+}

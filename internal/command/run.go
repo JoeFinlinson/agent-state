@@ -1684,6 +1684,7 @@ func runSingleItem(s *store.Store, cfg *config.Config, itemID, sprintID string, 
 			if refreshItem, ok := refreshStore.Get(itemID); ok {
 				if refreshItem.Status != "active" {
 					refreshItem.Status = "active"
+					refreshItem.Doc.SetField("status", "active")
 					refreshStore.Write(refreshItem)
 					localStore, _ = store.New(cfg)
 				}
@@ -3606,7 +3607,15 @@ func planMissingFields(needsSummary, needsACs bool) string {
 
 // recordSession appends a session ID to the item's sessions list.
 func recordSession(s *store.Store, cfg *config.Config, itemID, sessionID, stepName string) {
-	item, ok := s.Get(itemID)
+	// Always reload from disk to avoid overwriting changes made by
+	// pipeline steps or Claude subprocesses. The caller's store may be
+	// stale — especially during fix cycles where the function parameter
+	// `s` is never refreshed (I-169).
+	freshStore, err := store.New(cfg)
+	if err != nil {
+		return
+	}
+	item, ok := freshStore.Get(itemID)
 	if !ok {
 		return
 	}
@@ -3620,7 +3629,7 @@ func recordSession(s *store.Store, cfg *config.Config, itemID, sessionID, stepNa
 	setNestedField(item, "time_tracking", "last_step", stepName)
 
 	item.Doc.SetField("last_touched", time.Now().Format(time.RFC3339))
-	s.Write(item)
+	freshStore.Write(item)
 }
 
 // --- Prompt and args ---
