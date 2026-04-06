@@ -1654,11 +1654,8 @@ func runSingleItem(s *store.Store, cfg *config.Config, itemID, sprintID string, 
 	if !opts.Fresh {
 		if item, ok := localStore.Get(itemID); ok {
 			if lastStep, _ := getNestedField(item, "delivery", "last_completed_step"); lastStep != "" {
-				for j, s := range pipeline {
-					if s.Name() == lastStep {
-						startIdx = j + 1
-						break
-					}
+				if idx := stepIndex(pipeline, lastStep); idx >= 0 {
+					startIdx = idx + 1
 				}
 				if startIdx > 0 && startIdx < len(pipeline) {
 					fmt.Printf("[%s] Resuming after step: %s\n", itemID, lastStep)
@@ -1816,6 +1813,7 @@ func runSingleItem(s *store.Store, cfg *config.Config, itemID, sprintID string, 
 								if progressItem, ok := progressStore.Get(itemID); ok {
 									setNestedField(progressItem, "delivery", "last_completed_step", step.Name())
 									progressStore.Write(progressItem)
+									_ = progressStore.GitSync(fmt.Sprintf("st run: %s checkpoint@%s", itemID, step.Name()))
 								}
 							}
 							localStore, _ = store.New(cfg)
@@ -1874,6 +1872,8 @@ func runSingleItem(s *store.Store, cfg *config.Config, itemID, sprintID string, 
 			if progressItem, ok := progressStore.Get(itemID); ok {
 				setNestedField(progressItem, "delivery", "last_completed_step", step.Name())
 				progressStore.Write(progressItem)
+				// GitSync so checkpoint survives session interruption (e.g. breakpoint pause)
+				_ = progressStore.GitSync(fmt.Sprintf("st run: %s checkpoint@%s", itemID, step.Name()))
 			}
 		}
 
@@ -4825,6 +4825,16 @@ func isEligible(s *store.Store, cfg *config.Config, itemID string) bool {
 	// Allow items claimed by other sessions — runSingleItem handles
 	// merged-PR detection and recovery before entering the pipeline
 	return true
+}
+
+// stepIndex returns the index of the named step in the pipeline, or -1 if not found.
+func stepIndex(pipeline []config.RunStepDef, name string) int {
+	for i, s := range pipeline {
+		if s.Name() == name {
+			return i
+		}
+	}
+	return -1
 }
 
 func slugFromTitle(title string) string {
