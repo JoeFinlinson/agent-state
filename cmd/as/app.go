@@ -747,11 +747,23 @@ implement step during st run.`,
 			item, _ := cmd.Flags().GetString("item")
 			model, _ := cmd.Flags().GetString("model")
 			includeRejected, _ := cmd.Flags().GetBool("include-rejected")
+			contextFile, _ := cmd.Flags().GetString("context")
+			var contextContent string
+			if contextFile != "" {
+				data, err := os.ReadFile(contextFile)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "failed to read context file: %v\n", err)
+					exitCode = 1
+					return
+				}
+				contextContent = string(data)
+			}
 			opts := command.PrepOpts{
 				DryRun:          dryRun,
 				Model:           model,
 				ItemFilter:      item,
 				IncludeRejected: includeRejected,
+				Context:         contextContent,
 			}
 			engine := command.DefaultRunEngine()
 			if len(args) > 0 {
@@ -779,6 +791,7 @@ implement step during st run.`,
 	prepCmd.Flags().String("item", "", "prep only this item ID")
 	prepCmd.Flags().String("model", "", "model to use (overrides config)")
 	prepCmd.Flags().Bool("include-rejected", false, "re-process previously rejected plans")
+	prepCmd.Flags().String("context", "", "path to a context file injected into the planning prompt")
 	root.AddCommand(prepCmd)
 
 	advanceCmd := &cobra.Command{

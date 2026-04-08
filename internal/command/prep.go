@@ -19,6 +19,7 @@ type PrepOpts struct {
 	Model           string
 	ItemFilter      string // --item: prep only this item
 	IncludeRejected bool   // --include-rejected: re-process rejected plans
+	Context         string // --context: contents of a context file injected into the planning prompt
 }
 
 // PrepInteractive shows sprint selection and runs prep on the selected sprint.
@@ -196,7 +197,7 @@ func prepItem(s *store.Store, cfg *config.Config, itemID string, item *model.Ite
 
 	// No draft — run Claude to generate a new plan
 	if p == nil {
-		prompt := buildPrepPrompt(cfg, itemID, item)
+		prompt := buildPrepPrompt(cfg, itemID, item, opts.Context)
 
 		runOpts := RunOpts{Model: opts.Model}
 		args := buildClaudeArgs(cfg, prompt, runOpts, cwd)
@@ -433,7 +434,7 @@ func prepItem(s *store.Store, cfg *config.Config, itemID string, item *model.Ite
 }
 
 // buildPrepPrompt creates the exploration prompt for plan generation.
-func buildPrepPrompt(cfg *config.Config, itemID string, item *model.Item) string {
+func buildPrepPrompt(cfg *config.Config, itemID string, item *model.Item, context string) string {
 	var b strings.Builder
 
 	b.WriteString(fmt.Sprintf("You are planning implementation for item %s.\n\n", itemID))
@@ -449,6 +450,15 @@ func buildPrepPrompt(cfg *config.Config, itemID string, item *model.Item) string
 	}
 	if len(item.DependsOn) > 0 {
 		b.WriteString(fmt.Sprintf("Dependencies: %s\n", strings.Join(item.DependsOn, ", ")))
+	}
+
+	if context != "" {
+		b.WriteString("\n--- CONTEXT FROM PREVIOUS SPRINT ---\n")
+		b.WriteString(context)
+		b.WriteString("\n--- END CONTEXT ---\n")
+		b.WriteString("\nUse this context to inform your exploration and planning. ")
+		b.WriteString("The context describes integration gaps, deferred work, and constraints ")
+		b.WriteString("discovered during the previous sprint. Verify these against the current codebase.\n")
 	}
 
 	b.WriteString("\n")
