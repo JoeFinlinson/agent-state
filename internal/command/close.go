@@ -3,10 +3,12 @@ package command
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/jfinlinson/agent-state/internal/changelog"
 	"github.com/jfinlinson/agent-state/internal/config"
+	"github.com/jfinlinson/agent-state/internal/model"
 	"github.com/jfinlinson/agent-state/internal/registry"
 	"github.com/jfinlinson/agent-state/internal/session"
 	"github.com/jfinlinson/agent-state/internal/store"
@@ -17,6 +19,9 @@ import (
 type CloseOpts struct {
 	Reason string
 	Force  bool // bypass gate enforcement
+	// FilesOpts is passed to the LOC freeze step. Tests inject fake git/resolve
+	// here; production callers leave it zero (real git + real worktree discovery).
+	FilesOpts FilesOpts
 }
 
 func Close(s *store.Store, cfg *config.Config, id, resolution string, opts CloseOpts) int {
@@ -82,13 +87,30 @@ func Close(s *store.Store, cfg *config.Config, id, resolution string, opts Close
 
 	// Record completion time tracking
 	setNestedField(item, "time_tracking", "completed_at", nowStr)
+
+	// total_duration_seconds = closed_at - created_at (calendar wall time from
+	// item creation, includes idle periods). Always computed.
+	if !item.Created.IsZero() {
+		setNestedField(item, "time_tracking", "total_duration_seconds",
+			fmt.Sprintf("%d", int(now.Sub(item.Created).Seconds())))
+	}
+
+	// work_duration_seconds = closed_at - started_at (from when work was first
+	// activated). Coexists with legacy wall_time_hours for back-compat readers.
 	if startedAt, ok := getNestedField(item, "time_tracking", "started_at"); ok && startedAt != "" {
 		if t, err := time.Parse(time.RFC3339, startedAt); err == nil {
 			wallDur := now.Sub(t)
+			setNestedField(item, "time_tracking", "work_duration_seconds",
+				fmt.Sprintf("%d", int(wallDur.Seconds())))
 			setNestedField(item, "time_tracking", "wall_time_hours", fmt.Sprintf("%.1f", wallDur.Hours()))
 			setNestedField(item, "time_tracking", "total_wall_time", formatDuration(wallDur))
 		}
 	}
+
+	// Freeze LOC snapshot. Runs the same logic as st files and captures the
+	// totals into time_tracking + a per-file list into work_tracking.files_changed.
+	// Failures become warnings — close must not fail because git is being weird.
+	freezeLOCSnapshot(s, cfg, item, opts.FilesOpts)
 
 	// Total AI time from st run metrics (ai_duration_seconds)
 	if aiSec, ok := getNestedField(item, "time_tracking", "ai_duration_seconds"); ok && aiSec != "" {
@@ -263,3 +285,56 @@ func autoArchiveSprintAndEpic(s *store.Store, cfg *config.Config, sprintID strin
 		fmt.Fprintf(os.Stderr, "warning: auto-archive save failed: %v\n", err)
 	}
 }
+
+// freezeLOCSnapshot computes the cross-repo file diff for the item and writes
+// the aggregates into time_tracking (lines_added / lines_removed / lines_net /
+// files_changed_count / lines_by_repo) plus per-file detail into
+// work_tracking.files_changed. After close the branch may be deleted, so this
+// is the item's permanent record of what was changed.
+//
+// Failures are logged as warnings and leave the item with zero LOC fields
+// rather than blocking close.
+func freezeLOCSnapshot(s *store.Store, cfg *config.Config, item *modelItemRef, opts FilesOpts) {
+	res, code := ComputeFileChanges(s, cfg, item.ID, opts)
+	if code != 0 {
+		fmt.Fprintf(os.Stderr, "warning: LOC snapshot for %s failed (code %d) — freezing zeros\n", item.ID, code)
+		return
+	}
+
+	setNestedField(item, "time_tracking", "lines_added", fmt.Sprintf("%d", res.Totals.Added))
+	setNestedField(item, "time_tracking", "lines_removed", fmt.Sprintf("%d", res.Totals.Removed))
+	setNestedField(item, "time_tracking", "lines_net", fmt.Sprintf("%+d", res.Totals.Net))
+	setNestedField(item, "time_tracking", "files_changed_count", fmt.Sprintf("%d", res.Totals.Files))
+
+	// lines_by_repo: one line per repo under time_tracking.by_repo
+	for _, r := range res.Repos {
+		line := fmt.Sprintf("%s: files=%d added=%d removed=%d net=%+d",
+			r.Repo, r.Files, r.Added, r.Removed, r.Net)
+		if !updateListLine(item, "time_tracking", "by_repo",
+			func(raw string) bool {
+				t := raw
+				if idx := strings.Index(t, ":"); idx >= 0 {
+					return t[:idx] == r.Repo
+				}
+				return false
+			}, line) {
+			appendListField(item, "time_tracking", "by_repo", line)
+		}
+	}
+
+	// Per-file detail under work_tracking.files_changed
+	for _, f := range res.Files {
+		line := fmt.Sprintf("%s %s %s +%d -%d (%+d) [%s]",
+			f.Repo, f.Action, f.Path, f.Added, f.Removed, f.Net, f.Type)
+		appendListField(item, "work_tracking", "files_changed", line)
+	}
+
+	for _, w := range res.Warnings {
+		fmt.Fprintf(os.Stderr, "warning: LOC freeze: %s\n", w)
+	}
+}
+
+// modelItemRef is an alias pin: the concrete type is *model.Item. Named
+// separately so the freezeLOCSnapshot signature reads cleanly without
+// pulling another import just for the type expression.
+type modelItemRef = model.Item
