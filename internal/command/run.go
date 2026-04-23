@@ -90,8 +90,17 @@ type StepResult struct {
 	Duration     time.Duration `json:"duration"`
 	CostUSD      float64       `json:"cost_usd,omitempty"`
 	AIDurationMs int64         `json:"ai_duration_ms,omitempty"`
-	InputTokens  int           `json:"input_tokens,omitempty"`
-	OutputTokens int           `json:"output_tokens,omitempty"`
+
+	// Tokens. InputTokens is the legacy combined total (regular + cache reads +
+	// cache writes) and is retained for back-compat with existing ItemResult
+	// consumers. For metrics accrual via SessionLog we use the separated fields.
+	InputTokens     int    `json:"input_tokens,omitempty"`
+	OutputTokens    int    `json:"output_tokens,omitempty"`
+	RegInputTokens  int    `json:"reg_input_tokens,omitempty"`
+	CacheInTokens   int    `json:"cache_in_tokens,omitempty"`  // cache reads
+	CacheOutTokens  int    `json:"cache_out_tokens,omitempty"` // cache writes
+	Model           string `json:"model,omitempty"`
+	ClaudeSessionID string `json:"claude_session_id,omitempty"`
 }
 
 // ItemResult captures the outcome of running one sprint item.
@@ -1943,92 +1952,56 @@ func runSingleItem(s *store.Store, cfg *config.Config, itemID, sprintID string, 
 	return result
 }
 
-// recordRunMetrics accumulates AI cost, AI duration, and run wall time on the item.
-// Each st run / st advance invocation adds to the running totals.
+// recordRunMetrics ships each Claude step in the result through SessionLog,
+// keeping st run and the Claude Code Stop hook on the same accumulator and
+// producing byte-identical time_tracking mutations for the same logical work.
+//
+// Non-claude steps (test, merge, deploy, etc.) are skipped — they don't have
+// token/cost data. ProcessMs for a claude step uses the step's wall-clock
+// duration; AIMs uses the model's reported duration_ms.
 func recordRunMetrics(cfg *config.Config, itemID string, result ItemResult) {
 	localStore, err := store.New(cfg)
 	if err != nil {
 		return
 	}
-	item, ok := localStore.Get(itemID)
-	if !ok {
-		return
-	}
 
-	// Accumulate AI cost
-	if result.TotalCost > 0 {
-		prev := readFloatField(item, "time_tracking", "ai_cost_usd")
-		setNestedField(item, "time_tracking", "ai_cost_usd", fmt.Sprintf("%.4f", prev+result.TotalCost))
-	}
-
-	// Accumulate token counts
-	if result.InputTokens > 0 {
-		prev := readIntField(item, "time_tracking", "input_tokens")
-		setNestedField(item, "time_tracking", "input_tokens", fmt.Sprintf("%d", prev+result.InputTokens))
-	}
-	if result.OutputTokens > 0 {
-		prev := readIntField(item, "time_tracking", "output_tokens")
-		setNestedField(item, "time_tracking", "output_tokens", fmt.Sprintf("%d", prev+result.OutputTokens))
-	}
-	if result.InputTokens > 0 || result.OutputTokens > 0 {
-		prev := readIntField(item, "time_tracking", "total_tokens")
-		setNestedField(item, "time_tracking", "total_tokens", fmt.Sprintf("%d", prev+result.InputTokens+result.OutputTokens))
-	}
-
-	// Accumulate AI duration from all steps that report it (claude, plan, uat_review, etc.)
-	var aiDurationMs int64
 	for _, sr := range result.Steps {
-		aiDurationMs += sr.AIDurationMs
-	}
-	if aiDurationMs > 0 {
-		prev := readIntField(item, "time_tracking", "ai_duration_seconds")
-		setNestedField(item, "time_tracking", "ai_duration_seconds", fmt.Sprintf("%d", prev+int(aiDurationMs/1000)))
-	}
-
-	// Accumulate total run wall time
-	if result.Duration > 0 {
-		prev := readIntField(item, "time_tracking", "run_wall_seconds")
-		setNestedField(item, "time_tracking", "run_wall_seconds", fmt.Sprintf("%d", prev+int(result.Duration.Seconds())))
-	}
-
-	// Track number of st run invocations
-	prevRuns := readIntField(item, "time_tracking", "run_count")
-	setNestedField(item, "time_tracking", "run_count", fmt.Sprintf("%d", prevRuns+1))
-
-	// Append per-run stats to ai_sessions array (detailed provenance)
-	appendAISessionRecord(item, result)
-
-	item.Doc.SetField("last_touched", time.Now().Format(time.RFC3339))
-	agentID := cfg.AgentID()
-	if agentID != "" {
-		item.Doc.SetField("last_touched_by", agentID)
-	} else {
-		item.Doc.SetField("last_touched_by", "st-run")
-	}
-	localStore.Write(item)
-}
-
-// appendAISessionRecord adds a line to the work_tracking.ai_sessions list
-// with per-invocation stats: session ID, step, cost, duration, timestamp.
-func appendAISessionRecord(item *model.Item, result ItemResult) {
-	for _, sr := range result.Steps {
-		if sr.Type != "claude" || sr.CostUSD == 0 {
+		if sr.Type != "claude" {
 			continue
 		}
-		// Format: "cost:$X.XXXX duration:Xs in:N out:N step:<name> at:<timestamp>"
-		aiDur := time.Duration(sr.AIDurationMs) * time.Millisecond
-		record := fmt.Sprintf("cost:$%.4f duration:%s in:%d out:%d step:%s at:%s",
-			sr.CostUSD, aiDur.Round(time.Second),
-			sr.InputTokens, sr.OutputTokens,
-			sr.Step, time.Now().Format(time.RFC3339))
-
-		if item.WorkTracking == nil {
-			item.WorkTracking = make(map[string]interface{})
+		// Skip no-op records (e.g. parser failure with no tokens)
+		if sr.CostUSD == 0 && sr.InputTokens == 0 && sr.OutputTokens == 0 {
+			continue
 		}
-
-		// Append to ai_sessions list in document
-		appendListField(item, "work_tracking", "ai_sessions", record)
+		payload := SessionLogPayload{
+			SessionID:       sr.ClaudeSessionID,
+			Model:           sr.Model,
+			ProcessMs:       sr.Duration.Milliseconds(),
+			AIMs:            sr.AIDurationMs,
+			RegInputTokens:  sr.RegInputTokens,
+			RegOutputTokens: sr.OutputTokens,
+			CacheInTokens:   sr.CacheInTokens,
+			CacheOutTokens:  sr.CacheOutTokens,
+			CostUSD:         sr.CostUSD, // trusted from Claude envelope
+			ItemID:          itemID,
+			Step:            sr.Step,
+		}
+		SessionLog(localStore, cfg, payload)
 	}
+}
+
+// resolveStepModel returns the model id st run is configured to use. Per-step
+// overrides (opts.Model) take precedence over the default. Currently st run
+// does not propagate the resolved model through the envelope, so this is the
+// best-effort attribution for st run's half of the tracker.
+func resolveStepModel(cfg *config.Config, opts RunOpts) string {
+	if opts.Model != "" {
+		return opts.Model
+	}
+	if cfg.Run != nil && cfg.Run.DefaultModel != "" {
+		return cfg.Run.DefaultModel
+	}
+	return ""
 }
 
 // executeStepWithSession dispatches to the appropriate step executor, with claude session reuse.
@@ -2158,8 +2131,13 @@ func executeClaude(s *store.Store, cfg *config.Config, itemID, sprintID string, 
 
 	sr.CostUSD = claudeResult.TotalCostUSD
 	sr.AIDurationMs = claudeResult.DurationMs
-	sr.InputTokens = claudeResult.Usage.InputTokens + claudeResult.Usage.CacheCreationInputTokens + claudeResult.Usage.CacheReadInputTokens
+	sr.RegInputTokens = claudeResult.Usage.InputTokens
+	sr.CacheInTokens = claudeResult.Usage.CacheReadInputTokens
+	sr.CacheOutTokens = claudeResult.Usage.CacheCreationInputTokens
+	sr.InputTokens = sr.RegInputTokens + sr.CacheInTokens + sr.CacheOutTokens // legacy combined
 	sr.OutputTokens = claudeResult.Usage.OutputTokens
+	sr.ClaudeSessionID = claudeResult.SessionID
+	sr.Model = resolveStepModel(cfg, opts)
 	sr.Output = truncate(claudeResult.Result, 500)
 	sr.FullOutput = claudeResult.Result
 
@@ -2197,8 +2175,13 @@ func executeClaude(s *store.Store, cfg *config.Config, itemID, sprintID string, 
 					}
 					sr.CostUSD = cr2.TotalCostUSD
 					sr.AIDurationMs = cr2.DurationMs
-					sr.InputTokens = cr2.Usage.InputTokens + cr2.Usage.CacheCreationInputTokens + cr2.Usage.CacheReadInputTokens
+					sr.RegInputTokens = cr2.Usage.InputTokens
+					sr.CacheInTokens = cr2.Usage.CacheReadInputTokens
+					sr.CacheOutTokens = cr2.Usage.CacheCreationInputTokens
+					sr.InputTokens = sr.RegInputTokens + sr.CacheInTokens + sr.CacheOutTokens // legacy combined
 					sr.OutputTokens = cr2.Usage.OutputTokens
+					sr.ClaudeSessionID = cr2.SessionID
+					sr.Model = resolveStepModel(cfg, opts)
 					sr.Output = truncate(cr2.Result, 500)
 					sr.FullOutput = cr2.Result
 					if exitCode2 == 0 && (cr2.Subtype == "" || cr2.Subtype == "success") {

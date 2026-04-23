@@ -112,13 +112,16 @@ func Close(s *store.Store, cfg *config.Config, id, resolution string, opts Close
 	// Failures become warnings — close must not fail because git is being weird.
 	freezeLOCSnapshot(s, cfg, item, opts.FilesOpts)
 
-	// Total AI time from st run metrics (ai_duration_seconds)
-	if aiSec, ok := getNestedField(item, "time_tracking", "ai_duration_seconds"); ok && aiSec != "" {
-		var secs int
-		fmt.Sscanf(aiSec, "%d", &secs)
-		if secs > 0 {
-			setNestedField(item, "time_tracking", "total_ai_time", formatDuration(time.Duration(secs)*time.Second))
-		}
+	// Total AI time — prefer the new ai_time_seconds field (SessionLog output);
+	// fall back to legacy ai_duration_seconds so pre-rewire items keep working.
+	var aiSecs int
+	if v, ok := getNestedField(item, "time_tracking", "ai_time_seconds"); ok && v != "" {
+		fmt.Sscanf(v, "%d", &aiSecs)
+	} else if v, ok := getNestedField(item, "time_tracking", "ai_duration_seconds"); ok && v != "" {
+		fmt.Sscanf(v, "%d", &aiSecs)
+	}
+	if aiSecs > 0 {
+		setNestedField(item, "time_tracking", "total_ai_time", formatDuration(time.Duration(aiSecs)*time.Second))
 	}
 
 	// AI cost summary
