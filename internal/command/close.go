@@ -291,9 +291,12 @@ func autoArchiveSprintAndEpic(s *store.Store, cfg *config.Config, sprintID strin
 
 // freezeLOCSnapshot computes the cross-repo file diff for the item and writes
 // the aggregates into time_tracking (lines_added / lines_removed / lines_net /
-// files_changed_count / lines_by_repo) plus per-file detail into
-// work_tracking.files_changed. After close the branch may be deleted, so this
-// is the item's permanent record of what was changed.
+// files_changed_count / by_repo) plus per-file detail into
+// time_tracking.files_changed. Everything lands under time_tracking so
+// migration's canonical emitter preserves it — emitWorkTracking strips
+// unknown nested keys, so anything there would be lost on re-emit. After
+// close the branch may be deleted, so this is the item's permanent record
+// of what was changed.
 //
 // Failures are logged as warnings and leave the item with zero LOC fields
 // rather than blocking close.

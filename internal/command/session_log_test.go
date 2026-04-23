@@ -318,6 +318,33 @@ func TestSessionLog_ByModel_UnknownModelRecorded(t *testing.T) {
 	}
 }
 
+func TestSessionLog_EmptySessionIDBucketsAsUnknown(t *testing.T) {
+	// Regression: turn_count must not exceed session_count. When a payload
+	// arrives with no SessionID we bucket it under "unknown" so the
+	// invariant (session_count >= 1 whenever turn_count >= 1) holds.
+	env := testutil.NewEnv(t)
+	SaveStack(env.Cfg, []StackEntry{{ID: "T-003"}})
+
+	for i := 0; i < 3; i++ {
+		SessionLog(env.S, env.Cfg, SessionLogPayload{
+			// no SessionID
+			Model:          "claude-haiku-4-5",
+			RegInputTokens: 100,
+		})
+	}
+
+	env.Reload(t)
+	item, _ := env.S.Get("T-003")
+	turnCount := readIntField(item, "time_tracking", "turn_count")
+	sessionCount := readIntField(item, "time_tracking", "session_count")
+	if turnCount != 3 {
+		t.Errorf("turn_count = %d, want 3", turnCount)
+	}
+	if sessionCount != 1 {
+		t.Errorf("session_count = %d, want 1 (unknown bucket)", sessionCount)
+	}
+}
+
 func TestSessionLog_NestingInvariant(t *testing.T) {
 	env := testutil.NewEnv(t)
 	SaveStack(env.Cfg, []StackEntry{{ID: "T-003"}})

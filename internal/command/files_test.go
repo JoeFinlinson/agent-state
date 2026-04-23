@@ -1,6 +1,7 @@
 package command
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -196,6 +197,49 @@ func TestFiles_ClassifiesFileTypes(t *testing.T) {
 				t.Errorf("%s classified as %q, want %q", f.Path, f.Type, want)
 			}
 		}
+	}
+}
+
+func TestFiles_WarningsRenderEvenWhenZeroFiles(t *testing.T) {
+	// Regression: renderFilesHuman must print warnings BEFORE the
+	// "no file changes" bail, so an operator sees why every repo returned 0.
+	tmpBase := t.TempDir()
+	env := testutil.NewEnv(t)
+	env.Cfg.Worktree = &config.WorktreeConfig{
+		Enabled: true,
+		BaseDir: "worktrees",
+		Repos:   []string{"api"},
+	}
+	apiDir := filepath.Join(tmpBase, "T-003", "api")
+	if err := fakeGitRepo(apiDir); err != nil {
+		t.Fatalf("fakeGitRepo: %v", err)
+	}
+
+	runG := func(dir string, args ...string) (string, error) {
+		return "", fmt.Errorf("every git call fails in this test")
+	}
+	resolve := func(cfg *config.Config, itemID, repo string) string { return apiDir }
+
+	res, code := ComputeFileChanges(env.S, env.Cfg, "T-003",
+		FilesOpts{ResolveRepo: resolve, RunGit: runG})
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d", code)
+	}
+
+	buf := &bytes.Buffer{}
+	renderFilesHuman(buf, res)
+	out := buf.String()
+	if !strings.Contains(out, "warning:") {
+		t.Errorf("expected warning to be rendered; got:\n%s", out)
+	}
+	if !strings.Contains(out, "No file changes") {
+		t.Errorf("expected 'No file changes' line; got:\n%s", out)
+	}
+	// Warning must appear BEFORE the "No file changes" line
+	wIdx := strings.Index(out, "warning:")
+	nIdx := strings.Index(out, "No file changes")
+	if wIdx < 0 || nIdx < 0 || wIdx > nIdx {
+		t.Errorf("warning should precede 'No file changes'; got:\n%s", out)
 	}
 }
 

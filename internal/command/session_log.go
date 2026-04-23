@@ -136,8 +136,10 @@ func SessionLog(s *store.Store, cfg *config.Config, payload SessionLogPayload) i
 		fmt.Sprintf("%d", readIntField(item, "time_tracking", "reg_output_tokens")))
 
 	if cost > 0 {
+		// 6-decimal precision matches by_model cost precision so the two
+		// aggregates don't drift apart across round-trips. See formatByModelLine.
 		setNestedField(item, "time_tracking", "ai_cost_usd",
-			fmt.Sprintf("%.4f", readFloatField(item, "time_tracking", "ai_cost_usd")+cost))
+			fmt.Sprintf("%.6f", readFloatField(item, "time_tracking", "ai_cost_usd")+cost))
 	}
 
 	setNestedField(item, "time_tracking", "turn_count",
@@ -145,12 +147,17 @@ func SessionLog(s *store.Store, cfg *config.Config, payload SessionLogPayload) i
 
 	// session_count: recompute from distinct session ids in ai_turns (walk-based
 	// for correctness; list is typically small). A new session_id triggers +1.
-	if payload.SessionID != "" {
-		seen := seenSessionIDs(item)
-		if !seen[payload.SessionID] {
-			setNestedField(item, "time_tracking", "session_count",
-				fmt.Sprintf("%d", len(seen)+1))
-		}
+	// An empty SessionID is bucketed as "unknown" so the invariant
+	// `session_count >= 1 whenever turn_count >= 1` always holds even if the
+	// Claude envelope fails to provide a session_id.
+	sid := payload.SessionID
+	if sid == "" {
+		sid = "unknown"
+	}
+	seen := seenSessionIDs(item)
+	if !seen[sid] {
+		setNestedField(item, "time_tracking", "session_count",
+			fmt.Sprintf("%d", len(seen)+1))
 	}
 
 	// Bookkeeping
@@ -358,7 +365,7 @@ func updateListLine(item *model.Item, parent, key string, match func(raw string)
 	return false
 }
 
-// formatAITurnLine produces the provenance line appended to work_tracking.ai_turns.
+// formatAITurnLine produces the provenance line appended to time_tracking.ai_turns.
 // Format is space-separated key:value pairs — grep-friendly and stable enough to
 // be parsed by downstream reporting without a dedicated parser.
 func formatAITurnLine(p SessionLogPayload, cost float64, at string) string {
@@ -366,12 +373,18 @@ func formatAITurnLine(p SessionLogPayload, cost float64, at string) string {
 	if step == "" {
 		step = "interactive"
 	}
+	// Keep session id parseable — an empty string would produce "session: model:..."
+	// which breaks the walker. Bucket as "unknown" (mirrors SessionLog's session_count).
+	sid := p.SessionID
+	if sid == "" {
+		sid = "unknown"
+	}
 	var sb strings.Builder
 	if p.Turn > 0 {
 		sb.WriteString(fmt.Sprintf("turn:%d ", p.Turn))
 	}
-	sb.WriteString(fmt.Sprintf("session:%s model:%s cost:$%.4f process:%ds ai:%ds reg_in:%d reg_out:%d cache_in:%d cache_out:%d",
-		p.SessionID, p.Model, cost,
+	sb.WriteString(fmt.Sprintf("session:%s model:%s cost:$%.6f process:%ds ai:%ds reg_in:%d reg_out:%d cache_in:%d cache_out:%d",
+		sid, p.Model, cost,
 		p.ProcessMs/1000, p.AIMs/1000,
 		p.RegInputTokens, p.RegOutputTokens,
 		p.CacheInTokens, p.CacheOutTokens))

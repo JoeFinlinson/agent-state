@@ -1969,8 +1969,13 @@ func recordRunMetrics(cfg *config.Config, itemID string, result ItemResult) {
 		if sr.Type != "claude" {
 			continue
 		}
-		// Skip no-op records (e.g. parser failure with no tokens)
-		if sr.CostUSD == 0 && sr.InputTokens == 0 && sr.OutputTokens == 0 {
+		// Skip no-op records (e.g. parser failure with no tokens). Check the
+		// same separated fields the payload ships — keeps the guard aligned
+		// with payload semantics and avoids any coupling to the legacy
+		// combined InputTokens.
+		if sr.CostUSD == 0 &&
+			sr.RegInputTokens == 0 && sr.OutputTokens == 0 &&
+			sr.CacheInTokens == 0 && sr.CacheOutTokens == 0 {
 			continue
 		}
 		payload := SessionLogPayload{

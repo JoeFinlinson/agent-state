@@ -3,6 +3,7 @@ package command
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -186,7 +187,7 @@ func configuredRepos(cfg *config.Config) []string {
 	return nil
 }
 
-func renderFilesHuman(w *os.File, res FilesResult) {
+func renderFilesHuman(w io.Writer, res FilesResult) {
 	for _, rollup := range res.Repos {
 		filesInRepo := []FileChange{}
 		for _, f := range res.Files {
@@ -205,6 +206,13 @@ func renderFilesHuman(w *os.File, res FilesResult) {
 		}
 	}
 
+	// Print warnings BEFORE the totals / zero-change bail. Warnings explain
+	// why repos show zero changes (e.g. every merge-base failed), and must
+	// always be visible to the operator.
+	for _, warn := range res.Warnings {
+		fmt.Fprintf(w, "warning: %s\n", warn)
+	}
+
 	if len(res.Repos) == 0 || res.Totals.Files == 0 {
 		fmt.Fprintln(w, "No file changes across configured repos.")
 		return
@@ -215,10 +223,6 @@ func renderFilesHuman(w *os.File, res FilesResult) {
 	fmt.Fprintf(w, "  +%d added\n", res.Totals.Added)
 	fmt.Fprintf(w, "  -%d removed\n", res.Totals.Removed)
 	fmt.Fprintf(w, "  %+d net\n", res.Totals.Net)
-
-	for _, warn := range res.Warnings {
-		fmt.Fprintf(w, "warning: %s\n", warn)
-	}
 }
 
 func countRepoWithFiles(repos []RepoRollup) int {
