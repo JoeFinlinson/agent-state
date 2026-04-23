@@ -325,11 +325,13 @@ func freezeLOCSnapshot(s *store.Store, cfg *config.Config, item *modelItemRef, o
 		}
 	}
 
-	// Per-file detail under work_tracking.files_changed
+	// Per-file detail under time_tracking.files_changed. Kept under
+	// time_tracking (not work_tracking) so migration's canonical emitter
+	// preserves it — emitWorkTracking strips unknown nested keys.
 	for _, f := range res.Files {
 		line := fmt.Sprintf("%s %s %s +%d -%d (%+d) [%s]",
 			f.Repo, f.Action, f.Path, f.Added, f.Removed, f.Net, f.Type)
-		appendListField(item, "work_tracking", "files_changed", line)
+		appendListField(item, "time_tracking", "files_changed", line)
 	}
 
 	for _, w := range res.Warnings {

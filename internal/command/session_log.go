@@ -169,7 +169,7 @@ func SessionLog(s *store.Store, cfg *config.Config, payload SessionLogPayload) i
 	setNestedField(item, "time_tracking", "last_touched_by", toucher)
 
 	// Append per-turn provenance line
-	appendListField(item, "work_tracking", "ai_turns", formatAITurnLine(payload, cost, now))
+	appendListField(item, "time_tracking", "ai_turns", formatAITurnLine(payload, cost, now))
 
 	// Upsert per-model aggregate (one line per model under work_tracking.by_model)
 	if payload.Model != "" {
@@ -209,10 +209,10 @@ func upsertByModel(item *model.Item, p SessionLogPayload, cost float64) {
 	line := formatByModelLine(p.Model, existing)
 
 	// Try to update in place; if not found, append.
-	if !updateListLine(item, "work_tracking", "by_model",
+	if !updateListLine(item, "time_tracking", "by_model",
 		func(raw string) bool { return byModelLineMatches(raw, p.Model) },
 		line) {
-		appendListField(item, "work_tracking", "by_model", line)
+		appendListField(item, "time_tracking", "by_model", line)
 	}
 }
 
@@ -225,7 +225,7 @@ func formatByModelLine(model string, a byModelAggregate) string {
 		model, a.Turns, a.RegIn, a.RegOut, a.CacheIn, a.CacheOut, a.Cost)
 }
 
-// readByModel walks work_tracking.by_model and returns the aggregate for model,
+// readByModel walks time_tracking.by_model and returns the aggregate for model,
 // or the zero value if not present.
 func readByModel(item *model.Item, modelID string) byModelAggregate {
 	var out byModelAggregate
@@ -236,7 +236,7 @@ func readByModel(item *model.Item, modelID string) byModelAggregate {
 	inBlock := false
 	for _, line := range item.Doc.Lines {
 		if line.Indent == 0 && line.Key != "" {
-			inWT = line.Key == "work_tracking"
+			inWT = line.Key == "time_tracking"
 			inBlock = false
 			continue
 		}
@@ -383,7 +383,7 @@ func formatAITurnLine(p SessionLogPayload, cost float64, at string) string {
 	return sb.String()
 }
 
-// seenSessionIDs walks work_tracking.ai_turns entries in the item's Doc and
+// seenSessionIDs walks time_tracking.ai_turns entries in the item's Doc and
 // returns the set of distinct session ids observed. Used to decide whether
 // session_count should increment on a new payload.
 func seenSessionIDs(item *model.Item) map[string]bool {
@@ -391,15 +391,15 @@ func seenSessionIDs(item *model.Item) map[string]bool {
 	if item == nil || item.Doc == nil {
 		return seen
 	}
-	inWorkTracking := false
+	inTimeTracking := false
 	inAITurns := false
 	for _, line := range item.Doc.Lines {
 		if line.Indent == 0 && line.Key != "" {
-			inWorkTracking = line.Key == "work_tracking"
+			inTimeTracking = line.Key == "time_tracking"
 			inAITurns = false
 			continue
 		}
-		if !inWorkTracking {
+		if !inTimeTracking {
 			continue
 		}
 		if line.Indent == 2 && line.Key == "ai_turns" {
