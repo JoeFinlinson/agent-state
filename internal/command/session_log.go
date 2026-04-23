@@ -171,11 +171,191 @@ func SessionLog(s *store.Store, cfg *config.Config, payload SessionLogPayload) i
 	// Append per-turn provenance line
 	appendListField(item, "work_tracking", "ai_turns", formatAITurnLine(payload, cost, now))
 
+	// Upsert per-model aggregate (one line per model under work_tracking.by_model)
+	if payload.Model != "" {
+		upsertByModel(item, payload, cost)
+	}
+
 	if err := s.Write(item); err != nil {
 		fmt.Fprintf(os.Stderr, "session log: writing %s: %v\n", itemID, err)
 		return 1
 	}
 	return 0
+}
+
+// byModelAggregate captures per-model running totals. Values are parsed from
+// and written to the work_tracking.by_model line list, one line per model.
+type byModelAggregate struct {
+	Turns    int
+	RegIn    int
+	RegOut   int
+	CacheIn  int
+	CacheOut int
+	Cost     float64
+}
+
+// upsertByModel finds the existing line for payload.Model under
+// work_tracking.by_model (if any), adds the payload's deltas, and writes the
+// updated line back. If no line exists, it appends a new one.
+func upsertByModel(item *model.Item, p SessionLogPayload, cost float64) {
+	existing := readByModel(item, p.Model)
+	existing.Turns++
+	existing.RegIn += p.RegInputTokens
+	existing.RegOut += p.RegOutputTokens
+	existing.CacheIn += p.CacheInTokens
+	existing.CacheOut += p.CacheOutTokens
+	existing.Cost += cost
+
+	line := formatByModelLine(p.Model, existing)
+
+	// Try to update in place; if not found, append.
+	if !updateListLine(item, "work_tracking", "by_model",
+		func(raw string) bool { return byModelLineMatches(raw, p.Model) },
+		line) {
+		appendListField(item, "work_tracking", "by_model", line)
+	}
+}
+
+// formatByModelLine produces a stable, grep-friendly representation.
+// Format: "<model>: turns=N reg_in=N reg_out=N cache_in=N cache_out=N cost=$N.NNNNNN"
+// 6-decimal cost precision keeps round-trip accumulation drift under $0.000001
+// per turn — safe even across thousands of turns on cheap models.
+func formatByModelLine(model string, a byModelAggregate) string {
+	return fmt.Sprintf("%s: turns=%d reg_in=%d reg_out=%d cache_in=%d cache_out=%d cost=$%.6f",
+		model, a.Turns, a.RegIn, a.RegOut, a.CacheIn, a.CacheOut, a.Cost)
+}
+
+// readByModel walks work_tracking.by_model and returns the aggregate for model,
+// or the zero value if not present.
+func readByModel(item *model.Item, modelID string) byModelAggregate {
+	var out byModelAggregate
+	if item == nil || item.Doc == nil {
+		return out
+	}
+	inWT := false
+	inBlock := false
+	for _, line := range item.Doc.Lines {
+		if line.Indent == 0 && line.Key != "" {
+			inWT = line.Key == "work_tracking"
+			inBlock = false
+			continue
+		}
+		if !inWT {
+			continue
+		}
+		if line.Indent == 2 && line.Key == "by_model" {
+			inBlock = true
+			continue
+		}
+		if line.Indent <= 2 && line.Key != "" && line.Key != "by_model" {
+			inBlock = false
+			continue
+		}
+		if !inBlock {
+			continue
+		}
+		trimmed := strings.TrimSpace(line.Raw)
+		if !strings.HasPrefix(trimmed, "- ") {
+			continue
+		}
+		entry := strings.TrimPrefix(trimmed, "- ")
+		if !byModelLineMatches(entry, modelID) {
+			continue
+		}
+		out = parseByModelLine(entry)
+		return out
+	}
+	return out
+}
+
+// byModelLineMatches returns true if the by_model list entry (already stripped
+// of the "- " prefix, or still with it) starts with "<model>:".
+func byModelLineMatches(raw, model string) bool {
+	trimmed := strings.TrimSpace(raw)
+	trimmed = strings.TrimPrefix(trimmed, "- ")
+	// Up to the first colon is the model id
+	if idx := strings.Index(trimmed, ":"); idx >= 0 {
+		return trimmed[:idx] == model
+	}
+	return false
+}
+
+// parseByModelLine parses a "model: turns=N reg_in=N ..." line back into an
+// aggregate. Missing fields stay at zero.
+func parseByModelLine(entry string) byModelAggregate {
+	var a byModelAggregate
+	colon := strings.Index(entry, ":")
+	if colon < 0 {
+		return a
+	}
+	rest := strings.TrimSpace(entry[colon+1:])
+	for _, tok := range strings.Fields(rest) {
+		eq := strings.Index(tok, "=")
+		if eq < 0 {
+			continue
+		}
+		key := tok[:eq]
+		val := tok[eq+1:]
+		switch key {
+		case "turns":
+			fmt.Sscanf(val, "%d", &a.Turns)
+		case "reg_in":
+			fmt.Sscanf(val, "%d", &a.RegIn)
+		case "reg_out":
+			fmt.Sscanf(val, "%d", &a.RegOut)
+		case "cache_in":
+			fmt.Sscanf(val, "%d", &a.CacheIn)
+		case "cache_out":
+			fmt.Sscanf(val, "%d", &a.CacheOut)
+		case "cost":
+			v := strings.TrimPrefix(val, "$")
+			fmt.Sscanf(v, "%f", &a.Cost)
+		}
+	}
+	return a
+}
+
+// updateListLine finds the first list entry under parent.key whose raw payload
+// (after the "- " prefix) is matched by `match`, and replaces it with newVal.
+// Returns true if a line was updated. Format written: "  - <newVal>".
+func updateListLine(item *model.Item, parent, key string, match func(raw string) bool, newVal string) bool {
+	if item == nil || item.Doc == nil {
+		return false
+	}
+	parentIdx := -1
+	keyIdx := -1
+	for i, line := range item.Doc.Lines {
+		if line.Indent == 0 && line.Key == parent {
+			parentIdx = i
+			continue
+		}
+		if parentIdx < 0 {
+			continue
+		}
+		if line.Indent == 0 && line.Key != "" && line.Key != parent {
+			break
+		}
+		if line.Indent == 2 && line.Key == key {
+			keyIdx = i
+			continue
+		}
+		if keyIdx < 0 {
+			continue
+		}
+		if line.Indent < 4 && line.Key != "" && line.Key != key {
+			break
+		}
+		trimmed := strings.TrimSpace(line.Raw)
+		if !strings.HasPrefix(trimmed, "- ") {
+			continue
+		}
+		payload := strings.TrimPrefix(trimmed, "- ")
+		if match(payload) {
+			item.Doc.Lines[i].Raw = fmt.Sprintf("  - %s", newVal)
+			return true
+		}
+	}
+	return false
 }
 
 // formatAITurnLine produces the provenance line appended to work_tracking.ai_turns.

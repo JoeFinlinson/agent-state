@@ -209,6 +209,115 @@ func TestSessionLog_AppendsAITurnLine(t *testing.T) {
 	_ = item
 }
 
+func TestSessionLog_ByModel_SingleModel(t *testing.T) {
+	env := testutil.NewEnv(t)
+	SaveStack(env.Cfg, []StackEntry{{ID: "T-003"}})
+
+	for i := 0; i < 3; i++ {
+		SessionLog(env.S, env.Cfg, SessionLogPayload{
+			SessionID: "s", Model: "claude-opus-4-7",
+			RegInputTokens: 1000, RegOutputTokens: 500,
+			CacheInTokens: 100, CacheOutTokens: 50,
+		})
+	}
+
+	env.Reload(t)
+	item, _ := env.S.Get("T-003")
+	agg := readByModel(item, "claude-opus-4-7")
+	if agg.Turns != 3 {
+		t.Errorf("opus turns = %d, want 3", agg.Turns)
+	}
+	if agg.RegIn != 3000 {
+		t.Errorf("opus reg_in = %d, want 3000", agg.RegIn)
+	}
+	if agg.RegOut != 1500 {
+		t.Errorf("opus reg_out = %d, want 1500", agg.RegOut)
+	}
+	if agg.CacheIn != 300 {
+		t.Errorf("opus cache_in = %d, want 300", agg.CacheIn)
+	}
+	if agg.CacheOut != 150 {
+		t.Errorf("opus cache_out = %d, want 150", agg.CacheOut)
+	}
+	// 1000*5 + 500*25 + 100*0.5 + 50*6.25 = 5000 + 12500 + 50 + 312.5 = 17862.5
+	// per MTok, so /1M = 0.0178625, then × 3 turns = 0.0535875
+	wantCost := 0.0535875
+	if diff := abs(agg.Cost - wantCost); diff > 1e-4 {
+		t.Errorf("opus cost = %.6f, want %.6f", agg.Cost, wantCost)
+	}
+}
+
+func TestSessionLog_ByModel_MultipleModels(t *testing.T) {
+	env := testutil.NewEnv(t)
+	SaveStack(env.Cfg, []StackEntry{{ID: "T-003"}})
+
+	SessionLog(env.S, env.Cfg, SessionLogPayload{
+		SessionID: "s", Model: "claude-opus-4-7",
+		RegInputTokens: 1000, RegOutputTokens: 500,
+	})
+	SessionLog(env.S, env.Cfg, SessionLogPayload{
+		SessionID: "s", Model: "claude-haiku-4-5",
+		RegInputTokens: 10_000, RegOutputTokens: 5_000,
+	})
+	SessionLog(env.S, env.Cfg, SessionLogPayload{
+		SessionID: "s", Model: "claude-opus-4-7",
+		RegInputTokens: 2000, RegOutputTokens: 1000,
+	})
+
+	env.Reload(t)
+	item, _ := env.S.Get("T-003")
+
+	opus := readByModel(item, "claude-opus-4-7")
+	haiku := readByModel(item, "claude-haiku-4-5")
+
+	if opus.Turns != 2 {
+		t.Errorf("opus turns = %d, want 2", opus.Turns)
+	}
+	if opus.RegIn != 3000 {
+		t.Errorf("opus reg_in = %d, want 3000", opus.RegIn)
+	}
+	if haiku.Turns != 1 {
+		t.Errorf("haiku turns = %d, want 1", haiku.Turns)
+	}
+	if haiku.RegIn != 10_000 {
+		t.Errorf("haiku reg_in = %d, want 10000", haiku.RegIn)
+	}
+
+	// Aggregate turn_count on time_tracking equals sum of by_model turns
+	totalTurns := readIntField(item, "time_tracking", "turn_count")
+	if totalTurns != opus.Turns+haiku.Turns {
+		t.Errorf("turn_count %d != opus(%d) + haiku(%d)", totalTurns, opus.Turns, haiku.Turns)
+	}
+
+	// Sanity: item's cumulative cost equals sum of per-model costs
+	totalCost := readFloatField(item, "time_tracking", "ai_cost_usd")
+	if abs(totalCost-(opus.Cost+haiku.Cost)) > 1e-4 {
+		t.Errorf("ai_cost_usd %.6f != opus(%.6f) + haiku(%.6f)",
+			totalCost, opus.Cost, haiku.Cost)
+	}
+}
+
+func TestSessionLog_ByModel_UnknownModelRecorded(t *testing.T) {
+	env := testutil.NewEnv(t)
+	SaveStack(env.Cfg, []StackEntry{{ID: "T-003"}})
+
+	SessionLog(env.S, env.Cfg, SessionLogPayload{
+		SessionID: "s", Model: "claude-future-99-0",
+		RegInputTokens: 500, RegOutputTokens: 100,
+	})
+
+	env.Reload(t)
+	item, _ := env.S.Get("T-003")
+	agg := readByModel(item, "claude-future-99-0")
+	// Tokens tracked even though cost couldn't be computed
+	if agg.Turns != 1 || agg.RegIn != 500 || agg.RegOut != 100 {
+		t.Errorf("unknown model aggregate missing tokens: %+v", agg)
+	}
+	if agg.Cost != 0 {
+		t.Errorf("unknown model cost should be 0, got %.4f", agg.Cost)
+	}
+}
+
 func TestSessionLog_NestingInvariant(t *testing.T) {
 	env := testutil.NewEnv(t)
 	SaveStack(env.Cfg, []StackEntry{{ID: "T-003"}})

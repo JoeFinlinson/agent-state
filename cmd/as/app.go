@@ -911,6 +911,18 @@ implement step during st run.`,
 	})
 	root.AddCommand(queueCmd)
 
+	filesCmd := &cobra.Command{
+		Use:   "files <id>",
+		Short: "Show live file changes across item worktrees (diff from origin/main merge-base)",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			jsonF, _ := cmd.Flags().GetBool("json")
+			exitCode = command.Files(appStore, appCfg, args[0], command.FilesOpts{JSON: jsonF})
+		},
+	}
+	filesCmd.Flags().Bool("json", false, "output as JSON")
+	root.AddCommand(filesCmd)
+
 	sessionCmd := &cobra.Command{
 		Use:   "session",
 		Short: "Manage session metrics",
