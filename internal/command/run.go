@@ -1189,6 +1189,9 @@ func Run(s *store.Store, cfg *config.Config, sprintID string, opts RunOpts, engi
 	// Ensure AWS credentials are valid (for evidence uploads)
 	ensureAWSCredentials(cfg)
 
+	// Ensure git hooks are active on all configured repos
+	ensureHooksPath(cfg)
+
 	// Recover items left in broken state from previous failed runs
 	recoverStaleItems(s, cfg, sp.Items)
 
@@ -4437,6 +4440,58 @@ func detectMergedPR(cfg *config.Config, itemID string, item *model.Item) bool {
 // (deploy verification, smoke, UAT, approval) instead of being force-closed.
 
 // ensureAWSCredentials checks if AWS credentials are valid and runs SSO login if needed.
+
+// ensureHooksPath sets core.hooksPath on all configured repos so that
+// tracked hooks (pre-commit, pre-push) are active. Idempotent — no-op
+// if already set. Runs on st run startup and st start.
+func ensureHooksPath(cfg *config.Config) {
+	wt := cfg.Worktree
+	if wt == nil || len(wt.Repos) == 0 {
+		return
+	}
+
+	parentDir := wt.ParentDir
+	if parentDir == "" {
+		parentDir = cfg.Root()
+	}
+	if !filepath.IsAbs(parentDir) {
+		parentDir = filepath.Join(cfg.Root(), parentDir)
+	}
+
+	for _, repoShort := range wt.Repos {
+		repoDir := wt.RepoMap[repoShort]
+		if repoDir == "" {
+			repoDir = repoShort
+		}
+		mainRepoPath := filepath.Join(parentDir, repoDir)
+
+		// Check if scripts/hooks/ exists in the repo
+		hooksDir := filepath.Join(mainRepoPath, "scripts", "hooks")
+		if _, err := os.Stat(hooksDir); err != nil {
+			// Check for .husky/ (web repos)
+			huskyDir := filepath.Join(mainRepoPath, ".husky")
+			if _, err := os.Stat(huskyDir); err != nil {
+				continue // no tracked hooks dir
+			}
+			// Husky manages its own core.hooksPath via npm install
+			continue
+		}
+
+		// Set core.hooksPath if not already pointing to scripts/hooks
+		cmd := exec.Command("git", "-C", mainRepoPath, "config", "core.hooksPath")
+		out, _ := cmd.Output()
+		current := strings.TrimSpace(string(out))
+		if current == "scripts/hooks" || strings.HasSuffix(current, "/scripts/hooks") {
+			continue // already set
+		}
+
+		setCmd := exec.Command("git", "-C", mainRepoPath, "config", "core.hooksPath", "scripts/hooks")
+		if err := setCmd.Run(); err == nil {
+			fmt.Printf("  [hooks] set core.hooksPath on %s\n", repoDir)
+		}
+	}
+}
+
 func ensureAWSCredentials(cfg *config.Config) {
 	if cfg.Evidence == nil || cfg.Evidence.Backend != "s3" {
 		return

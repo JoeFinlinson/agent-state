@@ -70,6 +70,9 @@ func Start(s *store.Store, cfg *config.Config, id string, opts StartOpts) int {
 		_ = mgr.RemoveClaim(item.ClaimedBy, id)
 	}
 
+	// Ensure git hooks are active on all configured repos
+	ensureHooksPath(cfg)
+
 	// Create worktrees if configured
 	if cfg.Worktree != nil && cfg.Worktree.Enabled {
 		if opts.Slug == "" {
