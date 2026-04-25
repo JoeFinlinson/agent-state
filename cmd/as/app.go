@@ -432,14 +432,16 @@ context for LLM agents. Works standalone or with CI/hooks.`,
 			run, _ := cmd.Flags().GetBool("run")
 			cov, _ := cmd.Flags().GetBool("coverage")
 			skip, _ := cmd.Flags().GetString("skip")
+			agent, _ := cmd.Flags().GetString("agent")
 			exitCode = command.TestRecord(appStore, appCfg, args[0], args[1], command.TestRecordOpts{
-				Run: run, Coverage: cov, Skip: skip,
+				Run: run, Coverage: cov, Skip: skip, Agent: agent,
 			})
 		},
 	}
 	testRecordCmd.Flags().Bool("run", false, "execute the suite command and capture evidence")
 	testRecordCmd.Flags().Bool("coverage", false, "enforce per-file coverage thresholds (requires --run)")
 	testRecordCmd.Flags().String("skip", "", "mark a scope suite as intentionally skipped with the given reason (scope suites only)")
+	testRecordCmd.Flags().String("agent", "", "agent workspace/runtime to target when executing a suite")
 	root.AddCommand(testRecordCmd)
 
 	editCmd := &cobra.Command{
