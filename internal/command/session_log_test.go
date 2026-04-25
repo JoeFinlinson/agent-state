@@ -160,6 +160,64 @@ func TestSessionLog_UnknownModelRecordsTokensNoCost(t *testing.T) {
 	if cost != 0 {
 		t.Errorf("unknown model cost should be 0, got %.4f", cost)
 	}
+	assertString(t, item, "time_tracking", "last_cost_source", CostSourceUnknown)
+	assertInt(t, item, "time_tracking", "unknown_cost_turns", 1)
+}
+
+func TestSessionLog_OpenAIUnknownCostIsExplicit(t *testing.T) {
+	env := testutil.NewEnv(t)
+	SaveStack(env.Cfg, []StackEntry{{ID: "T-003"}})
+
+	p := sessionLogPayloadFromUsage(AIUsage{
+		Provider:        AIProviderOpenAI,
+		SessionID:       "codex-session",
+		ResponseID:      "resp_123",
+		Model:           "gpt-5.2",
+		Step:            "implement",
+		ProcessMs:       11_000,
+		AIMs:            10_000,
+		RegInputTokens:  800,
+		CachedInTokens:  400,
+		RegOutputTokens: 300,
+		ReasoningTokens: 75,
+		TotalTokens:     1500,
+		CostSource:      CostSourceUnknown,
+	}, "")
+	if code := SessionLog(env.S, env.Cfg, p); code != 0 {
+		t.Fatalf("SessionLog exit=%d", code)
+	}
+
+	env.Reload(t)
+	item, _ := env.S.Get("T-003")
+	assertString(t, item, "time_tracking", "last_provider", AIProviderOpenAI)
+	assertString(t, item, "time_tracking", "last_model", "gpt-5.2")
+	assertString(t, item, "time_tracking", "last_cost_source", CostSourceUnknown)
+	assertInt(t, item, "time_tracking", "reg_input_tokens", 800)
+	assertInt(t, item, "time_tracking", "cache_in_tokens", 400)
+	assertInt(t, item, "time_tracking", "reasoning_tokens", 75)
+	assertInt(t, item, "time_tracking", "total_tokens", 1500)
+	assertInt(t, item, "time_tracking", "unknown_cost_turns", 1)
+
+	raw, err := os.ReadFile(filepath.Join(env.Root, "tasks", "T-003-active.md"))
+	if err != nil {
+		t.Fatalf("read item: %v", err)
+	}
+	s := string(raw)
+	for _, needle := range []string{
+		"provider:openai",
+		"response:resp_123",
+		"model:gpt-5.2",
+		"cost:unknown",
+		"cost_source:unknown",
+		"reasoning:75",
+		"total:1500",
+		"openai/gpt-5.2:",
+		"unknown_cost_turns=1",
+	} {
+		if !strings.Contains(s, needle) {
+			t.Errorf("OpenAI session log missing %q. File:\n%s", needle, s)
+		}
+	}
 }
 
 func TestSessionLog_PayloadCostOverridesComputed(t *testing.T) {

@@ -99,6 +99,11 @@ type StepResult struct {
 	RegInputTokens  int    `json:"reg_input_tokens,omitempty"`
 	CacheInTokens   int    `json:"cache_in_tokens,omitempty"`  // cache reads
 	CacheOutTokens  int    `json:"cache_out_tokens,omitempty"` // cache writes
+	ReasoningTokens int    `json:"reasoning_tokens,omitempty"`
+	TotalTokens     int    `json:"total_tokens,omitempty"`
+	Provider        string `json:"provider,omitempty"`
+	ResponseID      string `json:"response_id,omitempty"`
+	CostSource      string `json:"cost_source,omitempty"`
 	Model           string `json:"model,omitempty"`
 	ClaudeSessionID string `json:"claude_session_id,omitempty"`
 }
@@ -642,7 +647,11 @@ func RunStatus(s *store.Store, cfg *config.Config, opts RunStatusOpts) int {
 				stStr := ""
 				var stDur time.Duration
 				if tt := item.TimeTracking; tt != nil {
-					if raw, ok := tt["run_wall_seconds"]; ok {
+					raw, ok := tt["process_time_seconds"]
+					if !ok {
+						raw, ok = tt["run_wall_seconds"]
+					}
+					if ok {
 						var secs float64
 						switch v := raw.(type) {
 						case float64:
@@ -663,7 +672,11 @@ func RunStatus(s *store.Store, cfg *config.Config, opts RunStatusOpts) int {
 				aiStr := ""
 				var aiDur time.Duration
 				if tt := item.TimeTracking; tt != nil {
-					if aiRaw, ok := tt["ai_duration_seconds"]; ok {
+					aiRaw, ok := tt["ai_time_seconds"]
+					if !ok {
+						aiRaw, ok = tt["ai_duration_seconds"]
+					}
+					if ok {
 						var secs float64
 						switch v := aiRaw.(type) {
 						case float64:
@@ -698,26 +711,40 @@ func RunStatus(s *store.Store, cfg *config.Config, opts RunStatusOpts) int {
 				}
 
 				// Token counts
-				var itemInTok, itemOutTok int
+				itemInTok := readIntField(item, "time_tracking", "total_input_tokens")
+				if itemInTok == 0 {
+					itemInTok = readIntField(item, "time_tracking", "reg_input_tokens") +
+						readIntField(item, "time_tracking", "cache_in_tokens") +
+						readIntField(item, "time_tracking", "cache_out_tokens") +
+						readIntField(item, "time_tracking", "cache_out_1h_tokens")
+				}
+				itemOutTok := readIntField(item, "time_tracking", "total_output_tokens")
+				if itemOutTok == 0 {
+					itemOutTok = readIntField(item, "time_tracking", "reg_output_tokens")
+				}
 				if tt := item.TimeTracking; tt != nil {
-					if raw, ok := tt["input_tokens"]; ok {
-						switch v := raw.(type) {
-						case float64:
-							itemInTok = int(v)
-						case int:
-							itemInTok = v
-						case string:
-							fmt.Sscanf(v, "%d", &itemInTok)
+					if itemInTok == 0 {
+						if raw, ok := tt["input_tokens"]; ok {
+							switch v := raw.(type) {
+							case float64:
+								itemInTok = int(v)
+							case int:
+								itemInTok = v
+							case string:
+								fmt.Sscanf(v, "%d", &itemInTok)
+							}
 						}
 					}
-					if raw, ok := tt["output_tokens"]; ok {
-						switch v := raw.(type) {
-						case float64:
-							itemOutTok = int(v)
-						case int:
-							itemOutTok = v
-						case string:
-							fmt.Sscanf(v, "%d", &itemOutTok)
+					if itemOutTok == 0 {
+						if raw, ok := tt["output_tokens"]; ok {
+							switch v := raw.(type) {
+							case float64:
+								itemOutTok = int(v)
+							case int:
+								itemOutTok = v
+							case string:
+								fmt.Sscanf(v, "%d", &itemOutTok)
+							}
 						}
 					}
 				}
@@ -911,7 +938,11 @@ func RunStatus(s *store.Store, cfg *config.Config, opts RunStatusOpts) int {
 			}
 			stStr := ""
 			if tt := item.TimeTracking; tt != nil {
-				if raw, ok := tt["run_wall_seconds"]; ok {
+				raw, ok := tt["process_time_seconds"]
+				if !ok {
+					raw, ok = tt["run_wall_seconds"]
+				}
+				if ok {
 					var secs float64
 					switch v := raw.(type) {
 					case float64:
@@ -926,7 +957,11 @@ func RunStatus(s *store.Store, cfg *config.Config, opts RunStatusOpts) int {
 			}
 			aiStr := ""
 			if tt := item.TimeTracking; tt != nil {
-				if raw, ok := tt["ai_duration_seconds"]; ok {
+				raw, ok := tt["ai_time_seconds"]
+				if !ok {
+					raw, ok = tt["ai_duration_seconds"]
+				}
+				if ok {
 					var secs float64
 					switch v := raw.(type) {
 					case float64:
@@ -965,31 +1000,45 @@ func RunStatus(s *store.Store, cfg *config.Config, opts RunStatusOpts) int {
 				title = title[:77] + "..."
 			}
 			tokStr := ""
+			inTok := readIntField(item, "time_tracking", "total_input_tokens")
+			if inTok == 0 {
+				inTok = readIntField(item, "time_tracking", "reg_input_tokens") +
+					readIntField(item, "time_tracking", "cache_in_tokens") +
+					readIntField(item, "time_tracking", "cache_out_tokens") +
+					readIntField(item, "time_tracking", "cache_out_1h_tokens")
+			}
+			outTok := readIntField(item, "time_tracking", "total_output_tokens")
+			if outTok == 0 {
+				outTok = readIntField(item, "time_tracking", "reg_output_tokens")
+			}
 			if tt := item.TimeTracking; tt != nil {
-				var inTok, outTok int
-				if raw, ok := tt["input_tokens"]; ok {
-					switch v := raw.(type) {
-					case float64:
-						inTok = int(v)
-					case int:
-						inTok = v
-					case string:
-						fmt.Sscanf(v, "%d", &inTok)
+				if inTok == 0 {
+					if raw, ok := tt["input_tokens"]; ok {
+						switch v := raw.(type) {
+						case float64:
+							inTok = int(v)
+						case int:
+							inTok = v
+						case string:
+							fmt.Sscanf(v, "%d", &inTok)
+						}
 					}
 				}
-				if raw, ok := tt["output_tokens"]; ok {
-					switch v := raw.(type) {
-					case float64:
-						outTok = int(v)
-					case int:
-						outTok = v
-					case string:
-						fmt.Sscanf(v, "%d", &outTok)
+				if outTok == 0 {
+					if raw, ok := tt["output_tokens"]; ok {
+						switch v := raw.(type) {
+						case float64:
+							outTok = int(v)
+						case int:
+							outTok = v
+						case string:
+							fmt.Sscanf(v, "%d", &outTok)
+						}
 					}
 				}
-				if inTok > 0 || outTok > 0 {
-					tokStr = fmt.Sprintf("%s/%s/%s", formatTokens(inTok), formatTokens(outTok), formatTokens(inTok+outTok))
-				}
+			}
+			if inTok > 0 || outTok > 0 {
+				tokStr = fmt.Sprintf("%s/%s/%s", formatTokens(inTok), formatTokens(outTok), formatTokens(inTok+outTok))
 			}
 
 			locStr := ""
@@ -1982,7 +2031,9 @@ func recordRunMetrics(cfg *config.Config, itemID string, result ItemResult) {
 			continue
 		}
 		payload := SessionLogPayload{
+			Provider:        sr.Provider,
 			SessionID:       sr.ClaudeSessionID,
+			ResponseID:      sr.ResponseID,
 			Model:           sr.Model,
 			ProcessMs:       sr.Duration.Milliseconds(),
 			AIMs:            sr.AIDurationMs,
@@ -1990,7 +2041,10 @@ func recordRunMetrics(cfg *config.Config, itemID string, result ItemResult) {
 			RegOutputTokens: sr.OutputTokens,
 			CacheInTokens:   sr.CacheInTokens,
 			CacheOutTokens:  sr.CacheOutTokens,
-			CostUSD:         sr.CostUSD, // trusted from Claude envelope
+			ReasoningTokens: sr.ReasoningTokens,
+			TotalTokens:     sr.TotalTokens,
+			CostUSD:         sr.CostUSD,
+			CostSource:      sr.CostSource,
 			ItemID:          itemID,
 			Step:            sr.Step,
 		}
@@ -2137,15 +2191,12 @@ func executeClaude(s *store.Store, cfg *config.Config, itemID, sprintID string, 
 		return sr
 	}
 
-	sr.CostUSD = claudeResult.TotalCostUSD
-	sr.AIDurationMs = claudeResult.DurationMs
-	sr.RegInputTokens = claudeResult.Usage.InputTokens
-	sr.CacheInTokens = claudeResult.Usage.CacheReadInputTokens
-	sr.CacheOutTokens = claudeResult.Usage.CacheCreationInputTokens
-	sr.InputTokens = sr.RegInputTokens + sr.CacheInTokens + sr.CacheOutTokens // legacy combined
-	sr.OutputTokens = claudeResult.Usage.OutputTokens
-	sr.ClaudeSessionID = claudeResult.SessionID
-	sr.Model = resolveStepModel(cfg, opts)
+	applyUsageToStepResult(&sr, usageFromClaudeResult(claudeResult, UsageMeta{
+		Model:     resolveStepModel(cfg, opts),
+		SessionID: sessionID,
+		Step:      step.Name(),
+		ProcessMs: sr.Duration.Milliseconds(),
+	}))
 	sr.Output = truncate(claudeResult.Result, 500)
 	sr.FullOutput = claudeResult.Result
 
@@ -2181,15 +2232,12 @@ func executeClaude(s *store.Store, cfg *config.Config, itemID, sprintID string, 
 						sr.Output = truncate(string(output2), 500)
 						return sr
 					}
-					sr.CostUSD = cr2.TotalCostUSD
-					sr.AIDurationMs = cr2.DurationMs
-					sr.RegInputTokens = cr2.Usage.InputTokens
-					sr.CacheInTokens = cr2.Usage.CacheReadInputTokens
-					sr.CacheOutTokens = cr2.Usage.CacheCreationInputTokens
-					sr.InputTokens = sr.RegInputTokens + sr.CacheInTokens + sr.CacheOutTokens // legacy combined
-					sr.OutputTokens = cr2.Usage.OutputTokens
-					sr.ClaudeSessionID = cr2.SessionID
-					sr.Model = resolveStepModel(cfg, opts)
+					applyUsageToStepResult(&sr, usageFromClaudeResult(cr2, UsageMeta{
+						Model:     resolveStepModel(cfg, opts),
+						SessionID: newSessionID,
+						Step:      step.Name(),
+						ProcessMs: sr.Duration.Milliseconds(),
+					}))
 					sr.Output = truncate(cr2.Result, 500)
 					sr.FullOutput = cr2.Result
 					if exitCode2 == 0 && (cr2.Subtype == "" || cr2.Subtype == "success") {
@@ -5906,12 +5954,20 @@ func printCompletionReport(results []ItemResult, sprintID string, totalDuration 
 			}
 
 			// Accumulated totals from time_tracking
-			if v, ok := getNestedField(item, "time_tracking", "run_wall_seconds"); ok {
+			if v, ok := getNestedField(item, "time_tracking", "process_time_seconds"); ok {
+				var secs int
+				fmt.Sscanf(v, "%d", &secs)
+				totalWall = time.Duration(secs) * time.Second
+			} else if v, ok := getNestedField(item, "time_tracking", "run_wall_seconds"); ok {
 				var secs int
 				fmt.Sscanf(v, "%d", &secs)
 				totalWall = time.Duration(secs) * time.Second
 			}
-			if v, ok := getNestedField(item, "time_tracking", "ai_duration_seconds"); ok {
+			if v, ok := getNestedField(item, "time_tracking", "ai_time_seconds"); ok {
+				var secs int
+				fmt.Sscanf(v, "%d", &secs)
+				totalAI = time.Duration(secs) * time.Second
+			} else if v, ok := getNestedField(item, "time_tracking", "ai_duration_seconds"); ok {
 				var secs int
 				fmt.Sscanf(v, "%d", &secs)
 				totalAI = time.Duration(secs) * time.Second
@@ -5919,11 +5975,28 @@ func printCompletionReport(results []ItemResult, sprintID string, totalDuration 
 			if v, ok := getNestedField(item, "time_tracking", "ai_cost_usd"); ok {
 				fmt.Sscanf(v, "%f", &totalCostItem)
 			}
-			if v, ok := getNestedField(item, "time_tracking", "input_tokens"); ok {
+			if v, ok := getNestedField(item, "time_tracking", "total_input_tokens"); ok {
 				fmt.Sscanf(v, "%d", &itemInTok)
+			} else {
+				itemInTok = readIntField(item, "time_tracking", "reg_input_tokens") +
+					readIntField(item, "time_tracking", "cache_in_tokens") +
+					readIntField(item, "time_tracking", "cache_out_tokens") +
+					readIntField(item, "time_tracking", "cache_out_1h_tokens")
 			}
-			if v, ok := getNestedField(item, "time_tracking", "output_tokens"); ok {
+			if itemInTok == 0 {
+				if v, ok := getNestedField(item, "time_tracking", "input_tokens"); ok {
+					fmt.Sscanf(v, "%d", &itemInTok)
+				}
+			}
+			if v, ok := getNestedField(item, "time_tracking", "total_output_tokens"); ok {
 				fmt.Sscanf(v, "%d", &itemOutTok)
+			} else {
+				itemOutTok = readIntField(item, "time_tracking", "reg_output_tokens")
+			}
+			if itemOutTok == 0 {
+				if v, ok := getNestedField(item, "time_tracking", "output_tokens"); ok {
+					fmt.Sscanf(v, "%d", &itemOutTok)
+				}
 			}
 
 			// Net LOC from PR manifest

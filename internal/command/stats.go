@@ -41,9 +41,12 @@ type timeStats struct {
 	TotalAISecs       int                   `json:"total_ai_seconds"`
 	TotalRegInput     int                   `json:"total_reg_input_tokens"`
 	TotalRegOutput    int                   `json:"total_reg_output_tokens"`
+	TotalReasoning    int                   `json:"total_reasoning_tokens"`
+	TotalTokens       int                   `json:"total_tokens"`
 	TotalCacheIn      int                   `json:"total_cache_in_tokens"`
 	TotalCacheOut     int                   `json:"total_cache_out_tokens"`    // 5m writes
 	TotalCacheOut1h   int                   `json:"total_cache_out_1h_tokens"` // 1h writes
+	UnknownCostTurns  int                   `json:"unknown_cost_turns"`
 	TotalLinesAdded   int                   `json:"total_lines_added"`
 	TotalLinesRemoved int                   `json:"total_lines_removed"`
 	TotalFilesChanged int                   `json:"total_files_changed"`
@@ -51,12 +54,13 @@ type timeStats struct {
 }
 
 type modelTotal struct {
-	Turns     int     `json:"turns"`
-	RegInput  int     `json:"reg_input_tokens"`
-	RegOutput int     `json:"reg_output_tokens"`
-	CacheIn   int     `json:"cache_in_tokens"`
-	CacheOut  int     `json:"cache_out_tokens"`
-	CostUSD   float64 `json:"cost_usd"`
+	Turns            int     `json:"turns"`
+	RegInput         int     `json:"reg_input_tokens"`
+	RegOutput        int     `json:"reg_output_tokens"`
+	CacheIn          int     `json:"cache_in_tokens"`
+	CacheOut         int     `json:"cache_out_tokens"`
+	UnknownCostTurns int     `json:"unknown_cost_turns,omitempty"`
+	CostUSD          float64 `json:"cost_usd"`
 }
 
 func Stats(s *store.Store, cfg *config.Config, opts StatsOpts) int {
@@ -137,7 +141,11 @@ func renderTimeStats(w io.Writer, t *timeStats) {
 	if t.ItemsWithMetrics == 0 {
 		return
 	}
-	fmt.Fprintf(w, "  Total cost:      $%.6f\n", t.TotalCostUSD)
+	if t.UnknownCostTurns > 0 {
+		fmt.Fprintf(w, "  Known cost:      $%.6f  (%d turns missing cost)\n", t.TotalCostUSD, t.UnknownCostTurns)
+	} else {
+		fmt.Fprintf(w, "  Total cost:      $%.6f\n", t.TotalCostUSD)
+	}
 	fmt.Fprintf(w, "  Total turns:     %d across %d distinct sessions\n", t.TotalTurns, t.TotalSessions)
 	if t.TotalProcessSecs > 0 {
 		fmt.Fprintf(w, "  Process time:    %s  (ai: %s)\n",
@@ -149,13 +157,17 @@ func renderTimeStats(w io.Writer, t *timeStats) {
 	fmt.Fprintf(w, "  Tokens out:      %s  (cache writes: %s 5m + %s 1h)\n",
 		formatTokens(t.TotalRegOutput),
 		formatTokens(t.TotalCacheOut), formatTokens(t.TotalCacheOut1h))
+	if t.TotalReasoning > 0 || t.TotalTokens > 0 {
+		fmt.Fprintf(w, "  Reasoning/total: %s reasoning / %s total\n",
+			formatTokens(t.TotalReasoning), formatTokens(t.TotalTokens))
+	}
 	if t.TotalFilesChanged > 0 {
 		fmt.Fprintf(w, "  Code:            %s (+%d / -%d across %d files)\n",
 			formatLOC(t.TotalLinesAdded-t.TotalLinesRemoved),
 			t.TotalLinesAdded, t.TotalLinesRemoved, t.TotalFilesChanged)
 	}
 	if len(t.ByModel) > 0 {
-		fmt.Fprintln(w, "  By model:")
+		fmt.Fprintln(w, "  By provider/model:")
 		// Stable order: sort by cost desc
 		type kv struct {
 			k string
@@ -171,8 +183,12 @@ func renderTimeStats(w io.Writer, t *timeStats) {
 			}
 		}
 		for _, p := range pairs {
-			fmt.Fprintf(w, "    %-22s %d turns, $%.6f, %s in / %s out\n",
-				p.k, p.v.Turns, p.v.CostUSD,
+			costText := fmt.Sprintf("$%.6f", p.v.CostUSD)
+			if p.v.UnknownCostTurns > 0 {
+				costText = fmt.Sprintf("%s (%d unknown-cost)", costText, p.v.UnknownCostTurns)
+			}
+			fmt.Fprintf(w, "    %-22s %d turns, %s, %s in / %s out\n",
+				p.k, p.v.Turns, costText,
 				formatTokens(p.v.RegInput), formatTokens(p.v.RegOutput))
 		}
 	}
@@ -200,9 +216,12 @@ func computeTimeStats(s *store.Store) *timeStats {
 		out.TotalAISecs += readIntField(item, "time_tracking", "ai_time_seconds")
 		out.TotalRegInput += readIntField(item, "time_tracking", "reg_input_tokens")
 		out.TotalRegOutput += readIntField(item, "time_tracking", "reg_output_tokens")
+		out.TotalReasoning += readIntField(item, "time_tracking", "reasoning_tokens")
+		out.TotalTokens += readIntField(item, "time_tracking", "total_tokens")
 		out.TotalCacheIn += readIntField(item, "time_tracking", "cache_in_tokens")
 		out.TotalCacheOut += readIntField(item, "time_tracking", "cache_out_tokens")
 		out.TotalCacheOut1h += readIntField(item, "time_tracking", "cache_out_1h_tokens")
+		out.UnknownCostTurns += readIntField(item, "time_tracking", "unknown_cost_turns")
 		out.TotalLinesAdded += readIntField(item, "time_tracking", "lines_added")
 		out.TotalLinesRemoved += readIntField(item, "time_tracking", "lines_removed")
 		out.TotalFilesChanged += readIntField(item, "time_tracking", "files_changed_count")
@@ -246,6 +265,7 @@ func computeTimeStats(s *store.Store) *timeStats {
 				prev.CacheIn += agg.CacheIn
 				prev.CacheOut += agg.CacheOut
 				prev.CostUSD += agg.Cost
+				prev.UnknownCostTurns += agg.UnknownCostTurns
 				out.ByModel[modelID] = prev
 			}
 		}
