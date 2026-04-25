@@ -15,11 +15,14 @@ import (
 	"github.com/jfinlinson/agent-state/internal/store"
 )
 
-// SessionLogPayload is the per-turn metrics payload the Claude Code Stop hook
-// (and rewired st run) sends to `st session log`. All token and duration fields
-// are for the single turn; the command accrues them onto the resolved item.
+// SessionLogPayload is the per-turn metrics payload AI providers send to
+// `st session log`. All token and duration fields are for the single turn; the
+// command accrues them onto the resolved item. Legacy Claude producers can omit
+// Provider/CostSource and still get the historical behavior.
 type SessionLogPayload struct {
+	Provider        string `json:"provider,omitempty"`
 	SessionID       string `json:"session_id"`
+	ResponseID      string `json:"response_id,omitempty"`
 	Model           string `json:"model"`
 	ProcessMs       int64  `json:"process_ms"`
 	AIMs            int64  `json:"ai_ms"`
@@ -35,10 +38,13 @@ type SessionLogPayload struct {
 	// ephemeral_5m/1h_input_tokens), populate this field; pricing applies
 	// the 2x rate. Zero is safe — older producers still work.
 	CacheOut1hTokens int     `json:"cache_out_1h_tokens,omitempty"`
+	ReasoningTokens  int     `json:"reasoning_tokens,omitempty"`
+	TotalTokens      int     `json:"total_tokens,omitempty"`
 	CostUSD          float64 `json:"cost_usd,omitempty"` // if 0, computed from tokens × pricing
-	Turn             int     `json:"turn,omitempty"`     // ordinal within session; informational
-	ItemID           string  `json:"item_id,omitempty"`  // if empty, resolved from stack top
-	Step             string  `json:"step,omitempty"`     // default "interactive"
+	CostSource       string  `json:"cost_source,omitempty"`
+	Turn             int     `json:"turn,omitempty"`    // ordinal within session; informational
+	ItemID           string  `json:"item_id,omitempty"` // if empty, resolved from stack top
+	Step             string  `json:"step,omitempty"`    // default "interactive"
 
 	// Optional per-turn file diff info (populated by Stop hook once live).
 	// Recorded in the ai_turns line for provenance.
@@ -103,10 +109,16 @@ func SessionLog(s *store.Store, cfg *config.Config, payload SessionLogPayload) i
 		return 0
 	}
 
-	// Compute cost if not provided. Unknown model is surfaced as a warning to
-	// stderr; we still record token counts so operators can backfill later.
+	// Compute cost if not provided. Unknown model/provider is surfaced as a
+	// warning to stderr; we still record token counts so operators can backfill
+	// later, and mark the turn's cost source as unknown instead of implying
+	// $0.00.
 	cost := payload.CostUSD
-	if cost == 0 && payload.Model != "" && hasTokens(payload) {
+	costSource := strings.TrimSpace(payload.CostSource)
+	if costSource == "" && cost > 0 {
+		costSource = CostSourceProvided
+	}
+	if cost == 0 && shouldComputeCost(payload) {
 		computed, err := pricing.ComputeCost(
 			payload.Model,
 			payload.RegInputTokens, payload.RegOutputTokens,
@@ -114,9 +126,13 @@ func SessionLog(s *store.Store, cfg *config.Config, payload SessionLogPayload) i
 		)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "session log: %v (tokens recorded without cost)\n", err)
+			costSource = CostSourceUnknown
 		} else {
 			cost = computed
+			costSource = CostSourceComputed
 		}
+	} else if cost == 0 && hasTokens(payload) && costSource == "" {
+		costSource = CostSourceUnknown
 	}
 
 	// Accrue aggregate fields
@@ -129,6 +145,10 @@ func SessionLog(s *store.Store, cfg *config.Config, payload SessionLogPayload) i
 		fmt.Sprintf("%d", readIntField(item, "time_tracking", "reg_input_tokens")+payload.RegInputTokens))
 	setNestedField(item, "time_tracking", "reg_output_tokens",
 		fmt.Sprintf("%d", readIntField(item, "time_tracking", "reg_output_tokens")+payload.RegOutputTokens))
+	if payload.ReasoningTokens > 0 || readIntField(item, "time_tracking", "reasoning_tokens") > 0 {
+		setNestedField(item, "time_tracking", "reasoning_tokens",
+			fmt.Sprintf("%d", readIntField(item, "time_tracking", "reasoning_tokens")+payload.ReasoningTokens))
+	}
 	setNestedField(item, "time_tracking", "cache_in_tokens",
 		fmt.Sprintf("%d", readIntField(item, "time_tracking", "cache_in_tokens")+payload.CacheInTokens))
 	setNestedField(item, "time_tracking", "cache_out_tokens",
@@ -147,12 +167,23 @@ func SessionLog(s *store.Store, cfg *config.Config, payload SessionLogPayload) i
 				readIntField(item, "time_tracking", "cache_out_1h_tokens")))
 	setNestedField(item, "time_tracking", "total_output_tokens",
 		fmt.Sprintf("%d", readIntField(item, "time_tracking", "reg_output_tokens")))
+	if payload.TotalTokens > 0 || readIntField(item, "time_tracking", "total_tokens") > 0 {
+		setNestedField(item, "time_tracking", "total_tokens",
+			fmt.Sprintf("%d", readIntField(item, "time_tracking", "total_tokens")+payload.TotalTokens))
+	}
 
 	if cost > 0 {
 		// 6-decimal precision matches by_model cost precision so the two
 		// aggregates don't drift apart across round-trips. See formatByModelLine.
 		setNestedField(item, "time_tracking", "ai_cost_usd",
 			fmt.Sprintf("%.6f", readFloatField(item, "time_tracking", "ai_cost_usd")+cost))
+	}
+	if costSource != "" {
+		setNestedField(item, "time_tracking", "last_cost_source", costSource)
+		if costSource == CostSourceUnknown {
+			setNestedField(item, "time_tracking", "unknown_cost_turns",
+				fmt.Sprintf("%d", readIntField(item, "time_tracking", "unknown_cost_turns")+1))
+		}
 	}
 
 	setNestedField(item, "time_tracking", "turn_count",
@@ -180,6 +211,9 @@ func SessionLog(s *store.Store, cfg *config.Config, payload SessionLogPayload) i
 	if payload.Model != "" {
 		setNestedField(item, "time_tracking", "last_model", payload.Model)
 	}
+	if payload.Provider != "" {
+		setNestedField(item, "time_tracking", "last_provider", payload.Provider)
+	}
 	now := time.Now().Format(time.RFC3339)
 	setNestedField(item, "time_tracking", "last_touched", now)
 	toucher := cfg.AgentID()
@@ -189,11 +223,12 @@ func SessionLog(s *store.Store, cfg *config.Config, payload SessionLogPayload) i
 	setNestedField(item, "time_tracking", "last_touched_by", toucher)
 
 	// Append per-turn provenance line
-	appendListField(item, "time_tracking", "ai_turns", formatAITurnLine(payload, cost, now))
+	appendListField(item, "time_tracking", "ai_turns", formatAITurnLine(payload, cost, costSource, now))
 
-	// Upsert per-model aggregate (one line per model under work_tracking.by_model)
+	// Upsert per-provider/model aggregate. Historical entries without Provider
+	// keep their model-only key for backwards compatibility.
 	if payload.Model != "" {
-		upsertByModel(item, payload, cost)
+		upsertByModel(item, payload, cost, costSource)
 	}
 
 	if err := s.Write(item); err != nil {
@@ -203,34 +238,39 @@ func SessionLog(s *store.Store, cfg *config.Config, payload SessionLogPayload) i
 	return 0
 }
 
-// byModelAggregate captures per-model running totals. Values are parsed from
-// and written to the work_tracking.by_model line list, one line per model.
+// byModelAggregate captures provider/model running totals. Values are parsed
+// from and written to the time_tracking.by_model line list.
 type byModelAggregate struct {
-	Turns    int
-	RegIn    int
-	RegOut   int
-	CacheIn  int
-	CacheOut int
-	Cost     float64
+	Turns            int
+	RegIn            int
+	RegOut           int
+	CacheIn          int
+	CacheOut         int
+	Cost             float64
+	UnknownCostTurns int
 }
 
-// upsertByModel finds the existing line for payload.Model under
-// work_tracking.by_model (if any), adds the payload's deltas, and writes the
+// upsertByModel finds the existing provider/model line under
+// time_tracking.by_model (if any), adds the payload's deltas, and writes the
 // updated line back. If no line exists, it appends a new one.
-func upsertByModel(item *model.Item, p SessionLogPayload, cost float64) {
-	existing := readByModel(item, p.Model)
+func upsertByModel(item *model.Item, p SessionLogPayload, cost float64, costSource string) {
+	key := providerModelKey(p)
+	existing := readByModel(item, key)
 	existing.Turns++
 	existing.RegIn += p.RegInputTokens
 	existing.RegOut += p.RegOutputTokens
 	existing.CacheIn += p.CacheInTokens
 	existing.CacheOut += p.CacheOutTokens + p.CacheOut1hTokens // aggregate total cache writes per model
 	existing.Cost += cost
+	if costSource == CostSourceUnknown {
+		existing.UnknownCostTurns++
+	}
 
-	line := formatByModelLine(p.Model, existing)
+	line := formatByModelLine(key, existing)
 
 	// Try to update in place; if not found, append.
 	if !updateListLine(item, "time_tracking", "by_model",
-		func(raw string) bool { return byModelLineMatches(raw, p.Model) },
+		func(raw string) bool { return byModelLineMatches(raw, key) },
 		line) {
 		appendListField(item, "time_tracking", "by_model", line)
 	}
@@ -241,12 +281,16 @@ func upsertByModel(item *model.Item, p SessionLogPayload, cost float64) {
 // 6-decimal cost precision keeps round-trip accumulation drift under $0.000001
 // per turn — safe even across thousands of turns on cheap models.
 func formatByModelLine(model string, a byModelAggregate) string {
-	return fmt.Sprintf("%s: turns=%d reg_in=%d reg_out=%d cache_in=%d cache_out=%d cost=$%.6f",
+	line := fmt.Sprintf("%s: turns=%d reg_in=%d reg_out=%d cache_in=%d cache_out=%d cost=$%.6f",
 		model, a.Turns, a.RegIn, a.RegOut, a.CacheIn, a.CacheOut, a.Cost)
+	if a.UnknownCostTurns > 0 {
+		line += fmt.Sprintf(" unknown_cost_turns=%d", a.UnknownCostTurns)
+	}
+	return line
 }
 
-// readByModel walks time_tracking.by_model and returns the aggregate for model,
-// or the zero value if not present.
+// readByModel walks time_tracking.by_model and returns the aggregate for a
+// model-only or provider/model key, or the zero value if not present.
 func readByModel(item *model.Item, modelID string) byModelAggregate {
 	var out byModelAggregate
 	if item == nil || item.Doc == nil {
@@ -330,6 +374,8 @@ func parseByModelLine(entry string) byModelAggregate {
 		case "cost":
 			v := strings.TrimPrefix(val, "$")
 			fmt.Sscanf(v, "%f", &a.Cost)
+		case "unknown_cost_turns":
+			fmt.Sscanf(val, "%d", &a.UnknownCostTurns)
 		}
 	}
 	return a
@@ -381,7 +427,7 @@ func updateListLine(item *model.Item, parent, key string, match func(raw string)
 // formatAITurnLine produces the provenance line appended to time_tracking.ai_turns.
 // Format is space-separated key:value pairs — grep-friendly and stable enough to
 // be parsed by downstream reporting without a dedicated parser.
-func formatAITurnLine(p SessionLogPayload, cost float64, at string) string {
+func formatAITurnLine(p SessionLogPayload, cost float64, costSource string, at string) string {
 	step := p.Step
 	if step == "" {
 		step = "interactive"
@@ -396,8 +442,21 @@ func formatAITurnLine(p SessionLogPayload, cost float64, at string) string {
 	if p.Turn > 0 {
 		sb.WriteString(fmt.Sprintf("turn:%d ", p.Turn))
 	}
-	sb.WriteString(fmt.Sprintf("session:%s model:%s cost:$%.6f process:%ds ai:%ds reg_in:%d reg_out:%d cache_in:%d cache_out:%d",
-		sid, p.Model, cost,
+	if p.Provider != "" {
+		sb.WriteString(fmt.Sprintf("provider:%s ", p.Provider))
+	}
+	if p.ResponseID != "" {
+		sb.WriteString(fmt.Sprintf("response:%s ", p.ResponseID))
+	}
+	costText := fmt.Sprintf("$%.6f", cost)
+	if costSource == CostSourceUnknown {
+		costText = "unknown"
+	}
+	sb.WriteString(fmt.Sprintf("session:%s model:%s cost:%s", sid, p.Model, costText))
+	if costSource != "" {
+		sb.WriteString(fmt.Sprintf(" cost_source:%s", costSource))
+	}
+	sb.WriteString(fmt.Sprintf(" process:%ds ai:%ds reg_in:%d reg_out:%d cache_in:%d cache_out:%d",
 		p.ProcessMs/1000, p.AIMs/1000,
 		p.RegInputTokens, p.RegOutputTokens,
 		p.CacheInTokens, p.CacheOutTokens))
@@ -405,6 +464,12 @@ func formatAITurnLine(p SessionLogPayload, cost float64, at string) string {
 		// Only emit the 1h field when non-zero — keeps legacy grep patterns
 		// that don't expect cache_out_1h from breaking.
 		sb.WriteString(fmt.Sprintf(" cache_out_1h:%d", p.CacheOut1hTokens))
+	}
+	if p.ReasoningTokens > 0 {
+		sb.WriteString(fmt.Sprintf(" reasoning:%d", p.ReasoningTokens))
+	}
+	if p.TotalTokens > 0 {
+		sb.WriteString(fmt.Sprintf(" total:%d", p.TotalTokens))
 	}
 	if p.Files > 0 || p.LinesAdded > 0 || p.LinesRemoved > 0 {
 		sb.WriteString(fmt.Sprintf(" files:%d +%d -%d net:%d",
@@ -499,5 +564,19 @@ func writeOrphanLog(cfg *config.Config, p SessionLogPayload) error {
 
 func hasTokens(p SessionLogPayload) bool {
 	return p.RegInputTokens > 0 || p.RegOutputTokens > 0 ||
-		p.CacheInTokens > 0 || p.CacheOutTokens > 0 || p.CacheOut1hTokens > 0
+		p.CacheInTokens > 0 || p.CacheOutTokens > 0 || p.CacheOut1hTokens > 0 ||
+		p.ReasoningTokens > 0 || p.TotalTokens > 0
+}
+
+func shouldComputeCost(p SessionLogPayload) bool {
+	provider := strings.TrimSpace(strings.ToLower(p.Provider))
+	return (provider == "" || provider == AIProviderClaude) && p.Model != "" && hasTokens(p)
+}
+
+func providerModelKey(p SessionLogPayload) string {
+	provider := strings.TrimSpace(p.Provider)
+	if provider == "" {
+		return p.Model
+	}
+	return provider + "/" + p.Model
 }

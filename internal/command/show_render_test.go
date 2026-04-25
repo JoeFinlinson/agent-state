@@ -148,9 +148,9 @@ func TestRenderTimeStats_TotalsIncludeBothCacheTiers(t *testing.T) {
 	if !strings.Contains(out, "5m") || !strings.Contains(out, "1h") {
 		t.Errorf("renderTimeStats missing 5m/1h annotation; got:\n%s", out)
 	}
-	// Per-model section present for two distinct models
-	if !strings.Contains(out, "By model:") {
-		t.Errorf("expected By model: section; got:\n%s", out)
+	// Per-provider/model section present for two distinct historical models.
+	if !strings.Contains(out, "By provider/model:") {
+		t.Errorf("expected By provider/model: section; got:\n%s", out)
 	}
 	if !strings.Contains(out, "claude-opus-4-7") {
 		t.Errorf("opus model missing from by-model table; got:\n%s", out)
@@ -178,7 +178,7 @@ func TestFormatAITurnLine_Emits1hBucketWhenNonZero(t *testing.T) {
 	line := formatAITurnLine(SessionLogPayload{
 		SessionID: "s", Model: "claude-opus-4-7",
 		CacheOutTokens: 500, CacheOut1hTokens: 300,
-	}, 0.1, "2026-04-23T12:00:00-07:00")
+	}, 0.1, CostSourceProvided, "2026-04-23T12:00:00-07:00")
 	if !strings.Contains(line, "cache_out:500") {
 		t.Errorf("missing cache_out:500 in %s", line)
 	}
@@ -189,7 +189,7 @@ func TestFormatAITurnLine_Emits1hBucketWhenNonZero(t *testing.T) {
 	// When 1h is zero, the token should NOT appear (legacy form preserved)
 	lineNo1h := formatAITurnLine(SessionLogPayload{
 		SessionID: "s", Model: "claude-opus-4-7", CacheOutTokens: 500,
-	}, 0.1, "2026-04-23T12:00:00-07:00")
+	}, 0.1, CostSourceProvided, "2026-04-23T12:00:00-07:00")
 	if strings.Contains(lineNo1h, "cache_out_1h:") {
 		t.Errorf("should omit cache_out_1h when zero, got: %s", lineNo1h)
 	}

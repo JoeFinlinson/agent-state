@@ -130,8 +130,11 @@ func renderTimeTracking(w io.Writer, item *modelItemRef) {
 	turns := readIntField(item, "time_tracking", "turn_count")
 	sessions := readIntField(item, "time_tracking", "session_count")
 	cost := readFloatField(item, "time_tracking", "ai_cost_usd")
+	unknownCostTurns := readIntField(item, "time_tracking", "unknown_cost_turns")
 	regIn := readIntField(item, "time_tracking", "reg_input_tokens")
 	regOut := readIntField(item, "time_tracking", "reg_output_tokens")
+	reasoning := readIntField(item, "time_tracking", "reasoning_tokens")
+	totalTokens := readIntField(item, "time_tracking", "total_tokens")
 	cacheIn := readIntField(item, "time_tracking", "cache_in_tokens")
 	cacheOut5m := readIntField(item, "time_tracking", "cache_out_tokens")
 	cacheOut1h := readIntField(item, "time_tracking", "cache_out_1h_tokens")
@@ -163,9 +166,17 @@ func renderTimeTracking(w io.Writer, item *modelItemRef) {
 	if cost > 0 {
 		// %.6f matches storage precision (session_log.go) so operators comparing
 		// st show against raw YAML see the same value.
-		fmt.Fprintf(w, "    cost: $%.6f  (%d turns across %d sessions)\n", cost, turns, sessions)
+		if unknownCostTurns > 0 {
+			fmt.Fprintf(w, "    known cost: $%.6f  (%d turns across %d sessions, %d missing cost)\n", cost, turns, sessions, unknownCostTurns)
+		} else {
+			fmt.Fprintf(w, "    cost: $%.6f  (%d turns across %d sessions)\n", cost, turns, sessions)
+		}
 	} else if turns > 0 {
-		fmt.Fprintf(w, "    turns: %d across %d sessions\n", turns, sessions)
+		if unknownCostTurns > 0 {
+			fmt.Fprintf(w, "    turns: %d across %d sessions  (%d missing cost)\n", turns, sessions, unknownCostTurns)
+		} else {
+			fmt.Fprintf(w, "    turns: %d across %d sessions\n", turns, sessions)
+		}
 	}
 	if regIn > 0 || regOut > 0 || cacheIn > 0 || cacheOutTotal > 0 {
 		if cacheOut1h > 0 {
@@ -179,11 +190,16 @@ func renderTimeTracking(w io.Writer, item *modelItemRef) {
 				formatTokens(cacheIn), formatTokens(cacheOutTotal))
 		}
 	}
+	if reasoning > 0 || totalTokens > 0 {
+		fmt.Fprintf(w, "    reasoning/total: %s reasoning / %s total\n",
+			formatTokens(reasoning), formatTokens(totalTokens))
+	}
 	if filesChanged > 0 {
 		fmt.Fprintf(w, "    code:  %s (+%d / -%d across %d files)\n",
 			formatLOC(linesAdded-linesRemoved), linesAdded, linesRemoved, filesChanged)
 	}
-	// by_model breakdown — one line per model, preserving the raw provenance
+	// by_model storage now contains provider/model keys for new entries, while
+	// preserving historical model-only rows.
 	if wm := item.Doc; wm != nil {
 		var inBlock bool
 		var inTT bool
@@ -197,7 +213,7 @@ func renderTimeTracking(w io.Writer, item *modelItemRef) {
 				continue
 			}
 			if line.Indent == 2 && line.Key == "by_model" {
-				fmt.Fprintln(w, "    by_model:")
+				fmt.Fprintln(w, "    by_provider_model:")
 				inBlock = true
 				continue
 			}
