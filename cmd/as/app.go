@@ -243,6 +243,61 @@ context for LLM agents. Works standalone or with CI/hooks.`,
 		},
 	}
 	agentCmd.AddCommand(agentListCmd)
+
+	agentWorkspaceCmd := &cobra.Command{
+		Use:   "workspace",
+		Short: "Create, inspect, and remove local agent workspaces",
+	}
+	agentWorkspaceCreateCmd := &cobra.Command{
+		Use:   "create <agent>",
+		Short: "Create or repair an independent agent workspace",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			branch, _ := cmd.Flags().GetString("branch")
+			full, _ := cmd.Flags().GetBool("full")
+			dryRun, _ := cmd.Flags().GetBool("dry-run")
+			repair, _ := cmd.Flags().GetBool("repair")
+			exitCode = command.AgentWorkspaceCreate(appCfg, command.AgentWorkspaceCreateOpts{
+				Agent: args[0], Branch: branch, Full: full, DryRun: dryRun, Repair: repair,
+			})
+		},
+	}
+	agentWorkspaceCreateCmd.Flags().String("branch", "main", "branch to check out in each repo")
+	agentWorkspaceCreateCmd.Flags().Bool("full", false, "create independent non-symlink clones")
+	agentWorkspaceCreateCmd.Flags().Bool("dry-run", false, "print the plan without filesystem, git, or Docker changes")
+	agentWorkspaceCreateCmd.Flags().Bool("repair", false, "replace known-safe partial workspace symlinks")
+	agentWorkspaceCmd.AddCommand(agentWorkspaceCreateCmd)
+
+	agentWorkspaceStatusCmd := &cobra.Command{
+		Use:   "status [agent]",
+		Short: "Show resolved paths, ports, repo state, and service-health placeholders",
+		Args:  cobra.MaximumNArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			agent := ""
+			if len(args) > 0 {
+				agent = args[0]
+			}
+			exitCode = command.AgentWorkspaceStatus(appCfg, command.AgentWorkspaceStatusOpts{Agent: agent})
+		},
+	}
+	agentWorkspaceCmd.AddCommand(agentWorkspaceStatusCmd)
+
+	agentWorkspaceDestroyCmd := &cobra.Command{
+		Use:   "destroy <agent>",
+		Short: "Remove an agent workspace after safety checks",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			dryRun, _ := cmd.Flags().GetBool("dry-run")
+			force, _ := cmd.Flags().GetBool("force")
+			exitCode = command.AgentWorkspaceDestroy(appCfg, command.AgentWorkspaceDestroyOpts{
+				Agent: args[0], DryRun: dryRun, Force: force,
+			})
+		},
+	}
+	agentWorkspaceDestroyCmd.Flags().Bool("dry-run", false, "print what would be stopped or removed")
+	agentWorkspaceDestroyCmd.Flags().Bool("force", false, "allow removal despite dirty repos after operator review")
+	agentWorkspaceCmd.AddCommand(agentWorkspaceDestroyCmd)
+	agentCmd.AddCommand(agentWorkspaceCmd)
 	root.AddCommand(agentCmd)
 
 	// --- Workflow commands ---
