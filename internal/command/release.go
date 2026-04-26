@@ -38,6 +38,13 @@ func Release(s *store.Store, cfg *config.Config, id string) int {
 		if item.AssignedTo != "" {
 			item.AssignedTo = ""
 			item.Doc.SetField("assigned_to", "")
+			// Clear any inherited heritage left from the previous claim
+			// so the next start writes a fresh meta block (or omits it).
+			for _, key := range []string{"parent_id", "root_id", "role", "spawned_by", "delegated_item"} {
+				if _, ok := item.Doc.GetNestedField("assigned_to_meta." + key); ok {
+					item.Doc.SetNestedField("assigned_to_meta."+key, "")
+				}
+			}
 		}
 		if item.ClaimedBy != "" {
 			item.ClaimedBy = ""

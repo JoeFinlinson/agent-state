@@ -51,6 +51,14 @@ type SessionLogPayload struct {
 	Files        int `json:"files,omitempty"`
 	LinesAdded   int `json:"lines_added,omitempty"`
 	LinesRemoved int `json:"lines_removed,omitempty"`
+
+	// Optional sub-agent heritage. Set when the producing turn ran inside
+	// a child agent spawned by a parent — preserves attribution so usage
+	// rollups can credit the parent/root chain. Omitted when the executing
+	// agent is the root.
+	ParentID string `json:"parent_id,omitempty"`
+	RootID   string `json:"root_id,omitempty"`
+	Role     string `json:"role,omitempty"`
 }
 
 // SessionLogCLI reads a JSON payload from stdin and applies it.
