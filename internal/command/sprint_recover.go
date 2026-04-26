@@ -47,11 +47,12 @@ func SprintRecover(s *store.Store, cfg *config.Config, sprintID string) int {
 			fmt.Printf("  Released stale claim: %s (claimed by %s, last active %s)\n",
 				itemID, item.ClaimedBy, age)
 
-			// Clear from session (external call — hoisted out of Mutate)
-			_ = mgr.RemoveClaim(item.ClaimedBy, itemID)
-
-			// Clear from item atomically
+			// Read the live claimed_by under the flock so a re-claim
+			// between the cached read above and the lock acquisition
+			// doesn't make us release the wrong session.
+			var claimedBy string
 			if err := s.Mutate(itemID, func(item *model.Item) error {
+				claimedBy = item.ClaimedBy
 				item.ClaimedBy = ""
 				item.ClaimedAt = ""
 				item.Doc.SetField("claimed_by", "")
@@ -61,9 +62,12 @@ func SprintRecover(s *store.Store, cfg *config.Config, sprintID string) int {
 				fmt.Fprintf(os.Stderr, "writing %s: %v\n", itemID, err)
 				continue
 			}
+			if claimedBy != "" {
+				_ = mgr.RemoveClaim(claimedBy, itemID)
+			}
 
 			changelog.Append(cfg, itemID, changelog.Entry{
-				Op: "recover", Field: "claimed_by", OldValue: "",
+				Op: "recover", Field: "claimed_by", OldValue: claimedBy,
 				Reason: "stale claim released by sprint recover",
 			})
 			released++

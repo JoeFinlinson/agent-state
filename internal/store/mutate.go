@@ -157,13 +157,95 @@ func (s *Store) MutateMany(ids []string, fn func(map[string]*model.Item) error) 
 		return err
 	}
 
+	// Two-phase commit: write every item to a tmp file first. If any
+	// serialization or write fails, clean up tmps and abort BEFORE any
+	// rename — so disk state is still all-or-nothing pre-mutation.
+	type pending struct {
+		dataPath string
+		tmpPath  string
+	}
+	prepared := make([]pending, 0, len(sorted))
+	cleanupTmps := func() {
+		for _, p := range prepared {
+			_ = os.Remove(p.tmpPath)
+		}
+	}
 	for _, id := range sorted {
-		if err := s.writeAtomic(items[id], s.paths[id]); err != nil {
+		dataPath := s.paths[id]
+		tmpPath, err := s.stageTmp(items[id], dataPath)
+		if err != nil {
+			cleanupTmps()
 			return err
 		}
-		s.items[id] = items[id]
+		prepared = append(prepared, pending{dataPath: dataPath, tmpPath: tmpPath})
+	}
+
+	// Commit phase: rename each staged tmp into place. A crash partway
+	// through this loop leaves an inconsistent set of files; the window
+	// is microseconds in practice and far smaller than the original
+	// "fail-after-first-Write" risk this method replaces. True atomic
+	// multi-file commit would need a write-ahead log — out of scope.
+	for i, p := range prepared {
+		if err := os.Rename(p.tmpPath, p.dataPath); err != nil {
+			// Best-effort: clean up any remaining staged tmps.
+			for j := i + 1; j < len(prepared); j++ {
+				_ = os.Remove(prepared[j].tmpPath)
+			}
+			return fmt.Errorf("rename %s -> %s: %w", p.tmpPath, p.dataPath, err)
+		}
+		s.items[sorted[i]] = items[sorted[i]]
 	}
 	return nil
+}
+
+// stageTmp serializes the item via Doc.String(), stamps last_touched /
+// last_touched_by, writes to a tmp file in the data file's directory,
+// fsyncs it, and returns the tmp path. The caller is responsible for
+// renaming the tmp into the final dataPath (or removing it on abort).
+//
+// Used by MutateMany's two-phase commit; writeAtomic is the single-
+// item analog that does both stage and rename.
+func (s *Store) stageTmp(item *model.Item, dataPath string) (string, error) {
+	if item.Doc == nil {
+		return "", fmt.Errorf("item %s has no ParsedDocument", item.ID)
+	}
+
+	now := time.Now().Format(time.RFC3339)
+	item.Doc.SetField("last_touched", now)
+	if agentID := s.cfg.AgentID(); agentID != "" {
+		item.Doc.SetField("last_touched_by", agentID)
+	}
+
+	content := item.Doc.String()
+	if !strings.HasSuffix(content, "\n") {
+		content += "\n"
+	}
+
+	dir := filepath.Dir(dataPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", fmt.Errorf("mkdir %s: %w", dir, err)
+	}
+	tmp, err := os.CreateTemp(dir, ".st-mutate-*")
+	if err != nil {
+		return "", fmt.Errorf("create tmp in %s: %w", dir, err)
+	}
+	tmpPath := tmp.Name()
+
+	if _, err := tmp.WriteString(content); err != nil {
+		tmp.Close()
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("write tmp: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("fsync tmp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("close tmp: %w", err)
+	}
+	return tmpPath, nil
 }
 
 // acquireExclusive obtains an exclusive flock on the lock file for an
@@ -193,8 +275,16 @@ func acquireExclusive(itemDir, id, dataPath string) (func(), error) {
 
 	deadline := time.Now().Add(LockTimeout)
 	for {
-		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
 			return func() { _ = f.Close() }, nil
+		}
+		// Only contention (EWOULDBLOCK / EAGAIN) and EINTR are
+		// retryable. Anything else (EBADF, ENOLCK, ...) is a real
+		// failure that the loop would otherwise mask as ErrLockTimeout.
+		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EINTR) {
+			_ = f.Close()
+			return nil, fmt.Errorf("flock %s: %w", lockPath, err)
 		}
 		if time.Now().After(deadline) {
 			_ = f.Close()
@@ -209,46 +299,10 @@ func acquireExclusive(itemDir, id, dataPath string) (func(), error) {
 // It also stamps last_touched and last_touched_by — the same auto-
 // fields the legacy Write path applied.
 func (s *Store) writeAtomic(item *model.Item, path string) error {
-	if item.Doc == nil {
-		return fmt.Errorf("item %s has no ParsedDocument", item.ID)
-	}
-
-	now := time.Now().Format(time.RFC3339)
-	item.Doc.SetField("last_touched", now)
-	if agentID := s.cfg.AgentID(); agentID != "" {
-		item.Doc.SetField("last_touched_by", agentID)
-	}
-
-	content := item.Doc.String()
-	if !strings.HasSuffix(content, "\n") {
-		content += "\n"
-	}
-
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("mkdir %s: %w", dir, err)
-	}
-	tmp, err := os.CreateTemp(dir, ".st-mutate-*")
+	tmpPath, err := s.stageTmp(item, path)
 	if err != nil {
-		return fmt.Errorf("create tmp in %s: %w", dir, err)
+		return err
 	}
-	tmpPath := tmp.Name()
-
-	if _, err := tmp.WriteString(content); err != nil {
-		tmp.Close()
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("write tmp: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("fsync tmp: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("close tmp: %w", err)
-	}
-
 	if err := os.Rename(tmpPath, path); err != nil {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("rename %s -> %s: %w", tmpPath, path, err)

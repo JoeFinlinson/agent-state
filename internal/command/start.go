@@ -93,17 +93,6 @@ func Start(s *store.Store, cfg *config.Config, id string, opts StartOpts) int {
 
 	now := time.Now().Format(time.RFC3339)
 
-	// Record session claim in session file (external to item file).
-	if sessionID != "" {
-		mgr := session.NewManager(cfg.SessionsDir(), time.Duration(cfg.StaleClaimTTL())*time.Second)
-		if _, err := mgr.EnsureSession(sessionID, agentID); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: could not create session: %v\n", err)
-		}
-		if err := mgr.AddClaim(sessionID, id); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: could not record claim: %v\n", err)
-		}
-	}
-
 	if err := s.Mutate(id, func(item *model.Item) error {
 		if branch != "" {
 			item.SetNested("work_tracking", "branch", branch)
@@ -143,6 +132,19 @@ func Start(s *store.Store, cfg *config.Config, id string, opts StartOpts) int {
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "writing %s: %v\n", id, err)
 		return 1
+	}
+
+	// Record session claim only after the item file write succeeds. If
+	// the Mutate failed (lock timeout, etc.), the session manager would
+	// otherwise hold a phantom claim against an item that never started.
+	if sessionID != "" {
+		mgr := session.NewManager(cfg.SessionsDir(), time.Duration(cfg.StaleClaimTTL())*time.Second)
+		if _, err := mgr.EnsureSession(sessionID, agentID); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not create session: %v\n", err)
+		}
+		if err := mgr.AddClaim(sessionID, id); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not record claim: %v\n", err)
+		}
 	}
 
 	// Lock the item file so GitPull can't overwrite it

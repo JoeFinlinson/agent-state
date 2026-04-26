@@ -26,18 +26,15 @@ func Release(s *store.Store, cfg *config.Config, id string) int {
 		return 1
 	}
 
+	// Capture the live claimed_by under the flock and release the
+	// session-manager record AFTER the Mutate, so we can't release the
+	// wrong session if a re-claim landed between the cached read and
+	// the lock acquisition.
 	oldAgent := item.AssignedTo
-	oldClaim := item.ClaimedBy
-
-	// Clear the session-manager record before mutating the item file.
-	// External call hoisted out of the closure (Mutate must be a pure
-	// transformation — no I/O beyond the item file).
-	if oldClaim != "" {
-		mgr := session.NewManager(cfg.SessionsDir(), time.Duration(cfg.StaleClaimTTL())*time.Second)
-		_ = mgr.RemoveClaim(oldClaim, id)
-	}
+	var liveClaim string
 
 	if err := s.Mutate(id, func(item *model.Item) error {
+		liveClaim = item.ClaimedBy
 		if item.AssignedTo != "" {
 			item.AssignedTo = ""
 			item.Doc.SetField("assigned_to", "")
@@ -52,6 +49,12 @@ func Release(s *store.Store, cfg *config.Config, id string) int {
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "writing %s: %v\n", id, err)
 		return 1
+	}
+
+	oldClaim := liveClaim
+	if liveClaim != "" {
+		mgr := session.NewManager(cfg.SessionsDir(), time.Duration(cfg.StaleClaimTTL())*time.Second)
+		_ = mgr.RemoveClaim(liveClaim, id)
 	}
 
 	// Release item lock

@@ -80,14 +80,17 @@ func Close(s *store.Store, cfg *config.Config, id, resolution string, opts Close
 	now := time.Now()
 	nowStr := now.Format(time.RFC3339)
 
-	// Hoist the session-manager external call out of the Mutate closure
-	// (Mutate's contract: no I/O beyond the item file inside fn).
-	if item.ClaimedBy != "" {
-		mgr := session.NewManager(cfg.SessionsDir(), time.Duration(cfg.StaleClaimTTL())*time.Second)
-		_ = mgr.RemoveClaim(item.ClaimedBy, id)
-	}
+	// Compute the cross-repo LOC snapshot OUTSIDE the lock so the slow
+	// git diff doesn't block other Mutate callers waiting on this item.
+	// The result is a pure data struct that we apply inside the closure.
+	locSnapshot, _ := computeLOCSnapshot(s, cfg, id, opts.FilesOpts)
+
+	// Capture the live claimed_by under the lock; do the session-manager
+	// I/O AFTER the Mutate so we never act on a stale snapshot.
+	var claimedBy string
 
 	if err := s.Mutate(id, func(item *model.Item) error {
+		claimedBy = item.ClaimedBy
 		item.Doc.SetField("status", resolution)
 		item.Status = resolution
 		item.Doc.SetField("completed", nowStr)
@@ -116,10 +119,9 @@ func Close(s *store.Store, cfg *config.Config, id, resolution string, opts Close
 			}
 		}
 
-		// Freeze LOC snapshot. ComputeFileChanges (inside the helper) hits
-		// git, which is read-only and item-independent, so running it
-		// under the lock is acceptable. Failures become warnings.
-		freezeLOCSnapshot(s, cfg, item, opts.FilesOpts)
+		// Apply the precomputed LOC snapshot. computed outside the lock
+		// (see locSnapshot above) so this step is pure transformation.
+		applyLOCSnapshot(item, locSnapshot)
 
 		// Total AI time — prefer the new ai_time_seconds field
 		// (SessionLog output); fall back to legacy ai_duration_seconds so
@@ -164,6 +166,11 @@ func Close(s *store.Store, cfg *config.Config, id, resolution string, opts Close
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "writing %s: %v\n", id, err)
 		return 1
+	}
+
+	if claimedBy != "" {
+		mgr := session.NewManager(cfg.SessionsDir(), time.Duration(cfg.StaleClaimTTL())*time.Second)
+		_ = mgr.RemoveClaim(claimedBy, id)
 	}
 
 	// Release item lock
@@ -296,30 +303,32 @@ func autoArchiveSprintAndEpic(s *store.Store, cfg *config.Config, sprintID strin
 	}
 }
 
-// freezeLOCSnapshot computes the cross-repo file diff for the item and writes
-// the aggregates into time_tracking (lines_added / lines_removed / lines_net /
-// files_changed_count / by_repo) plus per-file detail into
-// time_tracking.files_changed. Everything lands under time_tracking so
-// migration's canonical emitter preserves it — emitWorkTracking strips
-// unknown nested keys, so anything there would be lost on re-emit. After
-// close the branch may be deleted, so this is the item's permanent record
-// of what was changed.
-//
-// Failures are logged as warnings and leave the item with zero LOC fields
-// rather than blocking close.
-func freezeLOCSnapshot(s *store.Store, cfg *config.Config, item *modelItemRef, opts FilesOpts) {
-	res, code := ComputeFileChanges(s, cfg, item.ID, opts)
+// computeLOCSnapshot runs the cross-repo git diff and returns the
+// computed result. Pure read-only — does no item-file mutation. Safe
+// to call OUTSIDE Mutate so the lock isn't held during slow git work.
+// Returns (result, ok). ok=false means the caller should freeze zeros
+// (the helper has already logged the warning).
+func computeLOCSnapshot(s *store.Store, cfg *config.Config, itemID string, opts FilesOpts) (*FilesResult, bool) {
+	res, code := ComputeFileChanges(s, cfg, itemID, opts)
 	if code != 0 {
-		fmt.Fprintf(os.Stderr, "warning: LOC snapshot for %s failed (code %d) — freezing zeros\n", item.ID, code)
+		fmt.Fprintf(os.Stderr, "warning: LOC snapshot for %s failed (code %d) — freezing zeros\n", itemID, code)
+		return nil, false
+	}
+	return &res, true
+}
+
+// applyLOCSnapshot writes the precomputed snapshot into the item's
+// time_tracking and files_changed lists. Pure transformation — no I/O.
+// Safe to call INSIDE a Mutate closure.
+func applyLOCSnapshot(item *modelItemRef, res *FilesResult) {
+	if res == nil {
 		return
 	}
-
 	item.SetNested("time_tracking", "lines_added", fmt.Sprintf("%d", res.Totals.Added))
 	item.SetNested("time_tracking", "lines_removed", fmt.Sprintf("%d", res.Totals.Removed))
 	item.SetNested("time_tracking", "lines_net", fmt.Sprintf("%+d", res.Totals.Net))
 	item.SetNested("time_tracking", "files_changed_count", fmt.Sprintf("%d", res.Totals.Files))
 
-	// lines_by_repo: one line per repo under time_tracking.by_repo
 	for _, r := range res.Repos {
 		line := fmt.Sprintf("%s: files=%d added=%d removed=%d net=%+d",
 			r.Repo, r.Files, r.Added, r.Removed, r.Net)
@@ -335,9 +344,6 @@ func freezeLOCSnapshot(s *store.Store, cfg *config.Config, item *modelItemRef, o
 		}
 	}
 
-	// Per-file detail under time_tracking.files_changed. Kept under
-	// time_tracking (not work_tracking) so migration's canonical emitter
-	// preserves it — emitWorkTracking strips unknown nested keys.
 	for _, f := range res.Files {
 		line := fmt.Sprintf("%s %s %s +%d -%d (%+d) [%s]",
 			f.Repo, f.Action, f.Path, f.Added, f.Removed, f.Net, f.Type)
