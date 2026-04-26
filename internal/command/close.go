@@ -80,83 +80,97 @@ func Close(s *store.Store, cfg *config.Config, id, resolution string, opts Close
 	now := time.Now()
 	nowStr := now.Format(time.RFC3339)
 
-	item.Doc.SetField("status", resolution)
-	item.Status = resolution
-	item.Doc.SetField("completed", nowStr)
-	item.Doc.SetField("last_touched", nowStr)
+	// Compute the cross-repo LOC snapshot OUTSIDE the lock so the slow
+	// git diff doesn't block other Mutate callers waiting on this item.
+	// The result is a pure data struct that we apply inside the closure.
+	locSnapshot, _ := computeLOCSnapshot(s, cfg, id, opts.FilesOpts)
 
-	// Record completion time tracking
-	item.SetNested("time_tracking", "completed_at", nowStr)
+	// Capture the live claimed_by under the lock; do the session-manager
+	// I/O AFTER the Mutate so we never act on a stale snapshot.
+	var claimedBy string
 
-	// total_duration_seconds = closed_at - created_at (calendar wall time from
-	// item creation, includes idle periods). Always computed.
-	if !item.Created.IsZero() {
-		item.SetNested("time_tracking", "total_duration_seconds",
-			fmt.Sprintf("%d", int(now.Sub(item.Created).Seconds())))
-	}
+	if err := s.Mutate(id, func(item *model.Item) error {
+		claimedBy = item.ClaimedBy
+		item.Doc.SetField("status", resolution)
+		item.Status = resolution
+		item.Doc.SetField("completed", nowStr)
+		item.Doc.SetField("last_touched", nowStr)
 
-	// work_duration_seconds = closed_at - started_at (from when work was first
-	// activated). Coexists with legacy wall_time_hours for back-compat readers.
-	if startedAt, ok := getNestedField(item, "time_tracking", "started_at"); ok && startedAt != "" {
-		if t, err := time.Parse(time.RFC3339, startedAt); err == nil {
-			wallDur := now.Sub(t)
-			item.SetNested("time_tracking", "work_duration_seconds",
-				fmt.Sprintf("%d", int(wallDur.Seconds())))
-			item.SetNested("time_tracking", "wall_time_hours", fmt.Sprintf("%.1f", wallDur.Hours()))
-			item.SetNested("time_tracking", "total_wall_time", formatDuration(wallDur))
+		// Record completion time tracking
+		item.SetNested("time_tracking", "completed_at", nowStr)
+
+		// total_duration_seconds = closed_at - created_at (calendar wall
+		// time from item creation, includes idle periods). Always computed.
+		if !item.Created.IsZero() {
+			item.SetNested("time_tracking", "total_duration_seconds",
+				fmt.Sprintf("%d", int(now.Sub(item.Created).Seconds())))
 		}
-	}
 
-	// Freeze LOC snapshot. Runs the same logic as st files and captures the
-	// totals into time_tracking + a per-file list into work_tracking.files_changed.
-	// Failures become warnings — close must not fail because git is being weird.
-	freezeLOCSnapshot(s, cfg, item, opts.FilesOpts)
+		// work_duration_seconds = closed_at - started_at (from when work
+		// was first activated). Coexists with legacy wall_time_hours for
+		// back-compat readers.
+		if startedAt, ok := getNestedField(item, "time_tracking", "started_at"); ok && startedAt != "" {
+			if t, err := time.Parse(time.RFC3339, startedAt); err == nil {
+				wallDur := now.Sub(t)
+				item.SetNested("time_tracking", "work_duration_seconds",
+					fmt.Sprintf("%d", int(wallDur.Seconds())))
+				item.SetNested("time_tracking", "wall_time_hours", fmt.Sprintf("%.1f", wallDur.Hours()))
+				item.SetNested("time_tracking", "total_wall_time", formatDuration(wallDur))
+			}
+		}
 
-	// Total AI time — prefer the new ai_time_seconds field (SessionLog output);
-	// fall back to legacy ai_duration_seconds so pre-rewire items keep working.
-	var aiSecs int
-	if v, ok := getNestedField(item, "time_tracking", "ai_time_seconds"); ok && v != "" {
-		fmt.Sscanf(v, "%d", &aiSecs)
-	} else if v, ok := getNestedField(item, "time_tracking", "ai_duration_seconds"); ok && v != "" {
-		fmt.Sscanf(v, "%d", &aiSecs)
-	}
-	if aiSecs > 0 {
-		item.SetNested("time_tracking", "total_ai_time", formatDuration(time.Duration(aiSecs)*time.Second))
-	}
+		// Apply the precomputed LOC snapshot. computed outside the lock
+		// (see locSnapshot above) so this step is pure transformation.
+		applyLOCSnapshot(item, locSnapshot)
 
-	// AI cost summary
-	if aiCost, ok := getNestedField(item, "time_tracking", "ai_cost_usd"); ok && aiCost != "" {
-		item.SetNested("time_tracking", "total_ai_cost_usd", aiCost)
-	}
+		// Total AI time — prefer the new ai_time_seconds field
+		// (SessionLog output); fall back to legacy ai_duration_seconds so
+		// pre-rewire items keep working.
+		var aiSecs int
+		if v, ok := getNestedField(item, "time_tracking", "ai_time_seconds"); ok && v != "" {
+			fmt.Sscanf(v, "%d", &aiSecs)
+		} else if v, ok := getNestedField(item, "time_tracking", "ai_duration_seconds"); ok && v != "" {
+			fmt.Sscanf(v, "%d", &aiSecs)
+		}
+		if aiSecs > 0 {
+			item.SetNested("time_tracking", "total_ai_time", formatDuration(time.Duration(aiSecs)*time.Second))
+		}
 
-	// Token totals
-	if v, ok := getNestedField(item, "time_tracking", "input_tokens"); ok && v != "" {
-		item.SetNested("time_tracking", "total_input_tokens", v)
-	}
-	if v, ok := getNestedField(item, "time_tracking", "output_tokens"); ok && v != "" {
-		item.SetNested("time_tracking", "total_output_tokens", v)
-	}
-	if v, ok := getNestedField(item, "time_tracking", "total_tokens"); ok && v != "" {
-		item.SetNested("time_tracking", "total_tokens_final", v)
-	}
+		// AI cost summary
+		if aiCost, ok := getNestedField(item, "time_tracking", "ai_cost_usd"); ok && aiCost != "" {
+			item.SetNested("time_tracking", "total_ai_cost_usd", aiCost)
+		}
 
-	if opts.Reason != "" {
-		item.Doc.SetField("resolution", opts.Reason)
-	}
+		// Token totals
+		if v, ok := getNestedField(item, "time_tracking", "input_tokens"); ok && v != "" {
+			item.SetNested("time_tracking", "total_input_tokens", v)
+		}
+		if v, ok := getNestedField(item, "time_tracking", "output_tokens"); ok && v != "" {
+			item.SetNested("time_tracking", "total_output_tokens", v)
+		}
+		if v, ok := getNestedField(item, "time_tracking", "total_tokens"); ok && v != "" {
+			item.SetNested("time_tracking", "total_tokens_final", v)
+		}
 
-	// Clear session claim
-	if item.ClaimedBy != "" {
-		mgr := session.NewManager(cfg.SessionsDir(), time.Duration(cfg.StaleClaimTTL())*time.Second)
-		_ = mgr.RemoveClaim(item.ClaimedBy, id)
-		item.ClaimedBy = ""
-		item.ClaimedAt = ""
-		item.Doc.SetField("claimed_by", "")
-		item.Doc.SetField("claimed_at", "")
-	}
+		if opts.Reason != "" {
+			item.Doc.SetField("resolution", opts.Reason)
+		}
 
-	if err := s.Write(item); err != nil {
+		if item.ClaimedBy != "" {
+			item.ClaimedBy = ""
+			item.ClaimedAt = ""
+			item.Doc.SetField("claimed_by", "")
+			item.Doc.SetField("claimed_at", "")
+		}
+		return nil
+	}); err != nil {
 		fmt.Fprintf(os.Stderr, "writing %s: %v\n", id, err)
 		return 1
+	}
+
+	if claimedBy != "" {
+		mgr := session.NewManager(cfg.SessionsDir(), time.Duration(cfg.StaleClaimTTL())*time.Second)
+		_ = mgr.RemoveClaim(claimedBy, id)
 	}
 
 	// Release item lock
@@ -289,30 +303,32 @@ func autoArchiveSprintAndEpic(s *store.Store, cfg *config.Config, sprintID strin
 	}
 }
 
-// freezeLOCSnapshot computes the cross-repo file diff for the item and writes
-// the aggregates into time_tracking (lines_added / lines_removed / lines_net /
-// files_changed_count / by_repo) plus per-file detail into
-// time_tracking.files_changed. Everything lands under time_tracking so
-// migration's canonical emitter preserves it — emitWorkTracking strips
-// unknown nested keys, so anything there would be lost on re-emit. After
-// close the branch may be deleted, so this is the item's permanent record
-// of what was changed.
-//
-// Failures are logged as warnings and leave the item with zero LOC fields
-// rather than blocking close.
-func freezeLOCSnapshot(s *store.Store, cfg *config.Config, item *modelItemRef, opts FilesOpts) {
-	res, code := ComputeFileChanges(s, cfg, item.ID, opts)
+// computeLOCSnapshot runs the cross-repo git diff and returns the
+// computed result. Pure read-only — does no item-file mutation. Safe
+// to call OUTSIDE Mutate so the lock isn't held during slow git work.
+// Returns (result, ok). ok=false means the caller should freeze zeros
+// (the helper has already logged the warning).
+func computeLOCSnapshot(s *store.Store, cfg *config.Config, itemID string, opts FilesOpts) (*FilesResult, bool) {
+	res, code := ComputeFileChanges(s, cfg, itemID, opts)
 	if code != 0 {
-		fmt.Fprintf(os.Stderr, "warning: LOC snapshot for %s failed (code %d) — freezing zeros\n", item.ID, code)
+		fmt.Fprintf(os.Stderr, "warning: LOC snapshot for %s failed (code %d) — freezing zeros\n", itemID, code)
+		return nil, false
+	}
+	return &res, true
+}
+
+// applyLOCSnapshot writes the precomputed snapshot into the item's
+// time_tracking and files_changed lists. Pure transformation — no I/O.
+// Safe to call INSIDE a Mutate closure.
+func applyLOCSnapshot(item *modelItemRef, res *FilesResult) {
+	if res == nil {
 		return
 	}
-
 	item.SetNested("time_tracking", "lines_added", fmt.Sprintf("%d", res.Totals.Added))
 	item.SetNested("time_tracking", "lines_removed", fmt.Sprintf("%d", res.Totals.Removed))
 	item.SetNested("time_tracking", "lines_net", fmt.Sprintf("%+d", res.Totals.Net))
 	item.SetNested("time_tracking", "files_changed_count", fmt.Sprintf("%d", res.Totals.Files))
 
-	// lines_by_repo: one line per repo under time_tracking.by_repo
 	for _, r := range res.Repos {
 		line := fmt.Sprintf("%s: files=%d added=%d removed=%d net=%+d",
 			r.Repo, r.Files, r.Added, r.Removed, r.Net)
@@ -328,9 +344,6 @@ func freezeLOCSnapshot(s *store.Store, cfg *config.Config, item *modelItemRef, o
 		}
 	}
 
-	// Per-file detail under time_tracking.files_changed. Kept under
-	// time_tracking (not work_tracking) so migration's canonical emitter
-	// preserves it — emitWorkTracking strips unknown nested keys.
 	for _, f := range res.Files {
 		line := fmt.Sprintf("%s %s %s +%d -%d (%+d) [%s]",
 			f.Repo, f.Action, f.Path, f.Added, f.Removed, f.Net, f.Type)

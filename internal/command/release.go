@@ -7,6 +7,7 @@ import (
 
 	"github.com/jfinlinson/agent-state/internal/changelog"
 	"github.com/jfinlinson/agent-state/internal/config"
+	"github.com/jfinlinson/agent-state/internal/model"
 	"github.com/jfinlinson/agent-state/internal/session"
 	"github.com/jfinlinson/agent-state/internal/store"
 )
@@ -25,28 +26,35 @@ func Release(s *store.Store, cfg *config.Config, id string) int {
 		return 1
 	}
 
+	// Capture the live claimed_by under the flock and release the
+	// session-manager record AFTER the Mutate, so we can't release the
+	// wrong session if a re-claim landed between the cached read and
+	// the lock acquisition.
 	oldAgent := item.AssignedTo
-	oldClaim := item.ClaimedBy
+	var liveClaim string
 
-	// Clear agent assignment
-	if item.AssignedTo != "" {
-		item.AssignedTo = ""
-		item.Doc.SetField("assigned_to", "")
-	}
-
-	// Clear session claim
-	if item.ClaimedBy != "" {
-		mgr := session.NewManager(cfg.SessionsDir(), time.Duration(cfg.StaleClaimTTL())*time.Second)
-		_ = mgr.RemoveClaim(item.ClaimedBy, id)
-		item.ClaimedBy = ""
-		item.ClaimedAt = ""
-		item.Doc.SetField("claimed_by", "")
-		item.Doc.SetField("claimed_at", "")
-	}
-
-	if err := s.Write(item); err != nil {
+	if err := s.Mutate(id, func(item *model.Item) error {
+		liveClaim = item.ClaimedBy
+		if item.AssignedTo != "" {
+			item.AssignedTo = ""
+			item.Doc.SetField("assigned_to", "")
+		}
+		if item.ClaimedBy != "" {
+			item.ClaimedBy = ""
+			item.ClaimedAt = ""
+			item.Doc.SetField("claimed_by", "")
+			item.Doc.SetField("claimed_at", "")
+		}
+		return nil
+	}); err != nil {
 		fmt.Fprintf(os.Stderr, "writing %s: %v\n", id, err)
 		return 1
+	}
+
+	oldClaim := liveClaim
+	if liveClaim != "" {
+		mgr := session.NewManager(cfg.SessionsDir(), time.Duration(cfg.StaleClaimTTL())*time.Second)
+		_ = mgr.RemoveClaim(liveClaim, id)
 	}
 
 	// Release item lock
