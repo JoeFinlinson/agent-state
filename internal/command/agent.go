@@ -159,14 +159,15 @@ func AgentWorkspaceDestroy(cfg *config.Config, opts AgentWorkspaceDestroyOpts) i
 	fmt.Printf("Destroy agent workspace: %s\n", plan.AgentID)
 	fmt.Printf("  path: %s\n", plan.TargetDir)
 	fmt.Println("  docker resources:")
-	fmt.Printf("    compose project: %s\n", plan.ComposeProject)
-	fmt.Printf("    label selector: theraprac.agent=%s\n", plan.AgentID)
+	fmt.Printf("    postgres container: %s\n", postgresContainerName(plan.AgentID))
+	fmt.Printf("    postgres volume:    %s\n", postgresVolumeName(plan.AgentID))
+	fmt.Printf("    mailpit container:  %s\n", mailpitContainerName(plan.AgentID))
 	fmt.Println("  repos:")
 	for _, repo := range plan.Repos {
 		fmt.Printf("    %s\n", repo.TargetPath)
 	}
 	if opts.DryRun {
-		fmt.Println("  dry-run: no files, containers, networks, or volumes removed")
+		fmt.Println("  dry-run: no files, containers, or volumes removed")
 		return 0
 	}
 	if !opts.Force {
@@ -179,8 +180,17 @@ func AgentWorkspaceDestroy(cfg *config.Config, opts AgentWorkspaceDestroyOpts) i
 			}
 		}
 	}
+	if err := dockerRemoveAgent(plan.AgentID); err != nil {
+		fmt.Fprintf(os.Stderr, "agent workspace destroy: docker cleanup: %v\n", err)
+		return 1
+	}
 	if err := os.RemoveAll(plan.TargetDir); err != nil {
 		fmt.Fprintf(os.Stderr, "agent workspace destroy: %v\n", err)
+		return 1
+	}
+	registryPath := agentWorkspaceRegistryPath(plan)
+	if err := os.Remove(registryPath); err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "agent workspace destroy: registry cleanup: %v\n", err)
 		return 1
 	}
 	return 0
@@ -236,8 +246,12 @@ func buildAgentWorkspacePlan(cfg *config.Config, agentArg, branch string) (agent
 		Ports:          portBlockForAgent(agentID),
 		ComposeProject: strings.ReplaceAll("theraprac_"+agentID, "-", "_"),
 	}
+	// Source repos live as siblings of the running agent's workspace dir.
+	// cfg.Root() is the workspace dir itself, so its parent is the agent dir
+	// (e.g., theraprac-agent-a) and that dir holds the existing repo clones
+	// we'll re-clone into the new agent's workspace.
 	for _, repo := range agentWorkspaceRepos {
-		source := filepath.Join(filepath.Dir(filepath.Dir(cfg.Root())), repo)
+		source := filepath.Join(filepath.Dir(cfg.Root()), repo)
 		remote := ""
 		if isGitDir(source) {
 			if out, err := runGit(source, "remote", "get-url", "origin"); err == nil {
@@ -267,7 +281,11 @@ func printAgentWorkspacePlan(plan agentWorkspacePlan, dryRun, full, repair bool)
 	fmt.Printf("  docker_label: theraprac.agent=%s\n", plan.AgentID)
 	fmt.Printf("  registry: %s\n", agentWorkspaceRegistryPath(plan))
 	fmt.Printf("  workspace_config: %s\n", agentWorkspaceLocalConfigPath(plan))
-	fmt.Println("  env files: symlink from source repo when present; otherwise leave absent")
+	fmt.Printf("  postgres container: %s (image %s, host port %d)\n", postgresContainerName(plan.AgentID), postgresImage, plan.Ports.DB)
+	fmt.Printf("  postgres volume:    %s\n", postgresVolumeName(plan.AgentID))
+	fmt.Printf("  mailpit container:  %s (image %s, smtp host port %d, ui host port %d)\n",
+		mailpitContainerName(plan.AgentID), mailpitImage, mailpitSMTPPort(plan.Ports.Mailpit), plan.Ports.Mailpit)
+	fmt.Println("  env files: copy from source repo and overlay per-agent ports (DB_PORT, SERVER_PORT, API_BASE_URL, PORT)")
 	fmt.Println("  repos:")
 	for _, repo := range plan.Repos {
 		action := "clone"
@@ -321,11 +339,18 @@ func applyAgentWorkspaceCreate(plan agentWorkspacePlan, repair bool) error {
 		if plan.Branch == "main" {
 			_, _ = runGit(repo.TargetPath, "pull", "--ff-only", "origin", "main")
 		}
-		symlinkEnv(repo.SourcePath, repo.TargetPath, ".env")
-		symlinkEnv(repo.SourcePath, repo.TargetPath, ".env.local")
+		if err := materializeEnv(repo.Name, repo.SourcePath, repo.TargetPath, plan.Ports); err != nil {
+			return fmt.Errorf("%s env materialize: %w", repo.Name, err)
+		}
 	}
 	if err := persistAgentWorkspaceConfig(plan); err != nil {
 		return err
+	}
+	if err := dockerStartPostgres(plan.AgentID, plan.Ports.DB); err != nil {
+		return fmt.Errorf("postgres container: %w", err)
+	}
+	if err := dockerStartMailpit(plan.AgentID, mailpitSMTPPort(plan.Ports.Mailpit), plan.Ports.Mailpit); err != nil {
+		return fmt.Errorf("mailpit container: %w", err)
 	}
 	return nil
 }
@@ -534,15 +559,19 @@ func resolveAgentsRoot(cfg *config.Config) (string, error) {
 }
 
 func portBlockForAgent(agentID string) agentWorkspacePorts {
-	offset := 0
+	// Offsets start at 100 so the central dev stack on default ports
+	// (5432 postgres, 8025 mailpit UI, 3000 web, 8080 api) is never
+	// collided with by agent-a. a→100, b→200, ..., z→2600.
+	offset := 100
 	suffix := strings.TrimPrefix(agentID, "agent-")
 	if len(suffix) == 1 && suffix[0] >= 'a' && suffix[0] <= 'z' {
-		offset = int(suffix[0]-'a') * 100
+		offset = (int(suffix[0]-'a') + 1) * 100
 	} else {
+		sum := 0
 		for _, r := range suffix {
-			offset += int(r)
+			sum += int(r)
 		}
-		offset = (offset % 20) * 100
+		offset = ((sum % 20) + 1) * 100
 	}
 	return agentWorkspacePorts{
 		Web:     3000 + offset,
@@ -577,16 +606,101 @@ func repoState(path string) string {
 	return "file"
 }
 
-func symlinkEnv(sourceDir, targetDir, name string) {
-	source := filepath.Join(sourceDir, name)
-	if _, err := os.Stat(source); err != nil {
-		return
+// materializeEnv copies .env / .env.local from the source repo into the
+// agent workspace's repo dir and applies per-agent port overrides so each
+// workspace can run its own dev stack against its own DB on its own ports.
+//
+// It deliberately does NOT symlink — symlinking the source agent's .env
+// into the target would mean editing the per-agent port overrides on
+// agent-b would also change agent-a's .env, defeating isolation.
+func materializeEnv(repoName, sourceDir, targetDir string, ports agentWorkspacePorts) error {
+	overrides := perRepoEnvOverrides(repoName, ports)
+	for _, name := range []string{".env", ".env.local"} {
+		source := filepath.Join(sourceDir, name)
+		if _, err := os.Stat(source); err != nil {
+			continue
+		}
+		target := filepath.Join(targetDir, name)
+		// Replace any existing symlink left over from older create runs.
+		if info, err := os.Lstat(target); err == nil && info.Mode()&os.ModeSymlink != 0 {
+			_ = os.Remove(target)
+		}
+		body, err := os.ReadFile(source)
+		if err != nil {
+			return err
+		}
+		out, err := applyEnvOverrides(string(body), overrides)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(target, []byte(out), 0644); err != nil {
+			return err
+		}
 	}
-	target := filepath.Join(targetDir, name)
-	if _, err := os.Lstat(target); err == nil {
-		return
+	return nil
+}
+
+// perRepoEnvOverrides returns the env keys that should be rewritten for
+// the given repo so that the agent's local stack uses its own port block.
+func perRepoEnvOverrides(repoName string, ports agentWorkspacePorts) map[string]string {
+	apiURL := fmt.Sprintf("http://localhost:%d", ports.API)
+	switch repoName {
+	case "theraprac-api":
+		return map[string]string{
+			"SERVER_PORT": fmt.Sprintf("%d", ports.API),
+			"DB_HOST":     "localhost",
+			"DB_PORT":     fmt.Sprintf("%d", ports.DB),
+		}
+	case "theraprac-web":
+		return map[string]string{
+			"PORT":         fmt.Sprintf("%d", ports.Web),
+			"API_BASE_URL": apiURL,
+		}
 	}
-	_ = os.Symlink(source, target)
+	return nil
+}
+
+// applyEnvOverrides returns body with the given keys' values replaced.
+// Keys absent from body are appended at the end, marked as agent-injected.
+// Comments and blank lines are preserved.
+func applyEnvOverrides(body string, overrides map[string]string) (string, error) {
+	if len(overrides) == 0 {
+		return body, nil
+	}
+	seen := make(map[string]bool, len(overrides))
+	lines := strings.Split(body, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimLeft(line, " \t")
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		eq := strings.IndexByte(line, '=')
+		if eq < 0 {
+			continue
+		}
+		key := strings.TrimSpace(line[:eq])
+		if v, ok := overrides[key]; ok {
+			lines[i] = key + "=" + v
+			seen[key] = true
+		}
+	}
+	var missing []string
+	for k := range overrides {
+		if !seen[k] {
+			missing = append(missing, k)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		if len(lines) > 0 && lines[len(lines)-1] != "" {
+			lines = append(lines, "")
+		}
+		lines = append(lines, "# st agent workspace — per-agent overrides")
+		for _, k := range missing {
+			lines = append(lines, k+"="+overrides[k])
+		}
+	}
+	return strings.Join(lines, "\n"), nil
 }
 
 func persistAgentWorkspaceConfig(plan agentWorkspacePlan) error {

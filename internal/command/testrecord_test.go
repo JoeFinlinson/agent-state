@@ -254,8 +254,8 @@ func TestTestRunExplicitAgentRewritesRepoAndInjectsRuntime(t *testing.T) {
 	for _, want := range []string{
 		"AS_AGENT_ID='agent-b'",
 		"COMPOSE_PROJECT_NAME='theraprac_agent_b'",
-		"THERAPRAC_API_PORT='8180'",
-		"PLAYWRIGHT_BASE_URL='http://localhost:3100'",
+		"THERAPRAC_API_PORT='8280'",
+		"PLAYWRIGHT_BASE_URL='http://localhost:3200'",
 		"cd '" + filepath.Join(agentsRoot, "theraprac-agent-b", "theraprac-api") + "'",
 	} {
 		if !strings.Contains(gotCmd, want) {
@@ -289,7 +289,7 @@ func TestTestRunResolvesAgentFromCwd(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("returned %d, want 0", code)
 	}
-	if !strings.Contains(gotCmd, "AS_AGENT_ID='agent-c'") || !strings.Contains(gotCmd, "THERAPRAC_API_PORT='8280'") {
+	if !strings.Contains(gotCmd, "AS_AGENT_ID='agent-c'") || !strings.Contains(gotCmd, "THERAPRAC_API_PORT='8380'") {
 		t.Fatalf("command did not use agent-c runtime:\n%s", gotCmd)
 	}
 }

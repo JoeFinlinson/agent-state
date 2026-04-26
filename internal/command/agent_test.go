@@ -126,7 +126,7 @@ func TestAgentWorkspaceCreateDryRunPrintsCompletePlan(t *testing.T) {
 		"theraprac-web",
 		"theraprac-infra",
 		"theraprac-workspace",
-		"ports: api=8180 web=3100 db=5532 mailpit=8125 stripe=12211",
+		"ports: api=8280 web=3200 db=5632 mailpit=8225 stripe=12311",
 		"compose_project: theraprac_agent_b",
 		"docker_label: theraprac.agent=agent-b",
 		"registry:",
@@ -188,7 +188,7 @@ func TestAgentWorkspaceStatusShowsIdentityPortsAndRepoState(t *testing.T) {
 	for _, want := range []string{
 		"Agent workspace: agent-c",
 		"identity: agent-c",
-		"ports: api=8280 web=3200 db=5632 mailpit=8225 stripe=12311",
+		"ports: api=8380 web=3300 db=5732 mailpit=8325 stripe=12411",
 		"compose: theraprac_agent_c",
 		"theraprac-api",
 		"service_health: unknown",
@@ -218,9 +218,10 @@ func TestAgentWorkspaceDestroyDryRunListsResources(t *testing.T) {
 	for _, want := range []string{
 		"Destroy agent workspace: agent-d",
 		target,
-		"compose project: theraprac_agent_d",
-		"label selector: theraprac.agent=agent-d",
-		"dry-run: no files, containers, networks, or volumes removed",
+		"postgres container: theraprac-agent-d-postgres",
+		"postgres volume:    theraprac-agent-d-postgres-data",
+		"mailpit container:  theraprac-agent-d-mailpit",
+		"dry-run: no files, containers, or volumes removed",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("destroy dry-run missing %q:\n%s", want, stdout)
@@ -278,7 +279,7 @@ func TestPersistAgentWorkspaceConfigWritesRegistryAndLocalConfig(t *testing.T) {
 			"branch: feature/demo",
 			"compose_project: theraprac_agent_f",
 			"docker_label: theraprac.agent=agent-f",
-			"web: 3500",
+			"web: 3600",
 			"theraprac-api:",
 		} {
 			if !strings.Contains(s, want) {
