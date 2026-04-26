@@ -246,8 +246,12 @@ func buildAgentWorkspacePlan(cfg *config.Config, agentArg, branch string) (agent
 		Ports:          portBlockForAgent(agentID),
 		ComposeProject: strings.ReplaceAll("theraprac_"+agentID, "-", "_"),
 	}
+	// Source repos live as siblings of the running agent's workspace dir.
+	// cfg.Root() is the workspace dir itself, so its parent is the agent dir
+	// (e.g., theraprac-agent-a) and that dir holds the existing repo clones
+	// we'll re-clone into the new agent's workspace.
 	for _, repo := range agentWorkspaceRepos {
-		source := filepath.Join(filepath.Dir(filepath.Dir(cfg.Root())), repo)
+		source := filepath.Join(filepath.Dir(cfg.Root()), repo)
 		remote := ""
 		if isGitDir(source) {
 			if out, err := runGit(source, "remote", "get-url", "origin"); err == nil {

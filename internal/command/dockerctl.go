@@ -18,13 +18,18 @@ const (
 	mailpitInternalUI   = "8025"
 )
 
-// pgBootstrapUser/Password/DB are the credentials baked into the postgres
-// container at first start. App-level users are created by liquibase
-// migrations during db-migrate.
+// pgBootstrapUser/Password/DB match the central theraprac docker-compose
+// postgres so a per-agent container is a drop-in replacement: the api
+// repo's existing .env (DB_ADMIN_USER=theraprac, DB_NAME=theraprac, etc.)
+// works unmodified except for DB_PORT, and `make db-migrate` connects
+// without further .env edits.
+//
+// App-level users (theraprac_app, theraprac_materializer, etc.) are
+// created by liquibase migrations during db-migrate.
 const (
-	pgBootstrapUser     = "postgres"
-	pgBootstrapPassword = "postgres"
-	pgBootstrapDB       = "theraprac_dev"
+	pgBootstrapUser     = "theraprac"
+	pgBootstrapPassword = "theraprac_dev_password"
+	pgBootstrapDB       = "theraprac"
 )
 
 func postgresContainerName(agentID string) string { return "theraprac-" + agentID + "-postgres" }
@@ -70,6 +75,7 @@ func dockerStartPostgres(agentID string, dbPort int) error {
 			"-e", "POSTGRES_USER=" + pgBootstrapUser,
 			"-e", "POSTGRES_PASSWORD=" + pgBootstrapPassword,
 			"-e", "POSTGRES_DB=" + pgBootstrapDB,
+			"-e", "POSTGRES_INITDB_ARGS=--encoding=UTF-8 --lc-collate=C --lc-ctype=C",
 			"-v", postgresVolumeName(agentID) + ":/var/lib/postgresql/data",
 			postgresImage,
 		}

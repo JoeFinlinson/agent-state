@@ -78,7 +78,8 @@ func TestDockerStartPostgresCreatesContainerWhenMissing(t *testing.T) {
 	for _, c := range calls {
 		if strings.Contains(c, "run -d --name theraprac-agent-z-postgres") &&
 			strings.Contains(c, "5732:5432") &&
-			strings.Contains(c, "POSTGRES_DB=theraprac_dev") &&
+			strings.Contains(c, "POSTGRES_DB=theraprac") &&
+			strings.Contains(c, "POSTGRES_INITDB_ARGS=--encoding=UTF-8") &&
 			strings.Contains(c, "theraprac-agent-z-postgres-data:/var/lib/postgresql/data") &&
 			strings.Contains(c, "postgres:17") {
 			sawRun = true
