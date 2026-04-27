@@ -145,12 +145,14 @@ func Prep(s *store.Store, cfg *config.Config, sprintID string, opts PrepOpts, en
 
 		fmt.Printf("━━━ [%d/%d] %s — %s ━━━\n\n", i+1, len(unplanned), itemID, item.Title)
 
-		// Resolve worktree dir
+		// Resolve worktree dir. I-407: WorktreeForItem handles new vs.
+		// legacy location; falls back to cfg.Root() when no worktree
+		// exists (which mirrors the previous "BaseDir empty" behavior).
 		worktreeDir := ""
 		if cfg.Worktree != nil && cfg.Worktree.Enabled {
-			wtBase := cfg.Root()
-			if cfg.Worktree.BaseDir != "" {
-				wtBase = fmt.Sprintf("%s/%s/%s", cfg.Root(), cfg.Worktree.BaseDir, itemID)
+			wtBase := cfg.WorktreeForItem(itemID)
+			if wtBase == "" {
+				wtBase = cfg.Root()
 			}
 			if _, err := os.Stat(wtBase); err == nil {
 				worktreeDir = wtBase

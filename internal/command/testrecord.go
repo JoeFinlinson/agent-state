@@ -641,7 +641,10 @@ func rewriteSuiteForWorktree(cfg *config.Config, itemID, suiteCmd string) string
 		return suiteCmd
 	}
 
-	wtBase := filepath.Join(cfg.Root(), cfg.Worktree.BaseDir, itemID)
+	wtBase := cfg.WorktreeForItem(itemID)
+	if wtBase == "" {
+		return suiteCmd
+	}
 	if _, err := os.Stat(wtBase); err != nil {
 		return suiteCmd // no worktree for this item
 	}

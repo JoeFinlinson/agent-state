@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -40,10 +39,11 @@ func UAT(s *store.Store, cfg *config.Config, id string, opts UATOpts) int {
 
 	runCmd := opts.RunCmd
 	if runCmd == nil {
-		// Determine best CWD: worktree base if exists, else project root
+		// Determine best CWD: worktree base if exists, else project root.
+		// I-407: WorktreeForItem prefers <agent-root>/worktrees/<id>,
+		// falls back to legacy <workspace>/worktrees/<id> for old worktrees.
 		runDir := cfg.Root()
-		if cfg.Worktree != nil && cfg.Worktree.Enabled && cfg.Worktree.BaseDir != "" {
-			wtBase := filepath.Join(cfg.Root(), cfg.Worktree.BaseDir, id)
+		if wtBase := cfg.WorktreeForItem(id); wtBase != "" {
 			if _, err := os.Stat(wtBase); err == nil {
 				runDir = wtBase
 			}

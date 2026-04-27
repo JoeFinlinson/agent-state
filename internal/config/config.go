@@ -178,7 +178,7 @@ type GitConfig struct {
 
 type WorktreeConfig struct {
 	Enabled   bool
-	BaseDir   string            // worktree root relative to config root (e.g. "worktrees")
+	BaseDir   string            // worktree root relative to AGENT root, one level above the workspace (e.g. "worktrees" → <agent>/worktrees). I-407.
 	ParentDir string            // parent of all repos (e.g. "/Users/x/Dev/project")
 	Repos     []string          // short repo names in default order (e.g. ["api", "web"])
 	RepoMap   map[string]string // short name → directory name (e.g. "api" → "theraprac-api")
@@ -458,6 +458,63 @@ func (c *Config) SessionsDir() string {
 // and swept on the next startup if the PID is dead. T-311.
 func (c *Config) AgentsDir() string {
 	return filepath.Join(c.root, ".as", "agents")
+}
+
+// WorktreeBase returns the directory under which `<id>` worktree dirs live
+// for this agent. I-407: placed under the agent root (one level up from
+// the workspace) rather than inside the workspace itself, because the
+// workspace is symlinked across agents (I-418). Putting worktrees under
+// the workspace would mean agent-a and agent-b share a single physical
+// worktree dir and collide on any item id. Returns "" when worktree
+// integration is disabled or BaseDir is empty (so callers don't
+// accidentally write into the agent root).
+func (c *Config) WorktreeBase() string {
+	if c.Worktree == nil || !c.Worktree.Enabled || c.Worktree.BaseDir == "" {
+		return ""
+	}
+	agentRoot := filepath.Dir(c.root)
+	return filepath.Join(agentRoot, c.Worktree.BaseDir)
+}
+
+// WorktreeBaseLegacy returns the pre-I-407 worktree location (under the
+// workspace, shared across agents via the I-418 symlink). Used by
+// finish/close as a fallback when an old worktree predates the I-407
+// fix and needs to be cleaned up from its original location. Returns
+// "" when worktree integration is disabled.
+func (c *Config) WorktreeBaseLegacy() string {
+	if c.Worktree == nil || !c.Worktree.Enabled || c.Worktree.BaseDir == "" {
+		return ""
+	}
+	return filepath.Join(c.root, c.Worktree.BaseDir)
+}
+
+// WorktreeForItem returns the worktree directory for the given item id,
+// preferring the new agent-root location but falling back to the legacy
+// shared-workspace location when an existing worktree predates the
+// I-407 fix. When neither exists (e.g., callers checking for an
+// expected-but-not-yet-created worktree), returns the new path so
+// downstream "create" logic uses the post-fix layout. Returns "" when
+// worktree integration is disabled.
+//
+// Read sites (run.go, uat.go, prep.go, testrecord.go, gitdiff.go)
+// should use this; write sites (st start) should use WorktreeBase()
+// directly so newly-created worktrees always land in the new location.
+func (c *Config) WorktreeForItem(id string) string {
+	base := c.WorktreeBase()
+	if base == "" || id == "" {
+		return ""
+	}
+	newDir := filepath.Join(base, id)
+	if _, err := os.Stat(newDir); err == nil {
+		return newDir
+	}
+	if legacy := c.WorktreeBaseLegacy(); legacy != "" {
+		legacyDir := filepath.Join(legacy, id)
+		if _, err := os.Stat(legacyDir); err == nil {
+			return legacyDir
+		}
+	}
+	return newDir
 }
 
 // StaleClaimTTL returns the stale claim threshold in seconds.
