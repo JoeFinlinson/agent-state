@@ -66,9 +66,12 @@ else
 fi
 
 # --- Case 5: CLAUDE_PROJECT_DIR explicitly set, agent-b → agent-b binary ---
+# PWD is /tmp (outside any worktree), so step 1 (worktree preference) finds
+# no match and step 2 (env var) takes over. Case 12 covers the inverse:
+# when PWD IS inside a worktree, the worktree binary beats the env var.
 out=$(cd /tmp && env -i HOME="$HOME" PATH="$PATH" CLAUDE_PROJECT_DIR="$TMP/theraprac-agents/theraprac-agent-b" bash "$PATCHED" 2>&1)
 if [ "$out" = "$TMP/theraprac-agents/theraprac-agent-b/as/bin/st" ]; then
-  pass "CLAUDE_PROJECT_DIR=agent-b → agent-b binary (env var wins over PWD)"
+  pass "CLAUDE_PROJECT_DIR=agent-b, PWD outside worktree → env var binary"
 else
   fail "CLAUDE_PROJECT_DIR agent-b → got '$out'"
 fi
@@ -164,13 +167,11 @@ else
 fi
 
 # --- Case 11: PWD inside a worktree but no bin built → falls through to agent-root ---
-mkdir -p "$TMP/theraprac-agents/theraprac-agent-b/worktrees/I-999"
-out=$(cd "$TMP/theraprac-agents/theraprac-agent-b/worktrees/I-999" && env -i HOME="$HOME" PATH="$PATH" bash "$PATCHED" 2>&1)
-# Agent-b's main binary at this point in the test was rewritten by Case 8 to
-# echo $ST_ROOT only — re-stamp it to its original "echo path" form so this
-# case has a deterministic, identifiable output.
+# Case 8 rewrote agent-b's main binary to echo $ST_ROOT; re-stamp it to its
+# original "echo path" form so this case has a deterministic output.
 printf '#!/bin/bash\necho "%s"\n' "$TMP/theraprac-agents/theraprac-agent-b/as/bin/st" > "$TMP/theraprac-agents/theraprac-agent-b/as/bin/st"
 chmod +x "$TMP/theraprac-agents/theraprac-agent-b/as/bin/st"
+mkdir -p "$TMP/theraprac-agents/theraprac-agent-b/worktrees/I-999"
 out=$(cd "$TMP/theraprac-agents/theraprac-agent-b/worktrees/I-999" && env -i HOME="$HOME" PATH="$PATH" bash "$PATCHED" 2>&1)
 if [ "$out" = "$TMP/theraprac-agents/theraprac-agent-b/as/bin/st" ]; then
   pass "worktree without built bin → falls through to agent-root binary"

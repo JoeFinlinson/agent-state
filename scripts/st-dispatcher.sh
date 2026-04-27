@@ -43,7 +43,11 @@ while [ "$dir" != "/" ]; do
           export ST_ROOT="$grandparent/theraprac-workspace"
           exec "$candidate" "$@"
         fi
-        # Worktree detected, no binary built — fall through to agent-root.
+        # Worktree detected, no binary built — break out of step 1 and
+        # let the rest of the chain (CLAUDE_PROJECT_DIR, then agent-root
+        # walk-up, then legacy) resolve normally. In production the hook
+        # exports CLAUDE_PROJECT_DIR=<this agent>, so step 2 lands on the
+        # agent's main bin/st.
         break
         ;;
     esac
