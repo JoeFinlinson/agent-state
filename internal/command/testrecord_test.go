@@ -377,6 +377,40 @@ func TestTestRunFailsWhenAgentRuntimeAmbiguous(t *testing.T) {
 	}
 }
 
+// I-422: A self-contained suite command (no `cd ../theraprac-…`) should not
+// trigger agent-runtime resolution, even when the test cwd happens to sit
+// inside a theraprac-agent-* dir on the developer's machine. Without this
+// short-circuit, every TestTestRun* below this comment fails with
+// "could not determine theraprac-agents root" unless THERAPRAC_AGENTS_ROOT
+// is exported by the test runner.
+func TestTestRunSkipsAgentRuntimeForSelfContainedSuite(t *testing.T) {
+	s, cfg := setupPRTestEnv(t)
+	t.Setenv("THERAPRAC_AGENTS_ROOT", "")
+	// Cwd inside a synthetic theraprac-agent-z tree. cfg.Root() is t.TempDir(),
+	// which is not under theraprac-agents, so building a plan would fail.
+	cwd := filepath.Join(t.TempDir(), "theraprac-agents", "theraprac-agent-z", "theraprac-workspace")
+	if err := os.MkdirAll(cwd, 0755); err != nil {
+		t.Fatalf("mkdir cwd: %v", err)
+	}
+
+	opts := TestRecordOpts{
+		Run: true,
+		Cwd: cwd,
+		GitHeadSHA: func(dir string) (string, error) {
+			return "abc1234567890", nil
+		},
+		RunCmd: func(command string) ([]byte, int, error) {
+			return []byte("PASS\n"), 0, nil
+		},
+		Backend: &evidence.LocalBackend{Dir: t.TempDir()},
+	}
+
+	code := TestRecord(s, cfg, "T-003", "api_unit", opts)
+	if code != 0 {
+		t.Fatalf("returned %d, want 0 — self-contained suite must not require agents-root resolution", code)
+	}
+}
+
 // --- Coverage enforcement ---
 
 func TestTestRunWithCoveragePass(t *testing.T) {

@@ -695,6 +695,15 @@ func resolveTestAgentRuntime(cfg *config.Config, opts TestRecordOpts, suiteCmd s
 		return testRuntimeFromPlan(plan), true, nil
 	}
 
+	// Implicit (cwd-based) agent resolution is only worth doing when the
+	// suite command actually needs agent runtime injection — i.e. when it
+	// references a sibling repo via `cd ../theraprac-...`. Skipping the
+	// resolution here keeps tests with self-contained suite commands from
+	// requiring THERAPRAC_AGENTS_ROOT just because the dev cwd happens to
+	// be under a theraprac-agent-* dir.
+	if !suiteNeedsAgentRuntime(suiteCmd) {
+		return testAgentRuntime{}, false, nil
+	}
 	cwd := opts.Cwd
 	if cwd == "" {
 		var err error
@@ -708,9 +717,6 @@ func resolveTestAgentRuntime(cfg *config.Config, opts TestRecordOpts, suiteCmd s
 		agentID, ok = agentIDFromPath(cfg.Root())
 	}
 	if !ok {
-		if !suiteNeedsAgentRuntime(suiteCmd) {
-			return testAgentRuntime{}, false, nil
-		}
 		return testAgentRuntime{}, false, fmt.Errorf("cannot resolve agent workspace from cwd; rerun with --agent <id>")
 	}
 	plan, err := buildAgentWorkspacePlan(cfg, agentID, "")
