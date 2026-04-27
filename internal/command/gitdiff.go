@@ -36,12 +36,15 @@ func resolveRepoDir(cfg *config.Config, repo string) string {
 }
 
 // resolveRepoDirForItem checks for a worktree first, falls back to main repo.
+// I-407: WorktreeForItem prefers the new agent-root location, falls back to
+// the legacy shared-workspace location for old worktrees.
 func resolveRepoDirForItem(cfg *config.Config, itemID, repo string) string {
 	if cfg.Worktree != nil && cfg.Worktree.BaseDir != "" {
-		wtRoot := filepath.Join(cfg.Root(), cfg.Worktree.BaseDir)
-
 		// Pattern 1: <base_dir>/<item-id>/<repo> (st start pattern)
-		wtBase := filepath.Join(wtRoot, itemID)
+		wtBase := cfg.WorktreeForItem(itemID)
+		if wtBase == "" {
+			return repo
+		}
 		for _, name := range []string{repo} {
 			candidate := filepath.Join(wtBase, name)
 			if isGitDir(candidate) {
@@ -57,32 +60,41 @@ func resolveRepoDirForItem(cfg *config.Config, itemID, repo string) string {
 			}
 		}
 
-		// Pattern 2: <base_dir>/<repo> (manual/legacy worktree)
-		candidate := filepath.Join(wtRoot, repo)
-		if isGitDir(candidate) {
-			return candidate
-		}
+		// Patterns 2 & 3 scan the worktree base dir — check both the new
+		// (agent-root) and legacy (workspace) bases since manual/legacy
+		// worktrees may live in either location during the I-407
+		// migration window.
+		for _, wtRoot := range []string{cfg.WorktreeBase(), cfg.WorktreeBaseLegacy()} {
+			if wtRoot == "" {
+				continue
+			}
+			// Pattern 2: <base_dir>/<repo> (manual/legacy worktree)
+			candidate := filepath.Join(wtRoot, repo)
+			if isGitDir(candidate) {
+				return candidate
+			}
 
-		// Pattern 3: scan all worktree dirs for a repo matching the name
-		entries, err := os.ReadDir(wtRoot)
-		if err == nil {
-			for _, e := range entries {
-				if !e.IsDir() {
-					continue
-				}
-				if strings.Contains(e.Name(), repo) {
-					candidate := filepath.Join(wtRoot, e.Name())
-					if isGitDir(candidate) {
-						return candidate
+			// Pattern 3: scan all worktree dirs for a repo matching the name
+			entries, err := os.ReadDir(wtRoot)
+			if err == nil {
+				for _, e := range entries {
+					if !e.IsDir() {
+						continue
 					}
-				}
-				subEntries, err := os.ReadDir(filepath.Join(wtRoot, e.Name()))
-				if err == nil {
-					for _, sub := range subEntries {
-						if sub.IsDir() && strings.Contains(sub.Name(), repo) {
-							candidate := filepath.Join(wtRoot, e.Name(), sub.Name())
-							if isGitDir(candidate) {
-								return candidate
+					if strings.Contains(e.Name(), repo) {
+						candidate := filepath.Join(wtRoot, e.Name())
+						if isGitDir(candidate) {
+							return candidate
+						}
+					}
+					subEntries, err := os.ReadDir(filepath.Join(wtRoot, e.Name()))
+					if err == nil {
+						for _, sub := range subEntries {
+							if sub.IsDir() && strings.Contains(sub.Name(), repo) {
+								candidate := filepath.Join(wtRoot, e.Name(), sub.Name())
+								if isGitDir(candidate) {
+									return candidate
+								}
 							}
 						}
 					}

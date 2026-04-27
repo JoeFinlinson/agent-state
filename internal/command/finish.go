@@ -27,7 +27,20 @@ func Finish(s *store.Store, cfg *config.Config, id string, opts FinishOpts) int 
 	baseDir := cfg.WorktreeBase()
 
 	if opts.ListAll {
-		return listWorktrees(baseDir)
+		// I-407: also surface orphans at the pre-fix legacy location so
+		// operators can audit anything still sitting in the shared
+		// workspace during the migration window.
+		code := listWorktrees(baseDir)
+		if legacy := cfg.WorktreeBaseLegacy(); legacy != "" && legacy != baseDir {
+			if _, err := os.Stat(legacy); err == nil {
+				fmt.Println()
+				fmt.Println("Legacy worktrees (pre-I-407, in shared workspace):")
+				if c := listWorktrees(legacy); c != 0 {
+					return c
+				}
+			}
+		}
+		return code
 	}
 
 	if id == "" {
@@ -177,9 +190,10 @@ func gitOutputDir(dir string, args ...string) (string, error) {
 // exists, and returns (cleaned, retained) instead of an exit code.
 //
 // Closed items that left a worktree behind got abandoned in
-// theraprac-workspace/worktrees/<id>/ indefinitely; this hook closes
-// the loop so the operator doesn't have to remember `st finish` after
-// every close.
+// <agent-root>/worktrees/<id>/ indefinitely (pre-I-407 they lived in
+// the shared workspace); this hook closes the loop so the operator
+// doesn't have to remember `st finish` after every close. Legacy
+// worktrees still under the workspace are detected via WorktreeBaseLegacy.
 func TryAutoFinishWorktree(cfg *config.Config, id string) (cleaned bool, retained bool) {
 	if cfg.Worktree == nil || !cfg.Worktree.Enabled {
 		return false, false

@@ -644,3 +644,53 @@ func TestWorktreeBaseLegacyReturnsWorkspaceLocation(t *testing.T) {
 		t.Errorf("WorktreeBaseLegacy() = %q, want %q (pre-I-407 location: workspace + base_dir)", got, want)
 	}
 }
+
+// I-407: WorktreeForItem prefers the new agent-root location, falls back
+// to legacy when the new path is empty but the legacy one exists, and
+// returns the new path when neither exists (so writers default to the
+// post-fix layout).
+func TestWorktreeForItemPrefersNewLocation(t *testing.T) {
+	tmp := t.TempDir()
+	agentRoot := filepath.Join(tmp, "agent-x")
+	workspace := filepath.Join(agentRoot, "theraprac-workspace")
+	os.MkdirAll(workspace, 0755)
+
+	cfg := &Config{
+		root:     workspace,
+		Worktree: &WorktreeConfig{Enabled: true, BaseDir: "worktrees"},
+	}
+
+	// Case 1: neither location exists → returns new path.
+	got := cfg.WorktreeForItem("T-001")
+	want := filepath.Join(agentRoot, "worktrees", "T-001")
+	if got != want {
+		t.Errorf("nonexistent → %q, want %q", got, want)
+	}
+
+	// Case 2: only legacy exists → returns legacy.
+	legacyPath := filepath.Join(workspace, "worktrees", "T-001")
+	os.MkdirAll(legacyPath, 0755)
+	got = cfg.WorktreeForItem("T-001")
+	if got != legacyPath {
+		t.Errorf("legacy-only → %q, want %q", got, legacyPath)
+	}
+
+	// Case 3: new path exists too → prefers new path.
+	newPath := filepath.Join(agentRoot, "worktrees", "T-001")
+	os.MkdirAll(newPath, 0755)
+	got = cfg.WorktreeForItem("T-001")
+	if got != newPath {
+		t.Errorf("both exist → %q, want %q (new path wins)", got, newPath)
+	}
+}
+
+func TestWorktreeForItemDisabledOrEmpty(t *testing.T) {
+	cfg := &Config{root: "/some/path"}
+	if got := cfg.WorktreeForItem("T-001"); got != "" {
+		t.Errorf("disabled → %q, want empty", got)
+	}
+	cfg.Worktree = &WorktreeConfig{Enabled: true, BaseDir: "worktrees"}
+	if got := cfg.WorktreeForItem(""); got != "" {
+		t.Errorf("empty id → %q, want empty", got)
+	}
+}

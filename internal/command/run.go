@@ -1655,7 +1655,7 @@ func runSingleItem(s *store.Store, cfg *config.Config, itemID, sprintID string, 
 	// the pipeline has a directory to run in. Reset to start status so the
 	// Start() call below recreates the worktrees cleanly.
 	if item.Status == tc.ActiveStatus && cfg.Worktree != nil && cfg.Worktree.Enabled {
-		wtBase := filepath.Join(cfg.Root(), cfg.Worktree.BaseDir, itemID)
+		wtBase := cfg.WorktreeForItem(itemID)
 		if _, err := os.Stat(wtBase); os.IsNotExist(err) {
 			fmt.Printf("[%s] Active item with missing worktree — recreating\n", itemID)
 			// Hoist session claim removal before Mutate (external side-effect)
@@ -2615,7 +2615,7 @@ func executeUAT(s *store.Store, cfg *config.Config, itemID, worktreeDir string) 
 	// so that `cd theraprac-api && ...` works correctly.
 	uatDir := worktreeDir
 	if cfg.Worktree != nil && cfg.Worktree.Enabled {
-		uatDir = filepath.Join(cfg.Root(), cfg.Worktree.BaseDir, itemID)
+		uatDir = cfg.WorktreeForItem(itemID)
 	}
 	code := UAT(s, cfg, itemID, UATOpts{
 		RunCmd: func(cmd string) ([]byte, int, error) {
@@ -2694,7 +2694,7 @@ func postDeployE2E(cfg *config.Config, itemID string) string {
 	// Determine the run directory (worktree base or project root)
 	runDir := cfg.Root()
 	if cfg.Worktree != nil && cfg.Worktree.Enabled {
-		wtBase := filepath.Join(cfg.Root(), cfg.Worktree.BaseDir, itemID)
+		wtBase := cfg.WorktreeForItem(itemID)
 		if _, err := os.Stat(wtBase); err == nil {
 			runDir = wtBase
 		}
@@ -2743,7 +2743,7 @@ func executeUATReview(s *store.Store, cfg *config.Config, itemID, sprintID strin
 		fmt.Printf("\n[%s] Running UAT (iteration %d)...\n", itemID, iteration)
 		uatDir := worktreeDir
 		if cfg.Worktree != nil && cfg.Worktree.Enabled {
-			uatDir = filepath.Join(cfg.Root(), cfg.Worktree.BaseDir, itemID)
+			uatDir = cfg.WorktreeForItem(itemID)
 		}
 		uatCode := UAT(s, cfg, itemID, UATOpts{
 			RunCmd: func(cmd string) ([]byte, int, error) {
@@ -3043,8 +3043,10 @@ func worktreeDirtyRepos(cfg *config.Config, itemID string) []string {
 	if cfg.Worktree == nil || !cfg.Worktree.Enabled {
 		return nil
 	}
-	baseDir := filepath.Join(cfg.Root(), cfg.Worktree.BaseDir)
-	wtDir := filepath.Join(baseDir, itemID)
+	wtDir := cfg.WorktreeForItem(itemID)
+	if wtDir == "" {
+		return nil
+	}
 	if _, err := os.Stat(wtDir); os.IsNotExist(err) {
 		return nil
 	}
@@ -4308,7 +4310,7 @@ func resolveWorktreeDir(cfg *config.Config, itemID string) string {
 		return cfg.Root()
 	}
 
-	wtBase := filepath.Join(cfg.Root(), cfg.Worktree.BaseDir, itemID)
+	wtBase := cfg.WorktreeForItem(itemID)
 
 	// Return the first repo directory that exists
 	repos := cfg.Worktree.Repos
@@ -4362,7 +4364,7 @@ func allWorktreeDirs(cfg *config.Config, itemID string) []string {
 		return []string{cfg.Root()}
 	}
 
-	wtBase := filepath.Join(cfg.Root(), cfg.Worktree.BaseDir, itemID)
+	wtBase := cfg.WorktreeForItem(itemID)
 	repos := cfg.Worktree.Repos
 	if len(repos) == 0 {
 		if _, err := os.Stat(wtBase); err == nil {
@@ -4394,7 +4396,7 @@ func allWorktreeDirsWithPR(cfg *config.Config, itemID string) []string {
 	if cfg.Worktree == nil || !cfg.Worktree.Enabled || cfg.Worktree.BaseDir == "" {
 		return []string{cfg.Root()}
 	}
-	wtBase := filepath.Join(cfg.Root(), cfg.Worktree.BaseDir, itemID)
+	wtBase := cfg.WorktreeForItem(itemID)
 
 	// Try to resolve from item's recorded PR manifest (e.g., "theraprac-web#94, theraprac-api#55")
 	s, _ := store.New(cfg)
@@ -5781,7 +5783,7 @@ func rewriteACPaths(cfg *config.Config, itemID, uatDir, cmd string) string {
 	}
 
 	// Check if the worktree base exists for this item
-	wtBase := filepath.Join(cfg.Root(), cfg.Worktree.BaseDir, itemID)
+	wtBase := cfg.WorktreeForItem(itemID)
 	if _, err := os.Stat(wtBase); err != nil {
 		return cmd
 	}
