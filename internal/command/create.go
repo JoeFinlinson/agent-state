@@ -187,7 +187,12 @@ func Create(s *store.Store, cfg *config.Config, itemType, title string, opts Cre
 	// agents see it immediately. Best-effort: a sync failure still
 	// returns 0; the on-disk file is correct and a later sync will
 	// carry the commit forward.
-	if err := s.GitSync(fmt.Sprintf("st create: %s — %s", id, title)); err != nil {
+	//
+	// I-442: pass the new item's path so it actually gets staged.
+	// GitSync's `git add -u` only catches tracked changes; new files
+	// require explicit paths.
+	newPath, _ := s.Path(id)
+	if err := s.GitSync(fmt.Sprintf("st create: %s — %s", id, title), newPath); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: sync after create failed: %v\n", err)
 	}
 	return 0
