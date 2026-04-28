@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"github.com/jfinlinson/agent-state/internal/changelog"
@@ -71,13 +72,15 @@ func Update(s *store.Store, cfg *config.Config, id, field, value string, mode Up
 
 	// I-406: priority must be 0-4. Reject explicit out-of-range values
 	// at the CLI boundary so a typo like `st update X priority 9` fails
-	// loud rather than silently corrupting the schema.
+	// loud rather than silently corrupting the schema. Use strconv.Atoi
+	// instead of Sscanf so "2.5" or "2abc" reject (Sscanf would happily
+	// store 2 and ignore the trailing characters).
 	if field == "priority" {
 		// Only validate when value is supplied directly (not from
 		// stdin/editor — those modes resolve below).
 		if mode == UpdateModeValue && value != "" {
-			var n int
-			if _, err := fmt.Sscanf(value, "%d", &n); err != nil || n < 0 || n > 4 {
+			n, err := strconv.Atoi(strings.TrimSpace(value))
+			if err != nil || n < 0 || n > 4 {
 				fmt.Fprintf(os.Stderr, "update: priority must be int 0-4 (got %q)\n", value)
 				return 2
 			}

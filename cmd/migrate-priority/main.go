@@ -199,9 +199,16 @@ func tagSuffix(tag string) string {
 
 // findField returns the value of a top-level YAML field and its line
 // index. Returns ("", -1) when not found.
+//
+// Tolerates CRLF line endings — files written by Windows-flavoured
+// tools (or VS Code without an .editorconfig override) use "\r\n", and
+// strings.Split("...", "\n") leaves the \r on each line. Stripping the
+// trailing CR before the indent check prevents `severity: high\r` from
+// being silently treated as indented and skipped.
 func findField(lines []string, field string) (string, int) {
 	prefix := field + ":"
 	for i, ln := range lines {
+		ln = strings.TrimRight(ln, "\r")
 		t := strings.TrimSpace(ln)
 		// Top-level only: indentation must be zero. Tab-indented blocks
 		// (e.g. inside time_tracking) are skipped.
@@ -259,19 +266,41 @@ func replaceLine(lines []string, idx int, newLine string) []string {
 }
 
 // ensureTag adds the tag to the top-level `tags:` list if not present.
-// If `tags:` is absent, appends a fresh tags block before the body
-// separator (or end-of-file).
+// Handles three variants:
+//
+//  1. Block form, multi-line:
+//     tags:
+//     - foo
+//     - bar
+//     → insert "- <tag>" at the end of the block.
+//
+//  2. Inline form: `tags: [foo, bar]`
+//     → if tag absent, replace with the block form preserving order.
+//
+//  3. No tags field at all
+//     → append a fresh `tags:\n- <tag>` block before the trailing blank.
 func ensureTag(lines []string, tag string) []string {
 	tagsLine := -1
+	inlineValue := ""
 	for i, ln := range lines {
-		t := strings.TrimSpace(ln)
-		if ln == t && t == "tags:" || strings.HasPrefix(t, "tags:") && ln == t {
+		clean := strings.TrimRight(ln, "\r")
+		t := strings.TrimSpace(clean)
+		if clean != t {
+			continue
+		}
+		if t == "tags:" {
 			tagsLine = i
+			break
+		}
+		if strings.HasPrefix(t, "tags:") {
+			tagsLine = i
+			rest := strings.TrimSpace(strings.TrimPrefix(t, "tags:"))
+			inlineValue = rest // could be `[foo, bar]` or empty
 			break
 		}
 	}
 	if tagsLine == -1 {
-		// Append at end (before trailing blank line if any).
+		// Variant 3: append at end (before trailing blank line if any).
 		end := len(lines)
 		for end > 0 && strings.TrimSpace(lines[end-1]) == "" {
 			end--
@@ -282,12 +311,40 @@ func ensureTag(lines []string, tag string) []string {
 		out = append(out, lines[end:]...)
 		return out
 	}
-	// Walk forward from tagsLine looking for "- <tag>" lines; insert
-	// if not present.
+	// Variant 2: inline `tags: [foo, bar]`. Parse the existing list,
+	// add tag if absent, rewrite as a multi-line block. Preserves
+	// original tags so we never silently lose data.
+	if strings.HasPrefix(inlineValue, "[") && strings.HasSuffix(inlineValue, "]") {
+		body := strings.TrimSuffix(strings.TrimPrefix(inlineValue, "["), "]")
+		existing := []string{}
+		for _, raw := range strings.Split(body, ",") {
+			trimmed := strings.TrimSpace(raw)
+			trimmed = strings.Trim(trimmed, `"'`)
+			if trimmed != "" {
+				existing = append(existing, trimmed)
+			}
+		}
+		for _, e := range existing {
+			if e == tag {
+				return lines
+			}
+		}
+		existing = append(existing, tag)
+		out := make([]string, 0, len(lines)+len(existing))
+		out = append(out, lines[:tagsLine]...)
+		out = append(out, "tags:")
+		for _, e := range existing {
+			out = append(out, "- "+e)
+		}
+		out = append(out, lines[tagsLine+1:]...)
+		return out
+	}
+	// Variant 1: block form. Walk forward looking for "- <existing>"
+	// lines; append "- <tag>" if not already present.
 	already := false
 	insertAt := tagsLine + 1
 	for i := tagsLine + 1; i < len(lines); i++ {
-		t := strings.TrimSpace(lines[i])
+		t := strings.TrimSpace(strings.TrimRight(lines[i], "\r"))
 		if !strings.HasPrefix(t, "- ") {
 			break
 		}
@@ -348,17 +405,28 @@ func appendChangelog(path, op, field, oldVal, newVal string) {
 }
 
 // writeReport renders a Markdown summary of the migration to the
-// configured path.
+// configured path. In dry-run mode the report is written to stdout
+// (prefixed with --- markers) instead of the file path so the operator
+// can inspect changes without a side-effect on disk.
 func writeReport(path string, results []fileResult, dryRun bool) {
-	f, err := os.Create(path)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "writing report: %v\n", err)
-		return
+	var w *bufio.Writer
+	if dryRun {
+		fmt.Println("--- BEGIN dry-run report (would have been written to " + path + ") ---")
+		w = bufio.NewWriter(os.Stdout)
+		defer func() {
+			w.Flush()
+			fmt.Println("--- END dry-run report ---")
+		}()
+	} else {
+		f, err := os.Create(path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "writing report: %v\n", err)
+			return
+		}
+		defer f.Close()
+		w = bufio.NewWriter(f)
+		defer w.Flush()
 	}
-	defer f.Close()
-
-	w := bufio.NewWriter(f)
-	defer w.Flush()
 
 	mode := "EXECUTE"
 	if dryRun {
