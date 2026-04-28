@@ -606,16 +606,18 @@ func seenSessionIDs(item *model.Item) map[string]bool {
 
 // isDuplicateRecentTurn returns true when the item's existing ai_turns
 // already contains a byte-identical-tuple turn within `withinSec`
-// seconds of `nowStr`. The tuple is (cache_in, reg_in, reg_out,
-// cache_out_1h, role, model) — the SubagentStop fan-out pattern that
-// produced 5× duplication on I-432 / I-441 / I-443 had byte-identical
-// values across all of these. Different agents producing legitimately-
-// identical token counts within 60s is vanishingly unlikely; the
-// guard rail is the time window, not the tuple match alone.
+// seconds of `nowStr`. The tuple is (cache_in, cache_out, reg_in,
+// reg_out, cache_out_1h, role, model) — the SubagentStop fan-out
+// pattern that produced 5× duplication on I-432 / I-441 / I-443 had
+// byte-identical values across all of these. Different agents
+// producing legitimately-identical token counts within 60s is
+// vanishingly unlikely; the time window is the primary guard rail.
 //
-// Walks ai_turns in reverse (newest first) and short-circuits at the
-// first entry older than the window — typical lists are small and the
-// dup, if any, is at the very tail.
+// Scans every ai_turn (no early-exit on document order) so clock skew
+// between parallel agents writing to the same item — which can produce
+// out-of-order timestamps — doesn't silently let a duplicate through.
+// Lists are small in practice; the linear scan cost is irrelevant
+// against the disk write.
 func isDuplicateRecentTurn(item *model.Item, p SessionLogPayload, nowStr string, withinSec int) bool {
 	if item == nil || item.Doc == nil {
 		return false
@@ -626,8 +628,6 @@ func isDuplicateRecentTurn(item *model.Item, p SessionLogPayload, nowStr string,
 	}
 	cutoff := now.Add(-time.Duration(withinSec) * time.Second)
 
-	// Collect existing ai_turns lines in document order so we can scan from the end.
-	var entries []string
 	inTimeTracking := false
 	inAITurns := false
 	for _, line := range item.Doc.Lines {
@@ -654,11 +654,7 @@ func isDuplicateRecentTurn(item *model.Item, p SessionLogPayload, nowStr string,
 		if !strings.HasPrefix(trimmed, "- ") {
 			continue
 		}
-		entries = append(entries, strings.TrimPrefix(trimmed, "- "))
-	}
-
-	for i := len(entries) - 1; i >= 0; i-- {
-		entry := entries[i]
+		entry := strings.TrimPrefix(trimmed, "- ")
 		atStr := extractField(entry, "at:")
 		if atStr == "" {
 			continue
@@ -668,9 +664,12 @@ func isDuplicateRecentTurn(item *model.Item, p SessionLogPayload, nowStr string,
 			continue
 		}
 		if at.Before(cutoff) {
-			return false // older than window — and earlier entries are even older
+			continue
 		}
 		if extractIntField(entry, "cache_in:") != p.CacheInTokens {
+			continue
+		}
+		if extractIntField(entry, "cache_out:") != p.CacheOutTokens {
 			continue
 		}
 		if extractIntField(entry, "reg_in:") != p.RegInputTokens {

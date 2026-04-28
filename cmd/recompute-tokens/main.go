@@ -210,7 +210,15 @@ func processFile(path string, dryRun bool) (*itemReport, error) {
 	}
 	out = applyTotalsDeltas(out, rep)
 
-	if err := os.WriteFile(path, []byte(strings.Join(out, "\n")), 0644); err != nil {
+	// Atomic write: tmp + rename so a kill mid-write never truncates a
+	// live item file. The tool walks dirs that may be touched by an
+	// active st session in parallel — the rename is the only safe move.
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(strings.Join(out, "\n")), 0644); err != nil {
+		return nil, err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
 		return nil, err
 	}
 	return rep, nil

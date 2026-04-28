@@ -5790,15 +5790,14 @@ func printCompletionReport(results []ItemResult, sprintID string, totalDuration 
 }
 
 // stageProgress maps a delivery.stage value to a progress-bar fill
-// count, scaled to a pipeline of `totalSteps` width. I-447: items
-// driven interactively (no st run pipeline) only have delivery.stage
-// to signal lifecycle position; this lets st status / st run status
+// count, scaled to a pipeline of `totalSteps` width. Items driven
+// interactively (no st run pipeline) only have delivery.stage to
+// signal lifecycle position; this lets st status / st run status
 // render a meaningful bar without requiring pipeline metadata.
 //
-// The canonical lifecycle has 8 stages but `totalSteps` is the configured
-// pipeline length; we scale by stageIndex/8 so a 13-step pipeline renders
-// "merged" at ~10 fills, an 8-step pipeline renders it at 7. Returns 0
-// for unknown stages — caller falls back to step-driven progress.
+// Scales by stageIndex/totalStages so a 13-step pipeline renders
+// "merged" at ~6 fills, an 8-step pipeline renders it at 4. Returns
+// 0 for unknown stages so callers fall back to step-driven progress.
 func stageProgress(stage string, totalSteps int) int {
 	if totalSteps <= 0 {
 		return 0
@@ -5807,7 +5806,6 @@ func stageProgress(stage string, totalSteps int) int {
 	if idx < 0 {
 		return 0
 	}
-	const totalStages = 8 // coding..closed
 	completed := (idx + 1) * totalSteps / totalStages
 	if completed > totalSteps {
 		completed = totalSteps
@@ -5815,8 +5813,16 @@ func stageProgress(stage string, totalSteps int) int {
 	return completed
 }
 
+// totalStages is the count of distinct ordinal positions in the
+// canonical delivery lifecycle below. Kept in sync with the largest
+// index returned by stageIndex.
+const totalStages = 9
+
 // stageIndex returns the position (0-based) of `stage` in the canonical
-// delivery lifecycle. -1 for unknown values so callers can fall back.
+// delivery lifecycle. Each named stage has a distinct ordinal so the
+// advanceDeliveryStage forward-only guard can detect every legitimate
+// transition (deployed_dev → uat_approved must NOT collide). -1 for
+// unknown values so callers can fall back.
 func stageIndex(stage string) int {
 	switch stage {
 	case "coding":
@@ -5834,11 +5840,12 @@ func stageIndex(stage string) int {
 	case "deployed_dev":
 		return 6
 	case "uat_approved", "deployed":
-		// uat_approved (issue-style) and deployed (task-style) both sit
-		// at the "verified, awaiting close" position — same progress.
-		return 6
-	case "closed", "done":
+		// uat_approved (issue-style) and deployed (task-style) sit at the
+		// same "verified, awaiting close" position. Distinct from
+		// deployed_dev (the dev-tier deploy that precedes verification).
 		return 7
+	case "closed", "done":
+		return 8
 	}
 	return -1
 }
