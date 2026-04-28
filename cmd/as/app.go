@@ -354,7 +354,7 @@ YAML block scalars so multi-line values replace cleanly.`,
 			"V1 supports same-item spawn only — the parent's claim covers the\n" +
 			"child's work, no new worktree is created. Different-item spawn is\n" +
 			"a tracked follow-up.\n\n" +
-			"Prints `<child-id>\\t<pid>` on stdout so the caller can pipe the\n" +
+			"Prints `<child-id><TAB><pid>` on stdout so the caller can pipe the\n" +
 			"id into a subprocess launcher (e.g. `AS_AGENT_ID=$(...) st run`).",
 		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {

@@ -3,6 +3,7 @@ package command
 import (
 	"fmt"
 	"os"
+	"regexp"
 
 	"github.com/jfinlinson/agent-state/internal/agent"
 	"github.com/jfinlinson/agent-state/internal/config"
@@ -13,32 +14,47 @@ import (
 type SpawnChildOpts struct {
 	// Item is the item id the child will work on. v1 supports only
 	// items the parent already claims (same-item spawn shares the
-	// parent's worktree per T-312). Different-item spawn is a tracked
-	// follow-up — until then the spawn returns an explanatory error.
+	// parent's worktree per T-312). Different-item spawn is filed as
+	// I-452 follow-up.
 	Item string
 }
+
+// childSuffixRE matches `<base>-<N>` agent ids that the nextSuffix
+// scheme produces for child agents — used to infer "caller is already
+// a child" when the env-var heritage signal is missing (path-derived
+// or local-config-derived identities don't populate ParentID, so the
+// id pattern is the only depth signal available).
+var childSuffixRE = regexp.MustCompile(`^[A-Za-z0-9._-]+-\d+$`)
 
 // SpawnChild materializes a child agent registration under the
 // caller's identity. T-326 / T-312.
 //
 // Behavior:
-//   - Resolves parent identity from the calling process via
-//     cfg.Identity(). Refuses if no identity is bound.
-//   - Enforces the depth-2 cap: if the caller is already a child
-//     (Identity.ParentID is set), spawning again would reach
-//     grandchild depth — rejected with a policy message.
+//   - Resolves parent identity via cfg.Identity(). Refuses if no
+//     identity is bound or if AS_SESSION_ID is empty (a session id
+//     is required so the registration's claim guard isn't a no-op).
+//   - Enforces the depth-2 cap. The caller is "already a child" when
+//     EITHER Identity.ParentID is set (env-var heritage) OR the
+//     caller's id matches the `<base>-<N>` suffix pattern (path or
+//     local-config heritage that doesn't populate ParentID).
 //   - Calls agent.Register with ParentAgentID + RootAgentID set so
 //     the child's session events roll up to the root for cost
 //     attribution (I-369).
-//   - For v1, only same-item spawn is supported. The parent's claim
-//     covers the child's work; no new worktree is created. Different
-//     item spawn is intentionally rejected with a follow-up pointer.
 //
-// Returns the child agent id + PID on stdout (one line, tab-separated)
-// so the caller can pipe into a subprocess launcher. Registration is
-// PID=os.Getpid() of THIS spawn-child invocation: the child agent
-// inherits the parent's process tree until the caller exec's a real
-// subprocess (out of scope for v1).
+// Output: prints `<child-id><TAB><pid>` on stdout so the caller can
+// pipe into `cut` / `read` and exec a downstream subprocess with
+// AS_AGENT_ID=<child-id>.
+//
+// IMPORTANT — registration lifetime: the registration's PID is
+// os.Getpid() of THIS spawn-child invocation. The process exits
+// immediately after printing, so by the time a subsequent agent.Sweep
+// runs the PID is dead and the registration gets reaped. Callers must
+// adopt the registration promptly via AS_AGENT_ID=<id> in their next
+// command. A future enhancement would let callers pass a `--pid <N>`
+// to bind the registration to an already-forked child process.
+//
+// V1 supports SAME-ITEM spawn only (parent's claim covers the child).
+// Different-item spawn with a new worktree is filed as I-452.
 func SpawnChild(s *store.Store, cfg *config.Config, opts SpawnChildOpts) int {
 	if opts.Item == "" {
 		fmt.Fprintln(os.Stderr, "spawn child: item id is required")
@@ -54,26 +70,41 @@ func SpawnChild(s *store.Store, cfg *config.Config, opts SpawnChildOpts) int {
 		return 1
 	}
 
-	// Depth-2 policy: a child cannot itself spawn another child.
-	// Identity.ParentID being non-empty means the caller is already
-	// a child (root agents have ParentID == "").
-	if parent.ParentID != "" {
-		fmt.Fprintf(os.Stderr,
-			"spawn child: %s is already a child of %s — depth-2 cap reached. "+
-				"Spawn from the root agent (%s) instead.\n",
-			parent.ID, parent.ParentID, parent.RootID)
+	// Refuse without a session id. parentSession ends up in both the
+	// claim guard below and the SpawnedBySession field of the new
+	// registration; an empty session would silently bypass scope
+	// collision detection between zero-session agents.
+	parentSession := cfg.SessionID()
+	if parentSession == "" {
+		fmt.Fprintln(os.Stderr,
+			"spawn child: no AS_SESSION_ID set. A session id is required "+
+				"so the parent's claim is unambiguous.")
 		return 1
 	}
 
-	// V1: same-item spawn only. The parent's claim on `Item` covers
-	// the child's work. Verify the item exists; verify the parent
-	// claimed it (or is unclaimed and the parent is going to start).
+	// Depth-2 policy. Two signals:
+	//  - ParentID set via AS_AGENT_PARENT_ID env var (explicit
+	//    spawn-from-spawn).
+	//  - Id pattern `<base>-<N>` (caller's identity came from a path
+	//    like `theraprac-agent-a-1`, where Identity() doesn't
+	//    populate ParentID but the suffix already encodes child-ness).
+	if parent.ParentID != "" || childSuffixRE.MatchString(parent.ID) {
+		stated := parent.ParentID
+		if stated == "" {
+			stated = "<inferred from id>"
+		}
+		fmt.Fprintf(os.Stderr,
+			"spawn child: %s is already a child (parent=%s) — depth-2 cap reached. "+
+				"Spawn from the root agent instead.\n",
+			parent.ID, stated)
+		return 1
+	}
+
 	item, ok := s.Get(opts.Item)
 	if !ok {
 		fmt.Fprintf(os.Stderr, "spawn child: item %s not found\n", opts.Item)
 		return 1
 	}
-	parentSession := cfg.SessionID()
 	if item.ClaimedBy != "" && item.ClaimedBy != parentSession {
 		fmt.Fprintf(os.Stderr,
 			"spawn child: %s is claimed by session %s, not by parent session %s\n",
@@ -81,16 +112,18 @@ func SpawnChild(s *store.Store, cfg *config.Config, opts SpawnChildOpts) int {
 		return 1
 	}
 
-	// Compute the root: parent.RootID was set if the parent is a
-	// child of yet-another-agent (we already rejected that above), so
-	// here parent IS root. RootID falls back to parent.ID.
 	rootID := parent.RootID
 	if rootID == "" {
 		rootID = parent.ID
 	}
 
-	// Inherit the spawning session so I-369's cost rollup walks the
-	// chain from child → parent → root.
+	// I-326: deliberately do NOT defer the cleanup. The registration
+	// must outlive this short-lived spawn-child invocation so the
+	// caller's downstream subprocess can adopt the chain via
+	// AS_AGENT_ID=<reg.AgentID>. agent.Sweep reclaims the file when
+	// the registered PID is no longer alive — that's expected
+	// turnover, not a leak. (Diverges from start.go/run.go where the
+	// registration's lifecycle matches the long-running process.)
 	reg, _, err := agent.Register(cfg, agent.Options{
 		BaseAgentID:      parent.ID,
 		ParentAgentID:    parent.ID,
@@ -105,7 +138,6 @@ func SpawnChild(s *store.Store, cfg *config.Config, opts SpawnChildOpts) int {
 		return 1
 	}
 
-	// Tab-separated so callers can pipe into `cut` / `read`.
 	fmt.Printf("%s\t%d\n", reg.AgentID, reg.PID)
 	return 0
 }

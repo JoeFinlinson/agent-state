@@ -262,3 +262,52 @@ func TestSpawnChild_MissingItemRejected(t *testing.T) {
 		t.Errorf("expected 'not found' in stderr, got %q", stderr)
 	}
 }
+
+// TestSpawnChild_NoSessionRejected — caller has no AS_SESSION_ID.
+// Without a session id, the claim guard's `item.ClaimedBy !=
+// parentSession` check would treat any zero-session-claimed item as
+// owned-by-us, allowing silent scope collisions. Refuse loudly.
+func TestSpawnChild_NoSessionRejected(t *testing.T) {
+	t.Setenv("AS_AGENT_ID", "agent-a")
+	t.Setenv("AS_AGENT_PARENT_ID", "")
+	t.Setenv("AS_SESSION_ID", "")
+
+	env := testutil.NewEnv(t)
+
+	_, stderr, code := captureSpawnIO(t, func() int {
+		return SpawnChild(env.S, env.Cfg, SpawnChildOpts{Item: "T-001"})
+	})
+
+	if code == 0 {
+		t.Errorf("expected rejection without session id, got exit 0")
+	}
+	if !strings.Contains(stderr, "AS_SESSION_ID") {
+		t.Errorf("expected AS_SESSION_ID hint in stderr, got %q", stderr)
+	}
+}
+
+// TestSpawnChild_PathDerivedChildRejected — path-derived identity
+// like `agent-a-1` does NOT populate ParentID, so the env-var check
+// alone wouldn't catch it. The pattern check (`<base>-<N>` suffix)
+// is the second depth signal. A grandchild-shaped id must also be
+// blocked from spawning.
+func TestSpawnChild_PathDerivedChildRejected(t *testing.T) {
+	t.Setenv("AS_AGENT_ID", "agent-a-1")
+	t.Setenv("AS_AGENT_PARENT_ID", "")
+	t.Setenv("AS_AGENT_ROOT_ID", "")
+	t.Setenv("AS_SESSION_ID", "session-pathchild")
+
+	env := testutil.NewEnv(t)
+	stampParentClaim(t, env, "T-001", "session-pathchild")
+
+	_, stderr, code := captureSpawnIO(t, func() int {
+		return SpawnChild(env.S, env.Cfg, SpawnChildOpts{Item: "T-001"})
+	})
+
+	if code == 0 {
+		t.Errorf("expected rejection of path-derived child, got exit 0")
+	}
+	if !strings.Contains(stderr, "depth-2") {
+		t.Errorf("expected depth-2 message in stderr, got %q", stderr)
+	}
+}
