@@ -132,13 +132,24 @@ func matchOne(item *model.Item, f filterSpec) bool {
 		// Match either assigned_to (current ownership) OR last_touched_by
 		// (anyone who's recently touched it). Operator's "what's agent-b
 		// involved in" question is loose by intent.
+		want := stripAgentPrefix(f.Value)
+		// Defensive: a malformed input like `agent:agent-` collapses to
+		// empty after stripAgentPrefix, which would silently match every
+		// item with empty assigned_to / last_touched_by. Reject that case
+		// rather than acting as a wildcard.
+		if want == "" {
+			return false
+		}
 		assigned := stripAgentPrefix(itemField(item, "assigned_to"))
 		toucher := stripAgentPrefix(item.LastTouchedBy)
-		want := stripAgentPrefix(f.Value)
 		return assigned == want || toucher == want
 	case "assigned":
+		want := stripAgentPrefix(f.Value)
+		if want == "" {
+			return false
+		}
 		assigned := stripAgentPrefix(itemField(item, "assigned_to"))
-		return assigned == stripAgentPrefix(f.Value)
+		return assigned == want
 	case "status":
 		return matchInList(item.Status, f.Value)
 	case "type":
@@ -194,7 +205,10 @@ func itemField(item *model.Item, key string) string {
 }
 
 // applyStatusQuery filters and sorts a list of items per the parsed
-// specs. Pure function over inputs — easy to unit test.
+// specs. Deterministic over inputs but NOT pure: when sorting by metric
+// fields (cost/time/lines), it routes through ExtractItemMetrics which
+// reads the PR manifest from disk for net-LOC. Tests pass an empty
+// manifestDir to keep the I/O off the unit-test path.
 func applyStatusQuery(items []*model.Item, filters []filterSpec, ss sortSpec, sinceCutoff time.Time, cfg *config.Config, manifestDir string, now time.Time) []*model.Item {
 	out := make([]*model.Item, 0, len(items))
 	for _, it := range items {
@@ -288,15 +302,32 @@ type statusJSONMetrics struct {
 // statusJSON emits a flat list of items matching the query, with metrics
 // inlined per item. JSON consumers (jq, scripts) get the same data the
 // text dashboard renders, no separate metric dump needed.
+//
+// Default scope matches the text dashboard's active-first bias: when the
+// caller doesn't pass a `status:` filter, terminal statuses (completed,
+// resolved, abandoned, wontfix, archived) are excluded so a casual
+// `st status --json` doesn't dump hundreds of archive entries. Operators
+// who want the archive can opt in via `--filter status:archived` or
+// equivalent.
 func statusJSON(s storeForQuery, cfg *config.Config, filters []filterSpec, ss sortSpec, sinceCutoff time.Time) int {
-	// Source set: every item the dashboard could display. We don't
-	// pre-narrow to "active only" because filters might want issues or
-	// queued items too.
 	allMap := s.All()
 	all := make([]*model.Item, 0, len(allMap))
 	for _, item := range allMap {
 		all = append(all, item)
 	}
+
+	// Apply the default non-terminal narrowing only when the caller
+	// didn't already specify a status filter.
+	if !hasFilterKey(filters, "status") {
+		nonTerminal := make([]*model.Item, 0, len(all))
+		for _, it := range all {
+			if !cfg.IsTerminalStatus(it.Type, it.Status) {
+				nonTerminal = append(nonTerminal, it)
+			}
+		}
+		all = nonTerminal
+	}
+
 	now := time.Now()
 	filtered := applyStatusQuery(all, filters, ss, sinceCutoff, cfg, cfg.ManifestDir(), now)
 
@@ -346,6 +377,18 @@ func statusJSON(s storeForQuery, cfg *config.Config, filters []filterSpec, ss so
 // caller flattens to a slice before passing to applyStatusQuery.
 type storeForQuery interface {
 	All() map[string]*model.Item
+}
+
+// hasFilterKey reports whether any filter spec has the given key. Used
+// to decide whether to apply default narrowing (e.g. exclude terminal
+// statuses when no `status:` filter is set).
+func hasFilterKey(filters []filterSpec, key string) bool {
+	for _, f := range filters {
+		if f.Key == key {
+			return true
+		}
+	}
+	return false
 }
 
 func contains(haystack []string, needle string) bool {

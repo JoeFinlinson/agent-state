@@ -219,6 +219,54 @@ func TestStatusQuery_JSONOutputShape(t *testing.T) {
 	}
 }
 
+// /code-review finding: `--filter agent:agent-` collapsed to empty after
+// stripAgentPrefix, silently matching every item with empty assigned_to /
+// last_touched_by. Now rejected as a no-match.
+func TestApplyStatusQuery_AgentFilterRejectsEmptyAfterStripPrefix(t *testing.T) {
+	a := itemFixture("T-001", "task", "active", 1, "", nil)        // unassigned
+	b := itemFixture("T-002", "task", "active", 1, "agent-b", nil) // real agent
+	all := []*model.Item{a, b}
+
+	// Malformed input: "agent-" alone strips to "". Must NOT match anything.
+	out := applyStatusQuery(all, []filterSpec{{Key: "agent", Value: "agent-"}}, sortSpec{}, time.Time{}, nil, "", time.Now())
+	if len(out) != 0 {
+		t.Errorf("agent:agent- should not match (empty after prefix strip), got %v", idsOf(out))
+	}
+}
+
+// /code-review finding: `st status --json` returned ALL items including
+// archived/completed by default, inconsistent with the text dashboard's
+// active-first bias. With no `status:` filter, JSON now narrows to
+// non-terminal statuses by default.
+func TestStatusQuery_JSONDefaultsToNonTerminal(t *testing.T) {
+	s, cfg := setupTestEnv(t)
+	out := captureStdout(t, func() {
+		Status(s, cfg, "", StatusOpts{JSON: true, NoRefresh: true})
+	})
+	var rows []statusJSONItem
+	if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		t.Fatalf("unmarshal: %v\nout: %s", err, out)
+	}
+	for _, r := range rows {
+		if r.Status == "completed" || r.Status == "resolved" || r.Status == "abandoned" || r.Status == "wontfix" || r.Status == "archived" {
+			t.Errorf("default JSON should exclude terminal statuses, got %s status=%s", r.ID, r.Status)
+		}
+	}
+	// Sanity: with explicit `status:completed` filter, terminal items
+	// should appear (proves the default narrowing is opt-out, not hardcoded).
+	out = captureStdout(t, func() {
+		Status(s, cfg, "", StatusOpts{JSON: true, NoRefresh: true, Filters: []string{"status:completed"}})
+	})
+	if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, r := range rows {
+		if r.Status != "completed" {
+			t.Errorf("status:completed filter leaked non-completed: %+v", r)
+		}
+	}
+}
+
 func TestStatusQuery_JSONFilterApplied(t *testing.T) {
 	s, cfg := setupTestEnv(t)
 	out := captureStdout(t, func() {
