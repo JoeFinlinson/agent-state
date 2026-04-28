@@ -279,7 +279,10 @@ const refreshFetchTimeout = 10 * time.Second
 //     pull cannot overwrite them, mirroring GitPull's protection.
 //  3. `git fetch origin` with a timeout — fetch failure → RefreshOffline.
 //  4. Inspect ahead/behind counts:
-//       - ahead > 0: RefreshDiverged (caller must `git pull --rebase`).
+//       - ahead > 0 AND behind > 0: RefreshDiverged (true divergence;
+//         caller must `git pull --rebase` or equivalent recovery).
+//       - ahead > 0 AND behind == 0: RefreshAhead with AheadCount
+//         (I-430: unpushed local commits, recoverable via `st sync`).
 //       - behind == 0: RefreshUpToDate (silent success).
 //       - behind > 0 with uncommitted blockers: RefreshBlocked.
 //       - behind > 0 otherwise: `git pull --ff-only`. Success →
