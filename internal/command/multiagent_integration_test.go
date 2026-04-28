@@ -28,9 +28,8 @@ import (
 	"time"
 )
 
-// stBin is the path to the freshly-built st binary, populated by
-// TestMain so every test reuses the same build. Test parallelism is
-// safe — the binary is read-only.
+// stBin is read-only after TestMain returns, so concurrent test
+// goroutines can share the path without synchronization.
 var stBin string
 
 func TestMain(m *testing.M) {
@@ -80,7 +79,7 @@ type multiEnv struct {
 func newMultiEnv(t *testing.T) *multiEnv {
 	t.Helper()
 	root := t.TempDir()
-	for _, sub := range []string{"tasks", "issues", "archive", ".as", ".as/agents", ".as/sessions", ".as/mailboxes", "templates"} {
+	for _, sub := range []string{"tasks", "issues", "archive", ".as", ".as/agents", ".as/sessions", "templates"} {
 		if err := os.MkdirAll(filepath.Join(root, sub), 0755); err != nil {
 			t.Fatalf("mkdir %s: %v", sub, err)
 		}
@@ -164,11 +163,17 @@ type stProc struct {
 	Stdout     string
 	Stderr     string
 	ExitCode   int
+	ExecErr    error // non-nil only when exec failed before producing an exit code
 	StartedAt  time.Time
 	FinishedAt time.Time
 }
 
 // runST invokes the binary synchronously and captures everything.
+// Non-ExitError exec failures (binary missing, fork failure) are
+// stashed on stProc.ExecErr for the caller to surface — never via
+// t.Fatal from this goroutine, since runConcurrent calls runST from
+// fan-out goroutines and Go testing forbids t.Fatal/FailNow outside
+// the test-running goroutine.
 func runST(t *testing.T, env *multiEnv, agentID, sessionID string, args ...string) *stProc {
 	t.Helper()
 	p := &stProc{AgentID: agentID, SessionID: sessionID, Args: args, StartedAt: time.Now()}
@@ -189,21 +194,22 @@ func runST(t *testing.T, env *multiEnv, agentID, sessionID string, args ...strin
 		if ee, ok := err.(*exec.ExitError); ok {
 			p.ExitCode = ee.ExitCode()
 		} else {
-			t.Fatalf("exec %s %v: %v", stBin, args, err)
+			p.ExecErr = err
 		}
 	}
 	return p
 }
 
 // runConcurrent fires N invocations in parallel and waits for all.
-// Returns results in the order of the input procs slice.
+// Returns results in the order of the input procs slice. Caller must
+// inspect each result's ExecErr in the test goroutine — runST cannot
+// t.Fatal from inside the fan-out.
 func runConcurrent(t *testing.T, env *multiEnv, procs []procSpec) []*stProc {
 	t.Helper()
 	results := make([]*stProc, len(procs))
 	var wg sync.WaitGroup
-	// Use a barrier so all subprocesses fire on the same Tick — this
-	// maximizes the chance the OS schedules them simultaneously, which
-	// is what we want for race coverage.
+	// Barrier: every subprocess unblocks on the same `close(start)`
+	// signal, maximizing the chance the OS schedules them concurrently.
 	start := make(chan struct{})
 	for i, ps := range procs {
 		i, ps := i, ps
@@ -216,6 +222,11 @@ func runConcurrent(t *testing.T, env *multiEnv, procs []procSpec) []*stProc {
 	}
 	close(start)
 	wg.Wait()
+	for _, r := range results {
+		if r != nil && r.ExecErr != nil {
+			t.Fatalf("subprocess exec failed (agent=%s args=%v): %v", r.AgentID, r.Args, r.ExecErr)
+		}
+	}
 	return results
 }
 
@@ -499,19 +510,32 @@ func TestMultiAgent_StaleClaimSweepReleasesGhostsPreservesLive(t *testing.T) {
 	livePID := os.Getpid()
 
 	agentsDir := filepath.Join(env.Root, ".as", "agents")
+	// Schema must match writeRegistration in internal/agent/agent.go —
+	// `started:` (not started_at), `root:` populated to mirror the
+	// writer. A field-name mismatch wouldn't fail the test today
+	// (Sweep only reads pid) but bakes in malformed fixture data that
+	// breaks silently the moment any caller starts using Started or Root.
 	writeItem(t, filepath.Join(agentsDir, "agent-ghost.yaml"), fmt.Sprintf(`agent_id: agent-ghost
 session_id: ghost-session
 pid: %d
 hostname: test-host
-started_at: 2026-04-28T10:00:00Z
+started: 2026-04-28T10:00:00Z
 scope: ""
+parent: ""
+root: agent-ghost
+spawned_by_session: ""
+role: ""
 `, deadPID))
 	writeItem(t, filepath.Join(agentsDir, "agent-live.yaml"), fmt.Sprintf(`agent_id: agent-live
 session_id: live-session
 pid: %d
 hostname: test-host
-started_at: 2026-04-28T10:00:00Z
+started: 2026-04-28T10:00:00Z
 scope: ""
+parent: ""
+root: agent-live
+spawned_by_session: ""
+role: ""
 `, livePID))
 
 	// `st agent sweep` (or any command that calls agent.Sweep). The
