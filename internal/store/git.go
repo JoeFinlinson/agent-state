@@ -150,11 +150,22 @@ func restoreLockedItems(snapshots map[string][]byte) {
 }
 
 // GitSync stages, commits, and pushes changes in the item root directory.
-// Message is the commit message. Pre-pulls with --ff-only before committing
-// to minimize conflicts. If push fails (remote ahead), retries with
-// pull --rebase + re-push up to maxRetries times. Detects rebase conflicts
-// and aborts cleanly with an error.
-func (s *Store) GitSync(message string) error {
+// Message is the commit message. Optional newPaths is the list of NEW
+// (currently-untracked) files this caller wants committed; existing
+// tracked files that the caller modified are picked up automatically
+// via `git add -u`.
+//
+// I-442: switching from `git add -A` to `git add -u` + explicit
+// new-file paths fixes the canonical-clone bleed. The shared workspace
+// clone holds in-progress edits from peer agents on feature branches;
+// `git add -A` swept those untracked files into whatever sync command
+// happened to fire next, scrambling commit attribution. `git add -u`
+// only stages tracked-and-modified files, so peer-WIP doesn't leak.
+//
+// Pre-pulls with --ff-only before committing to minimize conflicts. If
+// push fails (remote ahead), retries with pull --rebase + re-push up
+// to maxRetries times. Detects rebase conflicts and aborts cleanly.
+func (s *Store) GitSync(message string, newPaths ...string) error {
 	if s.cfg.Git == nil || !s.cfg.Git.AutoCommit {
 		return nil
 	}
@@ -176,9 +187,35 @@ func (s *Store) GitSync(message string) error {
 		restoreLockedItems(snap)
 	}
 
-	// Stage all changes in the item root
-	if err := gitCmd(root, "add", "-A"); err != nil {
-		return fmt.Errorf("git add: %w", err)
+	// Stage tracked-modified files only — peer agents' untracked WIP
+	// files in the shared canonical clone DO NOT get swept.
+	if err := gitCmd(root, "add", "-u"); err != nil {
+		return fmt.Errorf("git add -u: %w", err)
+	}
+
+	// Stage explicit new files (callers that create files pass them).
+	// Reject paths outside `root` — defense in depth for the bleed
+	// this PR is fixing. A bugged caller passing a sibling agent's
+	// path would otherwise produce a `../..` rel and git would happily
+	// stage it. `--` defangs pathspecs that begin with `-`.
+	for _, p := range newPaths {
+		if p == "" {
+			continue
+		}
+		rel := p
+		if filepath.IsAbs(p) {
+			r, err := filepath.Rel(root, p)
+			if err != nil {
+				return fmt.Errorf("git add new path %q: %w", p, err)
+			}
+			rel = r
+		}
+		if rel == ".." || strings.HasPrefix(rel, "../") || strings.HasPrefix(rel, "..\\") {
+			return fmt.Errorf("git add: path %q is outside item root %q", p, root)
+		}
+		if err := gitCmd(root, "add", "--", rel); err != nil {
+			return fmt.Errorf("git add %q: %w", rel, err)
+		}
 	}
 
 	// Check if there's anything to commit

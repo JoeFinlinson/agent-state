@@ -256,7 +256,12 @@ func Close(s *store.Store, cfg *config.Config, id, resolution string, opts Close
 	// move, and "Closed" turned out to be a lie. GitSync is best-effort —
 	// a failure here only warns, because the filesystem mutation already
 	// succeeded and a later sync will carry the commit forward.
-	if err := s.GitSync(fmt.Sprintf("st close: %s (%s)", id, resolution)); err != nil {
+	// I-442: pass the post-Move path. The Move from issues/→archive/
+	// (or tasks/→archive/) is a rename — git add -u catches the
+	// delete-from-old, but the new path is untracked and needs
+	// explicit staging.
+	newPath, _ := s.Path(id)
+	if err := s.GitSync(fmt.Sprintf("st close: %s (%s)", id, resolution), newPath); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: sync after close failed: %v\n", err)
 	}
 

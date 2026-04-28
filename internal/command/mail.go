@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/jfinlinson/agent-state/internal/config"
@@ -42,7 +43,10 @@ func MailSend(s *store.Store, cfg *config.Config, to string, opts MailSendOpts) 
 		return 1
 	}
 	fmt.Printf("Sent %s → %s (kind=%s, id=%s)\n", from, to, opts.Kind, id)
-	if err := s.GitSync(fmt.Sprintf("mail send: %s -> %s (%s)", from, to, opts.Kind)); err != nil {
+	// I-442: pass the new mail file path so it's staged. mail.Send
+	// places the file under MailboxDir(to)/<id>.yaml.
+	newPath := filepath.Join(mail.MailboxDir(cfg, to), id+".yaml")
+	if err := s.GitSync(fmt.Sprintf("mail send: %s -> %s (%s)", from, to, opts.Kind), newPath); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: sync after send failed: %v\n", err)
 	}
 	return 0
@@ -107,7 +111,10 @@ func MailArchive(s *store.Store, cfg *config.Config, recipient, id string) int {
 		return 1
 	}
 	fmt.Printf("Archived %s\n", id)
-	if err := s.GitSync(fmt.Sprintf("mail archive: %s/%s", recipient, id)); err != nil {
+	// I-442: rename = delete-old + add-new. git add -u catches the
+	// delete; the new path under archive/ needs explicit staging.
+	newPath := filepath.Join(mail.ArchiveDir(cfg, recipient), id+".yaml")
+	if err := s.GitSync(fmt.Sprintf("mail archive: %s/%s", recipient, id), newPath); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: sync after archive failed: %v\n", err)
 	}
 	return 0

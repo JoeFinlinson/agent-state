@@ -119,6 +119,134 @@ func TestGitSyncNothingToCommit(t *testing.T) {
 	}
 }
 
+// I-442: GitSync MUST NOT sweep peer agents' untracked files. The
+// canonical workspace clone is shared across agents — a peer's
+// in-progress work-in-progress files (an untracked .md item another
+// agent created but hasn't synced yet) sit in the same directory tree
+// when this agent's GitSync fires. Pre-fix, `git add -A` swept those
+// untracked files into whatever sync command happened to fire next,
+// scrambling commit attribution. Now `git add -u` stages only
+// tracked-modified files, leaving untracked peer files alone.
+func TestGitSyncDoesNotSweepUntrackedPeerFiles(t *testing.T) {
+	root, _ := setupTestDir(t)
+	asDir := filepath.Join(root, ".as")
+	os.MkdirAll(asDir, 0755)
+	os.WriteFile(filepath.Join(asDir, "config.yaml"), []byte("paths:\n  root: .\n"), 0644)
+	initGitRepo(t, root)
+
+	cfg, _ := config.Load(root)
+	cfg.Git = &config.GitConfig{AutoCommit: true, AutoPush: false}
+
+	s, _ := New(cfg)
+
+	// This agent modifies a tracked item.
+	item, _ := s.Get("T-001")
+	item.Doc.SetField("status", "active")
+	s.write(item)
+
+	// Simulate a peer agent's WIP: an untracked file appears in the
+	// items dir. Pre-fix, git add -A would have grabbed it.
+	peerWIP := filepath.Join(root, "issues", "I-999-peer-wip.md")
+	os.MkdirAll(filepath.Dir(peerWIP), 0755)
+	os.WriteFile(peerWIP, []byte("id: I-999\ntype: issue\nstatus: queued\ntitle: peer wip\n"), 0644)
+
+	if err := s.GitSync("agent-b: update T-001"); err != nil {
+		t.Fatalf("GitSync: %v", err)
+	}
+
+	// The commit MUST contain the tracked T-001 modification.
+	cmd := exec.Command("git", "show", "--stat", "--name-only", "HEAD")
+	cmd.Dir = root
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git show: %v", err)
+	}
+	body := string(out)
+	if !contains(body, "T-001") {
+		t.Errorf("HEAD commit should include the modified T-001 file. got:\n%s", body)
+	}
+
+	// The commit MUST NOT contain the untracked peer file. This is the
+	// regression guard against the canonical-clone bleed.
+	if contains(body, "I-999") || contains(body, "peer-wip") {
+		t.Errorf("HEAD commit swept up an untracked peer file. got:\n%s", body)
+	}
+
+	// And the file should still exist on disk, untracked, ready for
+	// the peer's own next GitSync to pick up.
+	if _, err := os.Stat(peerWIP); err != nil {
+		t.Errorf("peer WIP file disappeared: %v", err)
+	}
+	cmd = exec.Command("git", "status", "--porcelain", "issues/I-999-peer-wip.md")
+	cmd.Dir = root
+	statusOut, _ := cmd.Output()
+	if string(statusOut) == "" {
+		t.Errorf("expected peer file to still show as untracked; got empty status")
+	}
+}
+
+// I-442: callers that create new files (st create, mail.Send, the
+// rename half of st close's archive move) pass the path explicitly to
+// GitSync so `git add -u` doesn't miss them.
+func TestGitSyncStagesExplicitNewPath(t *testing.T) {
+	root, _ := setupTestDir(t)
+	asDir := filepath.Join(root, ".as")
+	os.MkdirAll(asDir, 0755)
+	os.WriteFile(filepath.Join(asDir, "config.yaml"), []byte("paths:\n  root: .\n"), 0644)
+	initGitRepo(t, root)
+
+	cfg, _ := config.Load(root)
+	cfg.Git = &config.GitConfig{AutoCommit: true, AutoPush: false}
+
+	s, _ := New(cfg)
+
+	// The agent creates a new item file (this is the st-create scenario).
+	newPath := filepath.Join(root, "issues", "I-100-mine.md")
+	os.MkdirAll(filepath.Dir(newPath), 0755)
+	os.WriteFile(newPath, []byte("id: I-100\ntype: issue\nstatus: queued\ntitle: mine\n"), 0644)
+
+	if err := s.GitSync("st create: I-100", newPath); err != nil {
+		t.Fatalf("GitSync: %v", err)
+	}
+
+	cmd := exec.Command("git", "show", "--stat", "--name-only", "HEAD")
+	cmd.Dir = root
+	out, _ := cmd.Output()
+	if !contains(string(out), "I-100") {
+		t.Errorf("expected explicit new path to land in HEAD commit. got:\n%s", string(out))
+	}
+}
+
+// I-442 follow-up (PR #51 code review): defense in depth — reject
+// new-paths that resolve outside the item root so a bugged caller
+// can't accidentally stage a sibling agent's file via a `../..`
+// pathspec. The whole PR is about preventing cross-tree bleed; this
+// closes the explicit-add side door.
+func TestGitSyncRejectsPathsOutsideRoot(t *testing.T) {
+	root, _ := setupTestDir(t)
+	asDir := filepath.Join(root, ".as")
+	os.MkdirAll(asDir, 0755)
+	os.WriteFile(filepath.Join(asDir, "config.yaml"), []byte("paths:\n  root: .\n"), 0644)
+	initGitRepo(t, root)
+
+	cfg, _ := config.Load(root)
+	cfg.Git = &config.GitConfig{AutoCommit: true, AutoPush: false}
+	s, _ := New(cfg)
+
+	// Modify a tracked file so there's something to commit (otherwise
+	// the empty-commit early-return fires before the path validation).
+	item, _ := s.Get("T-001")
+	item.Doc.SetField("status", "active")
+	s.write(item)
+
+	// Pass an absolute path that resolves OUTSIDE root.
+	outside := filepath.Join(filepath.Dir(root), "sibling-agent-wip.md")
+	err := s.GitSync("should reject", outside)
+	if err == nil {
+		t.Errorf("expected error for path outside root, got nil")
+	}
+}
+
 func TestGitSyncWithPushNoRemote(t *testing.T) {
 	root, _ := setupTestDir(t)
 	asDir := filepath.Join(root, ".as")
