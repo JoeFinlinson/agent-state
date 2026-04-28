@@ -242,9 +242,14 @@ const (
 	RefreshDisabled RefreshOutcome = iota // git config nil — feature off
 	RefreshUpToDate                       // fetch ok, no new commits
 	RefreshPulled                         // fast-forwarded N commits
-	RefreshDiverged                       // local has commits not on remote (ff-only refused)
+	RefreshDiverged                       // local AND remote have non-shared commits (ff-only refused)
 	RefreshBlocked                        // uncommitted changes prevented ff
 	RefreshOffline                        // fetch failed (network/auth/timeout)
+	// RefreshAhead (I-430): local has unpushed commits but remote has
+	// nothing new — pure-ahead, recoverable via `st sync`. Distinct from
+	// RefreshDiverged so the dashboard doesn't scare the operator with
+	// a "diverged" warning when the fix is just a push.
+	RefreshAhead
 )
 
 // RefreshResult is the structured outcome of RefreshWorkspace, used by
@@ -253,6 +258,7 @@ const (
 type RefreshResult struct {
 	Outcome     RefreshOutcome
 	PulledCount int   // commits fast-forwarded when Outcome == RefreshPulled
+	AheadCount  int   // unpushed commits when Outcome == RefreshAhead (I-430)
 	Err         error // last underlying error (for diagnostics; not always set)
 }
 
@@ -273,7 +279,10 @@ const refreshFetchTimeout = 10 * time.Second
 //     pull cannot overwrite them, mirroring GitPull's protection.
 //  3. `git fetch origin` with a timeout — fetch failure → RefreshOffline.
 //  4. Inspect ahead/behind counts:
-//       - ahead > 0: RefreshDiverged (caller must `git pull --rebase`).
+//       - ahead > 0 AND behind > 0: RefreshDiverged (true divergence;
+//         caller must `git pull --rebase` or equivalent recovery).
+//       - ahead > 0 AND behind == 0: RefreshAhead with AheadCount
+//         (I-430: unpushed local commits, recoverable via `st sync`).
 //       - behind == 0: RefreshUpToDate (silent success).
 //       - behind > 0 with uncommitted blockers: RefreshBlocked.
 //       - behind > 0 otherwise: `git pull --ff-only`. Success →
@@ -316,8 +325,14 @@ func RefreshWorkspace(cfg *config.Config) RefreshResult {
 		return RefreshResult{Outcome: RefreshUpToDate}
 	}
 
-	if ahead > 0 {
+	if ahead > 0 && behind > 0 {
 		return RefreshResult{Outcome: RefreshDiverged}
+	}
+	if ahead > 0 {
+		// I-430: pure-ahead. Local commits not yet pushed; nothing
+		// alarming. Surface the count so the operator can recover with
+		// `st sync` before the next push falls behind.
+		return RefreshResult{Outcome: RefreshAhead, AheadCount: ahead}
 	}
 	if behind == 0 {
 		return RefreshResult{Outcome: RefreshUpToDate}
