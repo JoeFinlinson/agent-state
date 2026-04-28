@@ -218,13 +218,18 @@ func (s *Store) GitSync(message string, newPaths ...string) error {
 		}
 	}
 
-	// Check if there's anything to commit
-	out, err := gitOutput(root, "status", "--porcelain")
+	// Check if there's anything STAGED to commit. `git status
+	// --porcelain` would also show untracked files (e.g.
+	// `.st-git.lock`, peer agents' WIP) which we intentionally don't
+	// commit. `diff --cached --quiet` exits 0 when nothing is staged,
+	// 1 when there are staged changes — a precise read of "is there
+	// a commit to make" that ignores untracked noise.
+	cached, err := gitOutput(root, "diff", "--cached", "--name-only")
 	if err != nil {
-		return fmt.Errorf("git status: %w", err)
+		return fmt.Errorf("git diff --cached: %w", err)
 	}
-	if strings.TrimSpace(out) == "" {
-		return nil // nothing to commit
+	if strings.TrimSpace(cached) == "" {
+		return nil
 	}
 
 	// Commit
