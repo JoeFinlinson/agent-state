@@ -194,8 +194,10 @@ func (s *Store) GitSync(message string, newPaths ...string) error {
 	}
 
 	// Stage explicit new files (callers that create files pass them).
-	// `--` defangs paths starting with `-`; convert absolute paths to
-	// root-relative so git's pathspec matches.
+	// Reject paths outside `root` — defense in depth for the bleed
+	// this PR is fixing. A bugged caller passing a sibling agent's
+	// path would otherwise produce a `../..` rel and git would happily
+	// stage it. `--` defangs pathspecs that begin with `-`.
 	for _, p := range newPaths {
 		if p == "" {
 			continue
@@ -207,6 +209,9 @@ func (s *Store) GitSync(message string, newPaths ...string) error {
 				return fmt.Errorf("git add new path %q: %w", p, err)
 			}
 			rel = r
+		}
+		if rel == ".." || strings.HasPrefix(rel, "../") || strings.HasPrefix(rel, "..\\") {
+			return fmt.Errorf("git add: path %q is outside item root %q", p, root)
 		}
 		if err := gitCmd(root, "add", "--", rel); err != nil {
 			return fmt.Errorf("git add %q: %w", rel, err)

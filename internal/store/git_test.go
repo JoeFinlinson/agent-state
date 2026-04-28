@@ -217,6 +217,36 @@ func TestGitSyncStagesExplicitNewPath(t *testing.T) {
 	}
 }
 
+// I-442 follow-up (PR #51 code review): defense in depth — reject
+// new-paths that resolve outside the item root so a bugged caller
+// can't accidentally stage a sibling agent's file via a `../..`
+// pathspec. The whole PR is about preventing cross-tree bleed; this
+// closes the explicit-add side door.
+func TestGitSyncRejectsPathsOutsideRoot(t *testing.T) {
+	root, _ := setupTestDir(t)
+	asDir := filepath.Join(root, ".as")
+	os.MkdirAll(asDir, 0755)
+	os.WriteFile(filepath.Join(asDir, "config.yaml"), []byte("paths:\n  root: .\n"), 0644)
+	initGitRepo(t, root)
+
+	cfg, _ := config.Load(root)
+	cfg.Git = &config.GitConfig{AutoCommit: true, AutoPush: false}
+	s, _ := New(cfg)
+
+	// Modify a tracked file so there's something to commit (otherwise
+	// the empty-commit early-return fires before the path validation).
+	item, _ := s.Get("T-001")
+	item.Doc.SetField("status", "active")
+	s.write(item)
+
+	// Pass an absolute path that resolves OUTSIDE root.
+	outside := filepath.Join(filepath.Dir(root), "sibling-agent-wip.md")
+	err := s.GitSync("should reject", outside)
+	if err == nil {
+		t.Errorf("expected error for path outside root, got nil")
+	}
+}
+
 func TestGitSyncWithPushNoRemote(t *testing.T) {
 	root, _ := setupTestDir(t)
 	asDir := filepath.Join(root, ".as")
