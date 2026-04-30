@@ -91,6 +91,14 @@ type StartOpts struct {
 	Slug   string   // branch slug (e.g. "uat-database-reset")
 	Repos  []string // repos to create worktrees for (overrides config defaults)
 	NoPush bool     // skip the auto-push onto the work stack
+	// Force bypasses the I-490 queue-approval gate. When true, an item
+	// in pending status can still be activated. After the start
+	// successfully completes, a `start_force` audit entry is appended
+	// to the item's changelog (best-effort — a logging miss does not
+	// fail the start). The audit is written post-Mutate so a force
+	// that fails a later guard (assignment, claim race) doesn't leave
+	// a misleading bypass record.
+	Force bool
 }
 
 func Start(s *store.Store, cfg *config.Config, id string, opts StartOpts) int {
@@ -116,6 +124,28 @@ func Start(s *store.Store, cfg *config.Config, id string, opts StartOpts) int {
 	if item.Status != tc.StartStatus {
 		fmt.Fprintf(os.Stderr, "%s is %s, not %s — cannot start\n", id, item.Status, tc.StartStatus)
 		return 1
+	}
+
+	// I-490: queue approval gate. If the item is on the queue with
+	// Approved=false, refuse to start unless --force was passed. This
+	// makes the I-488 pending status meaningful — agents in YOLO mode
+	// can no longer skip the operator's approval checkpoint. Items
+	// not on the queue at all are unaffected.
+	//
+	// Track the bypass; the audit write is deferred until after the
+	// start actually succeeds (post-Mutate) so a `--force` that fails
+	// a later guard (assignment, claim race) doesn't leave a misleading
+	// bypass record.
+	forceBypassedPending := false
+	if IsQueuePending(cfg, id) {
+		if !opts.Force {
+			fmt.Fprintf(os.Stderr,
+				"%s is pending operator approval — run `st queue approve %s` first (or `st start %s --force` to bypass)\n",
+				id, id, id)
+			return 1
+		}
+		forceBypassedPending = true
+		fmt.Fprintf(os.Stderr, "warning: --force bypassed pending-approval gate for %s\n", id)
 	}
 
 	// Check: not assigned to another agent
@@ -299,6 +329,15 @@ func Start(s *store.Store, cfg *config.Config, id string, opts StartOpts) int {
 		OldValue: tc.StartStatus, NewValue: tc.ActiveStatus,
 	})
 
+	// I-490: record the --force bypass only after the start actually
+	// succeeded. Best-effort — a logging miss does not fail the start.
+	if forceBypassedPending {
+		_ = changelog.Append(cfg, id, changelog.Entry{
+			Op:     "start_force",
+			Reason: "bypassed I-490 queue approval gate via --force",
+		})
+	}
+
 	fmt.Printf("Started %s — %s\n", id, item.Title)
 	if agentID != "" {
 		fmt.Printf("  Assigned to: %s\n", agentID)
@@ -319,7 +358,9 @@ func Start(s *store.Store, cfg *config.Config, id string, opts StartOpts) int {
 			}
 		}
 		if !alreadyOnStack {
-			if rc := StackPush(s, cfg, id, ""); rc != 0 {
+			// Auto-push from `st start` is internal; the I-490 gate already
+			// fired earlier in Start, so it's safe to bypass here.
+			if rc := StackPush(s, cfg, id, StackPushOpts{FromPending: true}); rc != 0 {
 				fmt.Fprintf(os.Stderr, "warning: auto-push failed (rc=%d); run `st push %s` to attribute metrics\n", rc, id)
 			}
 		}
