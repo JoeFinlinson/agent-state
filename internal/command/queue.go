@@ -28,8 +28,12 @@ type QueueEntry struct {
 	Approved bool // agent-added items need user approval
 	// Source identifies what put the entry on the queue. "sprint" means the
 	// entry was created as a side effect of `st sprint add`; sprint rm then
-	// cascade-removes it. "manual" (default for empty/missing) means the
-	// operator added it directly via `st queue add`; sprint rm leaves it.
+	// cascade-removes it. Any other value (including the default empty
+	// string and the explicit `"manual"` constant) is treated as
+	// operator-added — sprint rm leaves it. Note: SaveQueue suppresses the
+	// `source:` line for empty/manual to keep the file compact, so empty
+	// string is the canonical on-disk representation; future readers must
+	// check `Source != QueueSourceSprint`, not `Source == QueueSourceManual`.
 	Source string
 }
 

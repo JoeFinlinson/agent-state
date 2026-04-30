@@ -10,9 +10,11 @@ import (
 )
 
 // SprintNext prints the next approved + unblocked + non-terminal queue
-// entry whose item belongs to the given sprint. Thin alias for
-// `st queue next --sprint <slug>` so operators can ask "what's next in
-// this sprint?" without remembering the flag form.
+// entry whose item belongs to the given sprint. Mostly a wrapper around
+// `st queue next --sprint <slug>`, with one extra guard: it validates
+// the sprint slug against the registry and returns exit 1 on miss.
+// `queue next --sprint` silently returns "no items" for an unknown
+// slug, which masks typos; this command surfaces them.
 func SprintNext(s *store.Store, cfg *config.Config, sprintID string) int {
 	r, err := registry.Load(cfg.EpicsPath())
 	if err != nil {

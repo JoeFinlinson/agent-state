@@ -311,7 +311,14 @@ func loadQueue(path string) ([]queueEntry, error) {
 
 func saveQueue(path string, entries []queueEntry) error {
 	if len(entries) == 0 {
-		// Don't create an empty queue file if none existed.
+		// backfill only appends — it never removes existing queue entries —
+		// so reaching this branch means the input queue was empty AND no
+		// new sprint members were added. Skipping the write avoids
+		// creating an empty queue.yaml file in workspaces that never had
+		// one. (If a future caller could legitimately produce zero
+		// entries from a previously-non-empty queue, this guard would
+		// silently leave the stale file behind; that caller should
+		// truncate explicitly.)
 		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
