@@ -29,17 +29,29 @@ func TestReleaseHappy(t *testing.T) {
 	if item.AssignedTo != "" {
 		t.Errorf("assigned_to = %q, want empty", item.AssignedTo)
 	}
+	// I-408: release must also reset status from active back to queued
+	// so the item disappears from `--status active` lists.
+	if item.Status != "queued" {
+		t.Errorf("status = %q, want queued (release should reset active items)", item.Status)
+	}
 
 	// Verify changelog
 	entries, _ := changelog.Read(cfg, "T-003")
-	found := false
+	foundRelease := false
+	foundStatusReset := false
 	for _, e := range entries {
-		if e.Op == "release" && e.OldValue == "agent-a" {
-			found = true
+		if e.Op == "release" && e.Field == "assigned_to" && e.OldValue == "agent-a" {
+			foundRelease = true
+		}
+		if e.Op == "release" && e.Field == "status" && e.OldValue == "active" && e.NewValue == "queued" {
+			foundStatusReset = true
 		}
 	}
-	if !found {
-		t.Error("expected changelog entry for release")
+	if !foundRelease {
+		t.Error("expected changelog entry for release of assigned_to")
+	}
+	if !foundStatusReset {
+		t.Error("expected changelog entry for status reset (active → queued)")
 	}
 }
 
@@ -49,6 +61,35 @@ func TestReleaseNotAssigned(t *testing.T) {
 	code := Release(s, cfg, "T-001")
 	if code != 1 {
 		t.Errorf("Release unassigned returned %d, want 1", code)
+	}
+}
+
+// I-408: the early-exit guard previously refused to release any item
+// whose assigned_to + claimed_by were empty. That blocked recovery for
+// items that landed in "stuck active" — assignment cleared by hand but
+// status still active. Release must now reach the Mutate path when the
+// item is active so the caller can recover the queued state.
+func TestReleaseStuckActiveRecovers(t *testing.T) {
+	root := setupTestEnvRoot(t)
+	writeFile(t, filepath.Join(root, "tasks", "T-100-stuck.md"), `id: T-100
+type: task
+status: active
+created: 2026-04-30T10:00:00-06:00
+last_touched: 2026-04-30T10:00:00-06:00
+title: Stuck active task
+assigned_to: ""
+`)
+	cfg, _ := config.Load(root)
+	s, _ := store.New(cfg)
+	os.MkdirAll(cfg.ChangelogDir(), 0755)
+
+	code := Release(s, cfg, "T-100")
+	if code != 0 {
+		t.Fatalf("Release on stuck-active returned %d, want 0", code)
+	}
+	item, _ := s.Get("T-100")
+	if item.Status != "queued" {
+		t.Errorf("status = %q, want queued (stuck-active recovery)", item.Status)
 	}
 }
 
