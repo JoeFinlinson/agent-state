@@ -71,6 +71,20 @@ func Update(s *store.Store, cfg *config.Config, id, field, value string, mode Up
 		return 2
 	}
 
+	// I-494: `summary` was the legacy single-blob description field. Per
+	// I-487 it is replaced by `sbar.background`. We keep the shim during
+	// the deprecation window — emit a notice and route the write to
+	// sbar.background so existing scripts and muscle memory keep working.
+	// migrate-sbar already backfilled all existing summary content into
+	// sbar.background, so the read path was never broken.
+	if field == "summary" {
+		fmt.Fprintln(os.Stderr,
+			"update: summary is deprecated (I-487). Routing content to sbar.background.\n"+
+				"  Use: st update <id> sbar.background \"<text>\"\n"+
+				"  Or:  st update <id> sbar  (opens editor on the 4-section block)")
+		field = "sbar.background"
+	}
+
 	// I-406: priority must be 0-4. Reject explicit out-of-range values
 	// at the CLI boundary so a typo like `st update X priority 9` fails
 	// loud rather than silently corrupting the schema. Use strconv.Atoi
