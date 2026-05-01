@@ -8,14 +8,16 @@ import (
 	"github.com/jfinlinson/agent-state/internal/changelog"
 	"github.com/jfinlinson/agent-state/internal/config"
 	"github.com/jfinlinson/agent-state/internal/model"
+	"github.com/jfinlinson/agent-state/internal/plan"
 	"github.com/jfinlinson/agent-state/internal/store"
 )
 
-// PlanApproveOpts holds flags for `st plan approve`. Empty in Phase A
-// of I-178; reserved for future flags (e.g. `--file <path>` to also
-// append to linked_plans, deferred until the list-field SetField
-// helper supports inline-list round-trip).
-type PlanApproveOpts struct{}
+// PlanApproveOpts holds flags for `st plan approve`. I-511 added
+// Strict, which refuses approval if any linked plan sidecar contains
+// an un-verifiable acceptance criterion (per plan.ValidateACs).
+type PlanApproveOpts struct {
+	Strict bool
+}
 
 // PlanApprove marks an item's plan as approved. Sets PlanApproved=true,
 // PlanApprovedAt=now, PlanApprovedBy=cfg.AgentID() (or "user" if empty).
@@ -39,6 +41,26 @@ func PlanApprove(s *store.Store, cfg *config.Config, id string, opts PlanApprove
 			"%s plan is already approved (by %s at %s) — run `st plan reset %s` first if it needs re-validation\n",
 			id, fallback(item.PlanApprovedBy, "?"), fallback(item.PlanApprovedAt, "?"), id)
 		return 1
+	}
+
+	// I-511: --strict refuses approval when the plan sidecar's
+	// acceptance criteria fail the verifiability check. The default
+	// (non-strict) approve path stays lenient — operators opt in by
+	// passing --strict when they want the gate to be hard.
+	if opts.Strict {
+		findings := loadStrictACFindings(cfg, id)
+		if len(findings) > 0 {
+			fmt.Fprintf(os.Stderr,
+				"%s --strict: %d acceptance criterion/criteria not obviously verifiable; refusing approval:\n",
+				id, len(findings))
+			for _, f := range findings {
+				fmt.Fprintf(os.Stderr, "  %s\n", f.String())
+			}
+			fmt.Fprintf(os.Stderr,
+				"Edit .plans/%s.md to make each AC testable (cmd: prefix, named test, or measurable threshold), then re-run `st plan approve --strict %s`.\n",
+				id, id)
+			return 2
+		}
 	}
 
 	approver := cfg.AgentID()
@@ -164,4 +186,39 @@ func fallback(s, def string) string {
 		return def
 	}
 	return s
+}
+
+// loadStrictACFindings loads the per-item plan sidecar and returns
+// ValidateACs findings against its acceptance criteria. Distinguishes
+// three cases by stderr signal:
+//   - Missing sidecar: silent — operator may have approved via `st
+//     plan approve` directly without authoring a sidecar, and strict
+//     mode shouldn't gate on absence of data.
+//   - Parse error: emit a stderr warning. Approval proceeds (don't
+//     punish the operator for a corrupt file by changing behavior),
+//     but they see why strict couldn't validate.
+//   - Loaded successfully: return ValidateACs findings.
+//
+// I-511: used by `st plan approve --strict` to refuse approval when
+// the plan content has un-verifiable ACs.
+func loadStrictACFindings(cfg *config.Config, id string) []plan.ACFinding {
+	if cfg == nil {
+		return nil
+	}
+	p, err := plan.Load(cfg.PlansDir(), id)
+	if err != nil {
+		// Surface non-IsNotExist errors so a corrupt sidecar doesn't
+		// silently neutralize --strict. plan.Load already returns
+		// (nil, nil) for IsNotExist, so any non-nil err here is a
+		// real parse / read failure worth logging.
+		fmt.Fprintf(os.Stderr,
+			"plan-approve --strict: could not load .plans/%s.md (%v); proceeding without AC validation. Investigate the sidecar before relying on --strict.\n",
+			id, err)
+		return nil
+	}
+	if p == nil {
+		// Sidecar doesn't exist — strict mode has nothing to gate on.
+		return nil
+	}
+	return plan.ValidateACs(p.ACs)
 }

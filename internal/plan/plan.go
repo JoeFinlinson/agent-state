@@ -5,6 +5,7 @@ package plan
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -53,10 +54,39 @@ func Load(dir, id string) (*Plan, error) {
 	return Parse(string(data))
 }
 
-// Save writes a plan sidecar to .plans/<id>.md.
-// Returns an error if required fields are missing — caller must fill them.
-// Rejected plans are saved without validation (they may be incomplete).
+// SaveOpts configures Save behavior. The default zero value preserves
+// the historical lenient mode (warn-only AC quality); Strict makes AC
+// quality a hard rejection so callers like `st plan approve --strict`
+// can refuse to greenlight a vague plan. I-511.
+type SaveOpts struct {
+	Strict bool
+	// Stderr captures warning output. nil ⇒ os.Stderr. Tests inject a
+	// buffer to assert on warning text without rerouting fd 2.
+	Stderr io.Writer
+}
+
+// Save writes a plan sidecar to .plans/<id>.md with default options
+// (Strict=false). Same back-compat shape as before — existing callers
+// don't need to change. I-511 added the SaveWithOpts variant.
 func Save(dir, id string, p *Plan) error {
+	return SaveWithOpts(dir, id, p, SaveOpts{})
+}
+
+// SaveWithOpts is the configurable variant of Save. Returns an error
+// when the plan is structurally incomplete (missing scope_repos /
+// approach / acceptance_criteria) — same behavior as the old Save.
+//
+// I-511: when opts.Strict is true, also returns an error if any
+// acceptance criterion fails ValidateACs. When Strict is false (the
+// default), un-verifiable ACs emit warnings to opts.Stderr but the
+// save still succeeds. Rejected plans skip both validation paths
+// (they're partial drafts).
+func SaveWithOpts(dir, id string, p *Plan, opts SaveOpts) error {
+	stderr := opts.Stderr
+	if stderr == nil {
+		stderr = os.Stderr
+	}
+
 	// Skip validation for rejected plans — they may be incomplete drafts
 	if !p.Rejected {
 		var missing []string
@@ -71,6 +101,23 @@ func Save(dir, id string, p *Plan) error {
 		}
 		if len(missing) > 0 {
 			return fmt.Errorf("plan %s incomplete — missing: %s", id, strings.Join(missing, ", "))
+		}
+
+		// I-511: AC quality validation. Findings are advisory by default
+		// (warn on stderr) and blocking under --strict.
+		if findings := ValidateACs(p.ACs); len(findings) > 0 {
+			if opts.Strict {
+				var lines []string
+				for _, f := range findings {
+					lines = append(lines, "  "+f.String())
+				}
+				return fmt.Errorf("plan %s has un-verifiable acceptance criteria (--strict refused):\n%s",
+					id, strings.Join(lines, "\n"))
+			}
+			fmt.Fprintf(stderr, "plan %s save warning: %d acceptance criterion/criteria not obviously verifiable:\n", id, len(findings))
+			for _, f := range findings {
+				fmt.Fprintf(stderr, "  %s\n", f.String())
+			}
 		}
 	}
 
