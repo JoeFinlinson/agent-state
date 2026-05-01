@@ -617,7 +617,11 @@ func writeSBARLines(b *strings.Builder, pi primeItem, compact bool) {
 		{"Assessment", pi.Assessment},
 		{"Recommendation", pi.Recommendation},
 	} {
-		if sec.body == "" {
+		// Treat whitespace-only bodies as empty — a literal " " or
+		// "\n" is no signal for the LLM and would render as
+		// `Label: ` with a trailing space, which looks like a
+		// truncation bug.
+		if strings.TrimSpace(sec.body) == "" {
 			continue
 		}
 		lines := strings.Split(strings.TrimRight(sec.body, "\n"), "\n")

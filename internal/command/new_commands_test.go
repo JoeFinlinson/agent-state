@@ -963,6 +963,28 @@ func TestWriteSBARLines_OmitsEmptySections(t *testing.T) {
 	}
 }
 
+// I-495 (review fix): a body that is non-empty but pure whitespace
+// (e.g., " " or "\n") must be treated as empty. Without the guard,
+// `Situation:` would render with a trailing space and look like
+// truncation.
+func TestWriteSBARLines_TreatsWhitespaceOnlyAsEmpty(t *testing.T) {
+	pi := primeItem{
+		Situation:      " ",
+		Background:     "\n\n",
+		Assessment:     "\t",
+		Recommendation: "real content",
+	}
+	var b strings.Builder
+	writeSBARLines(&b, pi, false)
+	out := b.String()
+	if strings.Contains(out, "Situation:") || strings.Contains(out, "Background:") || strings.Contains(out, "Assessment:") {
+		t.Errorf("whitespace-only sections should not render, got: %q", out)
+	}
+	if !strings.Contains(out, "Recommendation: real content") {
+		t.Errorf("real content section missing, got: %q", out)
+	}
+}
+
 // I-495: compact mode skips SBAR entirely. The hook-injection path
 // runs with a tight context budget; SBAR can be paragraphs.
 func TestWriteSBARLines_CompactSkipsAll(t *testing.T) {
