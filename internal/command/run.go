@@ -1839,6 +1839,25 @@ func resolveStepModel(cfg *config.Config, opts RunOpts) string {
 func executeStepWithSession(s *store.Store, cfg *config.Config, itemID, sprintID string, step config.RunStepDef, opts RunOpts, engine RunEngine, worktreeDir, claudeSessionID string, isResume bool) StepResult {
 	stepStart := time.Now()
 
+	// I-513 / I-178 Phase B: gate work-doing steps behind an approved
+	// plan. The "plan" step itself (type=plan) and read-only steps
+	// (test, verify_tests, gate, close) are exempt — only the LLM
+	// implementation steps (type=claude) need the gate. If
+	// PlanApproved is false at dispatch time, refuse the step with
+	// the same recovery hint the plan-before-code-guard hook prints.
+	if step.Type == "claude" {
+		if item, ok := s.Get(itemID); ok && !item.PlanApproved {
+			return StepResult{
+				Step: step.Name(),
+				Type: step.Type,
+				Error: fmt.Sprintf(
+					"plan not approved for %s — fix plan step or run `st plan approve %s` (or `st prep %s` to author one) and re-run. I-178 plan-before-code gate.",
+					itemID, itemID, itemID),
+				Duration: time.Since(stepStart),
+			}
+		}
+	}
+
 	var sr StepResult
 	switch step.Type {
 	case "plan":
