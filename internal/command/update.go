@@ -12,6 +12,7 @@ import (
 	"github.com/jfinlinson/agent-state/internal/config"
 	"github.com/jfinlinson/agent-state/internal/model"
 	"github.com/jfinlinson/agent-state/internal/store"
+	"github.com/jfinlinson/agent-state/internal/validate"
 )
 
 // listFields are top-level fields stored as YAML lists. Multi-line values
@@ -98,6 +99,17 @@ func Update(s *store.Store, cfg *config.Config, id, field, value string, mode Up
 		return 1
 	}
 
+	// I-508: early-exit vocab gate for status / type. The store-layer
+	// gate in Mutate would catch the same problem, but failing here
+	// produces a cleaner CLI error and avoids a wasted lock + re-parse
+	// round-trip on the doomed write. The same legacy-alias suggestion
+	// (open → queued, etc.) ships in the message.
+	if mode == UpdateModeValue && value != "" {
+		if rc := preCheckVocab(item, field, value, cfg); rc != 0 {
+			return rc
+		}
+	}
+
 	// Block status changes on locked items (being worked on by a pipeline).
 	// Use `st unlock <id>` to force-release the lock first.
 	if field == "status" && store.IsLocked(cfg, id) {
@@ -177,6 +189,44 @@ func Update(s *store.Store, cfg *config.Config, id, field, value string, mode Up
 	// is correct and a later sync will carry the commit forward.
 	if err := s.GitSync(fmt.Sprintf("st update: %s.%s", id, field)); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: sync after update failed: %v\n", err)
+	}
+	return 0
+}
+
+// preCheckVocab is the I-508 early-exit guard for `st update` on
+// status / type fields. Returns 0 when the value passes (or the field
+// isn't vocab-gated); returns 2 with an error message when the value
+// would be rejected by the write-time gate. The store-layer gate
+// remains the authoritative check — this is a UX shortcut.
+func preCheckVocab(item *model.Item, field, value string, cfg *config.Config) int {
+	switch field {
+	case "status":
+		valid := cfg.ValidStatuses(item.Type)
+		for _, v := range valid {
+			if v == value {
+				return 0
+			}
+		}
+		msg := fmt.Sprintf("update: invalid status %q for type %q — valid: %s",
+			value, item.Type, strings.Join(valid, ", "))
+		// Hint via the same alias map the store-layer gate uses, so
+		// muscle-memory `open`/`resolved` writes land an actionable error.
+		if hint := validate.SuggestStatus(value); hint != "" {
+			msg += fmt.Sprintf("\n  did you mean %q? (legacy alias from pre-I-433)", hint)
+		}
+		fmt.Fprintln(os.Stderr, msg)
+		return 2
+	case "type":
+		if _, ok := cfg.Types[value]; ok {
+			return 0
+		}
+		validTypes := make([]string, 0, len(cfg.Types))
+		for k := range cfg.Types {
+			validTypes = append(validTypes, k)
+		}
+		fmt.Fprintf(os.Stderr, "update: unknown type %q — valid: %s\n",
+			value, strings.Join(validTypes, ", "))
+		return 2
 	}
 	return 0
 }

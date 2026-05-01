@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -162,9 +163,16 @@ func restoreLockedItems(snapshots map[string][]byte) {
 // happened to fire next, scrambling commit attribution. `git add -u`
 // only stages tracked-and-modified files, so peer-WIP doesn't leak.
 //
-// Pre-pulls with --ff-only before committing to minimize conflicts. If
-// push fails (remote ahead), retries with pull --rebase + re-push up
-// to maxRetries times. Detects rebase conflicts and aborts cleanly.
+// Pre-fetches before committing to minimize conflicts. If push fails
+// (remote ahead), retries with fetch + rebuild-commit-on-fetched-main +
+// re-push up to maxRetries times.
+//
+// I-501: never runs `git pull --rebase`. The retry path was the main
+// source of mid-rebase corruption when retries failed. Now: on push
+// reject we fetch only, rebuild our agent-state commit on top of the
+// fetched main via plumbing (commit-tree + update-ref), and push again.
+// The working tree's index is never touched; rebase conflicts cannot
+// arise.
 func (s *Store) GitSync(message string, newPaths ...string) error {
 	if s.cfg.Git == nil || !s.cfg.Git.AutoCommit {
 		return nil
@@ -172,12 +180,23 @@ func (s *Store) GitSync(message string, newPaths ...string) error {
 
 	root := s.cfg.ItemDir()
 
-	// Acquire lock to prevent concurrent git operations from parallel st processes
+	// Acquire lock to prevent concurrent git operations from parallel st
+	// processes. Done BEFORE PreFlightGitState so a peer agent can't
+	// transition the canonical clone into mid-rebase between our check
+	// and our lock — the lock holder is the only writer of git state.
 	unlock, err := acquireGitLock(root)
 	if err != nil {
 		return fmt.Errorf("git lock: %w", err)
 	}
 	defer unlock()
+
+	// I-501: refuse if the canonical clone is mid-rebase / mid-merge /
+	// holding a stale index.lock. The mutation that produced this call
+	// already wrote to disk; we still emit the recovery hint and stop
+	// here so we don't compound the corrupt state.
+	if err := PreFlightGitState(root); err != nil {
+		return err
+	}
 
 	// Pre-pull: fetch and integrate remote changes before committing.
 	// Snapshot locked items so the pull can't overwrite active work.
@@ -247,9 +266,36 @@ func (s *Store) GitSync(message string, newPaths ...string) error {
 	return nil
 }
 
+// ErrPushDiverged is returned by pushWithRetry when the push is rejected
+// AND the local commit cannot be cleanly replayed onto the fetched main
+// (because of overlapping file changes from a peer agent). The local
+// commit stays in place; the operator can resolve via `st sync` once
+// the conflict is understood. I-501.
+var ErrPushDiverged = errors.New("push rejected and replay diverged; local commit retained")
+
+// ErrPushRejectedButOriginUnchanged is returned when the push was
+// rejected by origin yet the fetch shows origin/main has not advanced
+// past our parent. This usually indicates a server-side gate (pre-receive
+// hook, branch protection, force-push refused) that retrying won't
+// resolve. We surface it immediately rather than spin the retry loop
+// up to maxRetries times only to emit the same generic push error. I-501.
+var ErrPushRejectedButOriginUnchanged = errors.New("push rejected and origin has not moved (likely a pre-receive hook or branch protection)")
+
+// pushWithRetry pushes refs/heads/main to origin. On rejection (peer
+// raced), it fetches origin and rebuilds the commit via plumbing on top
+// of the fresh origin/main, then retries the push.
+//
+// I-501: replaces the legacy `git pull --rebase` retry with a
+// plumbing-only replay. The working tree's index is never touched;
+// rebase conflicts cannot arise. Callers that need to know if the
+// commit actually moved (e.g. ID-collision retry) inspect the local
+// HEAD ref before vs after.
 func (s *Store) pushWithRetry(root string, maxRetries int) error {
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		err := gitCmd(root, "push")
+		// Push the local main ref explicitly (not "HEAD") so we work
+		// regardless of which branch the working tree happens to be on.
+		// I-501: decouples agent-state writes from working-tree HEAD.
+		err := gitCmd(root, "push", "origin", "refs/heads/main:refs/heads/main")
 		if err == nil {
 			return nil
 		}
@@ -258,22 +304,178 @@ func (s *Store) pushWithRetry(root string, maxRetries int) error {
 			return err
 		}
 
-		// Pull with rebase to avoid merge commits in agent-state.
-		// Protect locked items across the rebase.
-		snap := snapshotLockedItems(s.cfg, root)
-		if pullErr := gitCmdQuiet(root, "pull", "--rebase"); pullErr != nil {
-			restoreLockedItems(snap)
-			// Check for active rebase (indicates conflict)
-			conflictOut, _ := gitOutput(root, "ls-files", "-u")
-			if strings.TrimSpace(conflictOut) != "" {
-				// Abort the rebase and report
-				_ = gitCmdQuiet(root, "rebase", "--abort")
-				return fmt.Errorf("rebase conflict detected (aborted rebase, manual resolution needed)")
+		// Plumbing-only replay: fetch origin, rebuild our commit on top
+		// of fetched origin/main without touching the working-tree
+		// index. Snapshots aren't needed — we never mutate the working
+		// tree.
+		if replayErr := s.replayCommitOnFetchedMain(root); replayErr != nil {
+			if errors.Is(replayErr, ErrPushDiverged) {
+				return replayErr
 			}
-			return fmt.Errorf("pull failed during retry: %w", pullErr)
+			if errors.Is(replayErr, ErrPushRejectedButOriginUnchanged) {
+				// Retrying won't help — surface the original push error
+				// alongside the diagnostic so the operator sees both.
+				return fmt.Errorf("%w: %v", ErrPushRejectedButOriginUnchanged, err)
+			}
+			return fmt.Errorf("plumbing replay during push retry: %w", replayErr)
 		}
-		restoreLockedItems(snap)
 	}
+	return nil
+}
+
+// replayCommitOnFetchedMain rebuilds the local main ref to land our
+// most-recent commit on top of a freshly-fetched origin/main. Used by
+// pushWithRetry when the initial push is rejected.
+//
+// Implementation: build a fresh tree by starting from origin/main's tree
+// and overlaying ONLY the files our commit changed. Then commit-tree
+// against origin/main and update-ref. The working tree's index is
+// never touched; the temp index lives in a temporary file.
+//
+// On overlapping changes (peer also changed a file we changed), surface
+// ErrPushDiverged so the operator can recover via `st sync`. We never
+// auto-overwrite a peer's edit.
+func (s *Store) replayCommitOnFetchedMain(root string) error {
+	// 1. Fetch origin/main (no working-tree mutation).
+	if err := gitCmdQuiet(root, "fetch", "origin", "main"); err != nil {
+		return fmt.Errorf("fetch origin main: %w", err)
+	}
+
+	// 2. Identify our local commit and its parent.
+	headOut, err := gitOutput(root, "rev-parse", "refs/heads/main")
+	if err != nil {
+		return fmt.Errorf("rev-parse refs/heads/main: %w", err)
+	}
+	localHead := strings.TrimSpace(headOut)
+
+	parentOut, err := gitOutput(root, "rev-parse", localHead+"^")
+	if err != nil {
+		return fmt.Errorf("rev-parse %s^: %w", localHead, err)
+	}
+	localParent := strings.TrimSpace(parentOut)
+
+	originOut, err := gitOutput(root, "rev-parse", "refs/remotes/origin/main")
+	if err != nil {
+		return fmt.Errorf("rev-parse origin/main: %w", err)
+	}
+	originHead := strings.TrimSpace(originOut)
+
+	if originHead == localParent {
+		// Origin didn't move past our parent, yet our push was rejected.
+		// Nothing to replay — and retrying the same push will hit the
+		// same rejection. Surface the diagnostic immediately so the
+		// operator sees an actionable message instead of waiting for
+		// maxRetries retries to surface a generic "push failed."
+		return ErrPushRejectedButOriginUnchanged
+	}
+
+	// 3. List the files we changed in our local commit. Empty list ⇒
+	//    nothing to replay; treat as a no-op success.
+	changedOut, err := gitOutput(root, "diff-tree", "--no-commit-id", "--name-only", "-r", localHead)
+	if err != nil {
+		return fmt.Errorf("diff-tree %s: %w", localHead, err)
+	}
+	var changed []string
+	for _, line := range strings.Split(strings.TrimSpace(changedOut), "\n") {
+		if line == "" {
+			continue
+		}
+		changed = append(changed, line)
+	}
+	if len(changed) == 0 {
+		return nil
+	}
+
+	// 4. Detect overlap: did the peer's commits between localParent and
+	//    originHead also change any of our changed files? If so, refuse
+	//    to overwrite — surface ErrPushDiverged with both refs.
+	overlapOut, err := gitOutput(root, "diff", "--name-only", localParent, originHead)
+	if err != nil {
+		return fmt.Errorf("diff %s %s: %w", localParent, originHead, err)
+	}
+	peerChanged := make(map[string]bool)
+	for _, line := range strings.Split(strings.TrimSpace(overlapOut), "\n") {
+		if line == "" {
+			continue
+		}
+		peerChanged[line] = true
+	}
+	for _, p := range changed {
+		if peerChanged[p] {
+			return fmt.Errorf("%w (file %q changed locally and on origin/main between %s..%s)",
+				ErrPushDiverged, p, localParent, originHead)
+		}
+	}
+
+	// 5. Build the new tree in a temp index — start from origin/main's
+	//    tree, overlay each of our changed files (or remove if deleted).
+	commitMsg, err := gitOutput(root, "log", "-1", "--format=%B", localHead)
+	if err != nil {
+		return fmt.Errorf("read commit message: %w", err)
+	}
+
+	tmpIdx, err := os.CreateTemp(filepath.Join(root, ".git"), "index.replay-*")
+	if err != nil {
+		return fmt.Errorf("create temp index: %w", err)
+	}
+	tmpIdxPath := tmpIdx.Name()
+	tmpIdx.Close()
+	defer os.Remove(tmpIdxPath)
+
+	env := []string{"GIT_INDEX_FILE=" + tmpIdxPath}
+
+	if err := gitCmdEnv(root, env, "read-tree", originHead); err != nil {
+		return fmt.Errorf("read-tree origin/main into temp index: %w", err)
+	}
+
+	for _, rel := range changed {
+		abs := filepath.Join(root, rel)
+		if _, statErr := os.Stat(abs); statErr != nil {
+			if os.IsNotExist(statErr) {
+				// File was deleted in our commit — remove from temp index.
+				if err := gitCmdEnv(root, env, "update-index", "--remove", "--", rel); err != nil {
+					return fmt.Errorf("update-index --remove %q: %w", rel, err)
+				}
+				continue
+			}
+			return fmt.Errorf("stat %q: %w", abs, statErr)
+		}
+		// Hash the working-tree blob and stage it at rel in the temp index.
+		// `--path <rel>` makes git apply .gitattributes (text=auto, smudge/clean
+		// filters) the same way `git add` would, so the replayed tree's blob
+		// hash matches what a normal commit would produce.
+		blobOut, err := gitOutput(root, "hash-object", "-w", "--path", rel, "--", abs)
+		if err != nil {
+			return fmt.Errorf("hash-object %q: %w", abs, err)
+		}
+		blob := strings.TrimSpace(blobOut)
+		if err := gitCmdEnv(root, env, "update-index", "--add", "--cacheinfo",
+			"100644,"+blob+","+rel); err != nil {
+			return fmt.Errorf("update-index %q: %w", rel, err)
+		}
+	}
+
+	treeOut, err := gitOutputEnv(root, env, "write-tree")
+	if err != nil {
+		return fmt.Errorf("write-tree: %w", err)
+	}
+	tree := strings.TrimSpace(treeOut)
+
+	// 6. Create the new commit on top of origin/main and advance our
+	//    local main ref. Old non-FF commit is dropped — its tree
+	//    contents are incorporated into the new commit on the right
+	//    parent.
+	commitTreeOut, err := gitOutputStdin(root, strings.TrimRight(commitMsg, "\n"),
+		"commit-tree", tree, "-p", originHead)
+	if err != nil {
+		return fmt.Errorf("commit-tree: %w", err)
+	}
+	newCommit := strings.TrimSpace(commitTreeOut)
+
+	if err := gitCmdQuiet(root, "update-ref", "refs/heads/main", newCommit, localHead); err != nil {
+		return fmt.Errorf("update-ref refs/heads/main: %w", err)
+	}
+
 	return nil
 }
 
@@ -430,6 +632,39 @@ func gitCmdQuiet(dir string, args ...string) error {
 func gitOutput(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
+	out, err := cmd.Output()
+	return string(out), err
+}
+
+// gitCmdEnv runs git with extra env vars (e.g. GIT_INDEX_FILE) so a
+// command can target a temp index without disturbing the real one. The
+// process inherits the parent env, then env is appended. Used by the
+// I-501 plumbing-replay path.
+func gitCmdEnv(dir string, env []string, args ...string) error {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), env...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+// gitOutputEnv is the output-capturing analog of gitCmdEnv.
+func gitOutputEnv(dir string, env []string, args ...string) (string, error) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), env...)
+	out, err := cmd.Output()
+	return string(out), err
+}
+
+// gitOutputStdin runs git with stdin piped from the supplied string and
+// returns stdout. Used for `commit-tree` which reads the message from
+// stdin in our plumbing-replay path.
+func gitOutputStdin(dir, stdin string, args ...string) (string, error) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Stdin = strings.NewReader(stdin)
 	out, err := cmd.Output()
 	return string(out), err
 }
