@@ -251,22 +251,38 @@ func Create(s *store.Store, cfg *config.Config, itemType, title string, opts Cre
 	return 0
 }
 
-// runCreateEditor launches $EDITOR (or $VISUAL) on path. No-op when
+// runCreateEditor launches $VISUAL (or $EDITOR) on path. No-op when
 // stdin is not a TTY (agent / piped contexts) or no editor is set —
 // silently skipping is preferable to an empty stdin prompt that would
 // hang an automated run.
+//
+// $VISUAL takes precedence over $EDITOR per the Unix convention
+// (VISUAL is the full-screen editor, EDITOR is the line editor); most
+// modern setups treat them as equivalent but users who set both
+// expect VISUAL to win.
+//
+// The editor value is shell-split via strings.Fields so common forms
+// like `EDITOR="code --wait"` or `EDITOR="vim -u NONE"` work.
+// exec.Command itself does not parse arguments out of its first
+// positional, so without splitting we would exec a binary literally
+// named "code --wait" and fail.
 func runCreateEditor(path string) {
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		return
 	}
-	editor := os.Getenv("EDITOR")
+	editor := os.Getenv("VISUAL")
 	if editor == "" {
-		editor = os.Getenv("VISUAL")
+		editor = os.Getenv("EDITOR")
 	}
 	if editor == "" {
 		return
 	}
-	cmd := exec.Command(editor, path)
+	parts := strings.Fields(editor)
+	if len(parts) == 0 {
+		return
+	}
+	args := append(parts[1:], path)
+	cmd := exec.Command(parts[0], args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
