@@ -512,10 +512,18 @@ completed: null
 
 title: Metrics test item
 
+priority: 2
+
 depends_on:
 - []
 
+blocks:
+- []
+
 sprint: metrics-sprint
+plan_approved: true
+plan_approved_at: 2026-03-25T10:00:00-06:00
+plan_approved_by: agent-b
 
 time_tracking:
   started_at: 2026-03-29T10:00:00-06:00
