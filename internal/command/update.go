@@ -501,12 +501,16 @@ func truncateForChangelog(s string) string {
 // caller's mode (positional / stdin / editor), then writes it under
 // sbar.background via SetSBARBlock so multi-line content lands as a
 // proper YAML block scalar instead of malformed inline output.
+//
+// The deprecation notice is emitted only AFTER value resolution
+// succeeds — printing it first would mislead the user when stdin is
+// empty or the editor errors, implying the routing happened when it
+// did not.
+//
+// `oldValue` is captured INSIDE the Mutate closure (under flock) per
+// the T-304 purity rule, so a concurrent peer-agent write does not
+// produce a stale changelog OldValue.
 func updateSummaryShim(s *store.Store, cfg *config.Config, id, value string, mode UpdateMode) int {
-	fmt.Fprintln(os.Stderr,
-		"update: summary is deprecated (I-487). Routing content to sbar.background.\n"+
-			"  Use: st update <id> sbar.background \"<text>\"\n"+
-			"  Or:  st update <id> sbar  (opens editor on the 4-section block)")
-
 	item, ok := s.Get(id)
 	if !ok {
 		fmt.Fprintf(os.Stderr, "not found: %s\n", id)
@@ -530,15 +534,22 @@ func updateSummaryShim(s *store.Store, cfg *config.Config, id, value string, mod
 		if !ok {
 			return code
 		}
-		if newVal == item.SBAR.Background {
-			fmt.Println("No changes.")
-			return 0
-		}
 		value = newVal
 	}
 
-	oldValue := item.SBAR.Background
+	if value == item.SBAR.Background {
+		fmt.Println("No changes.")
+		return 0
+	}
+
+	fmt.Fprintln(os.Stderr,
+		"update: summary is deprecated (I-487). Routing content to sbar.background.\n"+
+			"  Use: st update <id> sbar.background \"<text>\"\n"+
+			"  Or:  st update <id> sbar  (opens editor on the 4-section block)")
+
+	var oldValue string
 	mutateErr := s.Mutate(id, func(it *model.Item) error {
+		oldValue = it.SBAR.Background
 		it.SBAR.Background = value
 		it.Doc.SetSBARBlock(it.SBAR)
 		return nil

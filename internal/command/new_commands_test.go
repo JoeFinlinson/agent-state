@@ -364,8 +364,6 @@ func TestUpdateSummaryRoutesToSBARBackground(t *testing.T) {
 
 	code := Update(s, cfg, "I-001", "summary", "the new content", UpdateModeValue)
 	wPipe.Close()
-	stderrBytes, _ := os.ReadFile("/dev/stdin")
-	_ = stderrBytes // silence unused
 	stderrOut := readAll(t, rPipe)
 
 	if code != 0 {
@@ -399,6 +397,40 @@ func TestUpdateSummaryRoutesToSBARBackground(t *testing.T) {
 	}
 	if !strings.Contains(item.SBAR.Background, "the new content") {
 		t.Errorf("expected sbar.background to contain new content, got: %q", item.SBAR.Background)
+	}
+}
+
+// I-494 (review fix): writing the same value that already lives in
+// sbar.background must be a no-op — no Mutate, no changelog entry,
+// no GitSync commit, no deprecation notice (the user did not change
+// anything, so the warning would be noise).
+func TestUpdateSummary_NoOpWhenUnchanged(t *testing.T) {
+	s, cfg := setupTestEnvWithChangelog(t)
+	// Seed sbar.background with a known value via the shim itself.
+	if code := Update(s, cfg, "I-001", "summary", "stable text", UpdateModeValue); code != 0 {
+		t.Fatalf("seed Update returned %d", code)
+	}
+	beforeEntries, _ := changelog.Read(cfg, "I-001")
+	beforeCount := len(beforeEntries)
+
+	// Capture stderr so we can also assert no deprecation notice for the no-op.
+	origStderr := os.Stderr
+	rPipe, wPipe, _ := os.Pipe()
+	os.Stderr = wPipe
+	defer func() { os.Stderr = origStderr }()
+
+	if code := Update(s, cfg, "I-001", "summary", "stable text", UpdateModeValue); code != 0 {
+		t.Fatalf("no-op Update returned %d, want 0", code)
+	}
+	wPipe.Close()
+	stderrOut := readAll(t, rPipe)
+
+	afterEntries, _ := changelog.Read(cfg, "I-001")
+	if len(afterEntries) != beforeCount {
+		t.Errorf("changelog grew from %d to %d on no-op", beforeCount, len(afterEntries))
+	}
+	if strings.Contains(stderrOut, "deprecated") {
+		t.Errorf("no-op should not emit deprecation notice; got: %q", stderrOut)
 	}
 }
 
