@@ -105,11 +105,12 @@ func SprintCreate(cfg *config.Config, epicID, title string, opts SprintCreateOpt
 	}
 	if opts.Description != "" {
 		// AddSprint appends by value; patch the slice entry by ID so
-		// Description survives Save.
+		// Description survives Save. The local s is a copy and is
+		// only used for the success Printf below — no need to keep
+		// it in sync with the slice.
 		for i := range r.Sprints {
 			if r.Sprints[i].ID == s.ID {
 				r.Sprints[i].Description = opts.Description
-				s.Description = opts.Description
 				break
 			}
 		}
