@@ -10,6 +10,7 @@ import (
 	"github.com/jfinlinson/agent-state/internal/changelog"
 	"github.com/jfinlinson/agent-state/internal/config"
 	"github.com/jfinlinson/agent-state/internal/model"
+	"github.com/jfinlinson/agent-state/internal/quality"
 	"github.com/jfinlinson/agent-state/internal/registry"
 	"github.com/jfinlinson/agent-state/internal/store"
 	"golang.org/x/term"
@@ -222,6 +223,17 @@ func Create(s *store.Store, cfg *config.Config, itemType, title string, opts Cre
 	fmt.Printf("Created %s — %s\n", id, title)
 	if opts.Sprint != "" {
 		fmt.Printf("  Sprint: %s\n", opts.Sprint)
+	}
+
+	// I-149: surface SBAR substance gaps as warnings. New items
+	// always have the I-492 scaffold; this nudges the author to fill
+	// the four sections before plan approval will hard-block them.
+	// Warning-only here — creation must succeed even for triage items
+	// that intentionally start as a placeholder.
+	if itemType == "task" || itemType == "issue" {
+		for _, v := range quality.ValidateSBAR(item) {
+			fmt.Fprintf(os.Stderr, "  %s\n", v)
+		}
 	}
 
 	newPath, _ := s.Path(id)
