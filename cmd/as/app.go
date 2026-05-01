@@ -1255,9 +1255,11 @@ implement step during st run.`,
 		Short: "Mark an item's plan as approved (sets the I-178 gate to allow code edits)",
 		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
-			exitCode = command.PlanApprove(appStore, appCfg, args[0], command.PlanApproveOpts{})
+			strict, _ := cmd.Flags().GetBool("strict")
+			exitCode = command.PlanApprove(appStore, appCfg, args[0], command.PlanApproveOpts{Strict: strict})
 		},
 	}
+	planApproveCmd.Flags().Bool("strict", false, "refuse approval if any acceptance criterion is not verifiable (I-511)")
 	planResetCmd := &cobra.Command{
 		Use:   "reset <id>",
 		Short: "Revert a previously-approved plan (closes the I-178 gate; needs re-approval)",

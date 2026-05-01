@@ -1,6 +1,7 @@
 package plan
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -212,5 +213,82 @@ func TestSaveRejectsIncomplete(t *testing.T) {
 	})
 	if err != nil {
 		t.Errorf("complete plan should save: %v", err)
+	}
+}
+
+// TestSaveWithOptsLenientWarnsOnUnverifiableACs verifies the I-511
+// default-mode contract: un-verifiable ACs produce stderr warnings
+// but do NOT fail the save. Existing legacy plans / migrations
+// continue to round-trip.
+func TestSaveWithOptsLenientWarnsOnUnverifiableACs(t *testing.T) {
+	dir := t.TempDir()
+	var buf bytes.Buffer
+	p := &Plan{
+		Approach:   "test approach",
+		ScopeRepos: []string{"api"},
+		ACs:        []string{"works correctly", "fix the bug"},
+	}
+	err := SaveWithOpts(dir, "T-100", p, SaveOpts{Stderr: &buf})
+	if err != nil {
+		t.Fatalf("lenient save should succeed despite vague ACs; got %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "save warning") {
+		t.Errorf("expected stderr warning header; got %q", out)
+	}
+	if !strings.Contains(out, "works correctly") || !strings.Contains(out, "fix the bug") {
+		t.Errorf("expected each un-verifiable AC echoed in warning; got %q", out)
+	}
+}
+
+// TestSaveWithOptsStrictRejectsUnverifiableACs verifies the I-511
+// strict-mode contract: un-verifiable ACs cause Save to return an
+// error so callers like `st plan approve --strict` can refuse.
+func TestSaveWithOptsStrictRejectsUnverifiableACs(t *testing.T) {
+	dir := t.TempDir()
+	var buf bytes.Buffer
+	p := &Plan{
+		Approach:   "test approach",
+		ScopeRepos: []string{"api"},
+		ACs:        []string{"works correctly"},
+	}
+	err := SaveWithOpts(dir, "T-101", p, SaveOpts{Strict: true, Stderr: &buf})
+	if err == nil {
+		t.Fatal("strict save should reject un-verifiable AC")
+	}
+	if !strings.Contains(err.Error(), "un-verifiable") {
+		t.Errorf("error should mention 'un-verifiable'; got %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "works correctly") {
+		t.Errorf("error should echo the offending AC; got %q", err.Error())
+	}
+}
+
+// TestSaveWithOptsStrictAcceptsVerifiableACs verifies the positive
+// strict-mode case: verifiable ACs save cleanly under --strict.
+func TestSaveWithOptsStrictAcceptsVerifiableACs(t *testing.T) {
+	dir := t.TempDir()
+	p := &Plan{
+		Approach:   "test approach",
+		ScopeRepos: []string{"api"},
+		ACs:        []string{"cmd: go test ./internal/foo/...", "TestFoo passes"},
+	}
+	if err := SaveWithOpts(dir, "T-102", p, SaveOpts{Strict: true}); err != nil {
+		t.Errorf("strict save should accept verifiable ACs; got %v", err)
+	}
+}
+
+// TestSaveWithOptsRejectedSkipsACValidation verifies that Rejected
+// plans bypass both completeness AND AC-quality checks. Drafts may
+// have empty / vague ACs while still being saved as rejection
+// artifacts.
+func TestSaveWithOptsRejectedSkipsACValidation(t *testing.T) {
+	dir := t.TempDir()
+	p := &Plan{
+		Rejected: true,
+		ACs:      []string{"works correctly"}, // vague + missing scope/approach
+	}
+	if err := SaveWithOpts(dir, "T-103", p, SaveOpts{Strict: true}); err != nil {
+		t.Errorf("rejected plan should save under strict; got %v", err)
 	}
 }
