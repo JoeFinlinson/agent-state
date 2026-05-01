@@ -327,7 +327,20 @@ func sbarSeedBuffer(s model.SBAR) string {
 // the list of sub-keys that were missing from the input — empty list
 // means all four sections were present (even if their bodies were
 // empty). Order of keys is not enforced.
+//
+// Body indentation is stripped via the smallest indent observed
+// across the section's lines — the editor seeds at 2 spaces, but
+// users whose YAML mode auto-indents to 4 (or who hand-indent by
+// tabs) would otherwise get leading whitespace baked into the stored
+// value. Tab and space are both treated as indent.
+//
+// The seed buffer's "TODO: fill in or leave blank" placeholder is
+// recognised as the empty marker only when it is the sole body line.
+// Lines that merely START with that text are kept verbatim — silent
+// data loss on user content that happens to begin with the phrase
+// would be worse than a stale placeholder slipping through.
 func parseSBARBuffer(buf string) (model.SBAR, []string) {
+	const emptyMarker = "TODO: fill in or leave blank"
 	want := map[string]bool{"situation": true, "background": true, "assessment": true, "recommendation": true}
 	got := map[string]string{}
 	var currentKey string
@@ -337,11 +350,42 @@ func parseSBARBuffer(buf string) (model.SBAR, []string) {
 		if currentKey == "" {
 			return
 		}
-		// Strip trailing blank lines from the body for clean storage.
+		// Strip trailing blank lines.
 		for len(currentBody) > 0 && strings.TrimSpace(currentBody[len(currentBody)-1]) == "" {
 			currentBody = currentBody[:len(currentBody)-1]
 		}
-		got[currentKey] = strings.Join(currentBody, "\n")
+		// Find the smallest leading-whitespace prefix across non-blank
+		// lines and strip exactly that much from each. Preserves
+		// internal relative indentation (multi-paragraph bodies, code
+		// fences, etc.).
+		minIndent := -1
+		for _, l := range currentBody {
+			if strings.TrimSpace(l) == "" {
+				continue
+			}
+			n := 0
+			for n < len(l) && (l[n] == ' ' || l[n] == '\t') {
+				n++
+			}
+			if minIndent == -1 || n < minIndent {
+				minIndent = n
+			}
+		}
+		stripped := make([]string, len(currentBody))
+		for i, l := range currentBody {
+			if minIndent > 0 && len(l) >= minIndent {
+				stripped[i] = l[minIndent:]
+			} else {
+				stripped[i] = l
+			}
+		}
+		body := strings.Join(stripped, "\n")
+		// Treat the unedited seed as empty — only when the entire
+		// body is the literal placeholder line.
+		if strings.TrimSpace(body) == emptyMarker {
+			body = ""
+		}
+		got[currentKey] = body
 		currentKey = ""
 		currentBody = nil
 	}
@@ -352,7 +396,6 @@ func parseSBARBuffer(buf string) (model.SBAR, []string) {
 		// SBAR sub-keys. Anything else is body content.
 		trimmed := strings.TrimRight(raw, " \t")
 		if !strings.HasPrefix(raw, " ") && !strings.HasPrefix(raw, "\t") {
-			// Possible header line at column 0.
 			colon := strings.Index(trimmed, ":")
 			if colon > 0 {
 				key := trimmed[:colon]
@@ -365,20 +408,9 @@ func parseSBARBuffer(buf string) (model.SBAR, []string) {
 			}
 		}
 		if currentKey == "" {
-			// Pre-header noise (comment / blank). Silently ignore.
 			continue
 		}
-		// Body line — strip the 2-space seed indent if present so the
-		// stored value is byte-clean.
-		body := raw
-		body = strings.TrimPrefix(body, "  ")
-		// Skip auto-seeded TODO placeholder lines so an unedited
-		// scaffold round-trips back to an empty string instead of
-		// persisting "TODO: fill in or leave blank" as real content.
-		if strings.HasPrefix(strings.TrimSpace(body), "TODO: fill in or leave blank") {
-			continue
-		}
-		currentBody = append(currentBody, body)
+		currentBody = append(currentBody, raw)
 	}
 	flush()
 

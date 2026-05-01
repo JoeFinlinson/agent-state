@@ -269,6 +269,15 @@ func (d *ParsedDocument) SetSBARBlock(s SBAR) {
 // buildSBARLines renders an SBAR struct as the line slice of a
 // `sbar:` block. Format mirrors cmd/migrate-sbar/renderSBARBlock so
 // freshly-edited blocks are byte-identical to migrated blocks.
+//
+// Empty sub-fields are emitted as `  key: |-` with no body lines —
+// `key: |-` followed immediately by the next header is valid YAML
+// for an empty block scalar, and avoids a "    " trailing-whitespace
+// line that some editors silently strip.
+//
+// A trailing blank Line is appended so the next top-level field has
+// a visual separator after the block. Without it, every SBAR edit
+// would produce a spurious one-line whitespace diff.
 func buildSBARLines(s SBAR) []Line {
 	out := []Line{{Raw: "sbar:", Key: "sbar"}}
 	for _, sec := range []struct {
@@ -285,12 +294,10 @@ func buildSBARLines(s SBAR) []Line {
 			Indent:   2,
 			BlockKey: "sbar",
 		})
-		body := sec.val
-		if body == "" {
-			out = append(out, Line{Raw: "    ", IsBlock: true, BlockKey: sec.key, Indent: 4})
+		if sec.val == "" {
 			continue
 		}
-		for _, ln := range strings.Split(strings.TrimRight(body, "\n"), "\n") {
+		for _, ln := range strings.Split(strings.TrimRight(sec.val, "\n"), "\n") {
 			out = append(out, Line{
 				Raw:      "    " + ln,
 				IsBlock:  true,
@@ -299,6 +306,7 @@ func buildSBARLines(s SBAR) []Line {
 			})
 		}
 	}
+	out = append(out, Line{Raw: "", IsEmpty: true})
 	return out
 }
 

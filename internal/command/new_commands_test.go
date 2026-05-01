@@ -630,6 +630,112 @@ func TestParseSBARBuffer_AcceptsBlockScalarVariants(t *testing.T) {
 	}
 }
 
+// I-493 (review fix): user content starting with the literal
+// "TODO: fill in or leave blank" prefix must NOT be silently
+// dropped. The skip rule only fires when that text is the entire
+// body, not a prefix of real content.
+func TestParseSBARBuffer_KeepsContentStartingWithTODOPrefix(t *testing.T) {
+	buf := "situation: |-\n" +
+		"  TODO: fill in or leave blank — but also we know it is RLS\n" +
+		"background: |-\n" +
+		"  some history\n" +
+		"assessment: |-\n" +
+		"  diagnosed\n" +
+		"recommendation: |-\n" +
+		"  proposal\n"
+	got, missing := parseSBARBuffer(buf)
+	if len(missing) > 0 {
+		t.Fatalf("missing: %v", missing)
+	}
+	want := "TODO: fill in or leave blank — but also we know it is RLS"
+	if got.Situation != want {
+		t.Errorf("situation = %q, want %q", got.Situation, want)
+	}
+}
+
+// I-493 (review fix): the unedited seed produces an SBAR with all
+// four sections empty — the literal "TODO: fill in or leave blank"
+// marker is treated as empty when it is the sole body line.
+func TestParseSBARBuffer_TODOOnlyLineMeansEmpty(t *testing.T) {
+	buf := "situation: |-\n" +
+		"  TODO: fill in or leave blank\n" +
+		"background: |-\n" +
+		"  TODO: fill in or leave blank\n" +
+		"assessment: |-\n" +
+		"  TODO: fill in or leave blank\n" +
+		"recommendation: |-\n" +
+		"  TODO: fill in or leave blank\n"
+	got, missing := parseSBARBuffer(buf)
+	if len(missing) > 0 {
+		t.Fatalf("missing: %v", missing)
+	}
+	if got.Situation != "" || got.Background != "" || got.Assessment != "" || got.Recommendation != "" {
+		t.Errorf("expected all-empty SBAR after unedited seed, got %+v", got)
+	}
+}
+
+// I-493 (review fix): bodies indented at 4 spaces (common YAML
+// auto-indent default) must strip 4, not the hardcoded 2. Mixed
+// blank/indented lines are also handled — minimum-indent detection
+// preserves internal relative whitespace.
+func TestParseSBARBuffer_StripsAnyConsistentIndent(t *testing.T) {
+	buf := "situation: |-\n" +
+		"    line one\n" +
+		"    line two\n" +
+		"background: |-\n" +
+		"\tline tabbed\n" +
+		"assessment: |-\n" +
+		"  line one\n" +
+		"\n" +
+		"  line two\n" +
+		"recommendation: |-\n" +
+		"  ok\n"
+	got, _ := parseSBARBuffer(buf)
+	if got.Situation != "line one\nline two" {
+		t.Errorf("4-space body strip wrong: %q", got.Situation)
+	}
+	if got.Background != "line tabbed" {
+		t.Errorf("tab body strip wrong: %q", got.Background)
+	}
+	if got.Assessment != "line one\n\nline two" {
+		t.Errorf("multi-paragraph strip wrong: %q", got.Assessment)
+	}
+}
+
+// I-493 (review fix): SetSBARBlock must emit a trailing blank line so
+// the next top-level field has a visual separator. Without it, every
+// SBAR edit produces a spurious one-line whitespace diff.
+func TestSetSBARBlock_PreservesTrailingBlankSeparator(t *testing.T) {
+	doc := &model.ParsedDocument{
+		Lines: []model.Line{
+			{Raw: "id: I-001", Key: "id"},
+			{Raw: "sbar:", Key: "sbar"},
+			{Raw: "  situation: |-", Key: "situation", Indent: 2, BlockKey: "sbar"},
+			{Raw: "    old", IsBlock: true, BlockKey: "situation", Indent: 4},
+			{Raw: "", IsEmpty: true, IsBlock: true, BlockKey: "situation"},
+			{Raw: "next_actions:", Key: "next_actions"},
+		},
+	}
+	doc.SetSBARBlock(model.SBAR{
+		Situation: "new",
+	})
+	// Find the sbar block + next_actions; assert there's a blank
+	// IsEmpty line between the last block content and next_actions.
+	naIdx := -1
+	for i, l := range doc.Lines {
+		if l.Key == "next_actions" {
+			naIdx = i
+			break
+		}
+	}
+	if naIdx <= 0 {
+		t.Fatalf("next_actions not found in doc lines: %+v", doc.Lines)
+	}
+	if !doc.Lines[naIdx-1].IsEmpty {
+		t.Errorf("expected blank line before next_actions, got: %+v", doc.Lines[naIdx-1])
+	}
+}
+
 // I-493: sbarSeedBuffer + parseSBARBuffer must round-trip an SBAR
 // struct unchanged so an editor that did not modify anything
 // produces zero spurious changes.
