@@ -17,6 +17,10 @@ var slugPattern = regexp.MustCompile(`^([A-Z]-\d{3,})-\S+`)
 func Fix(s *store.Store, cfg *config.Config) int {
 	var fixed int
 
+	// Legacy-alias rewrite must run first: downstream fixes (and the validator
+	// itself) reject items whose status is not in the current enum, so an
+	// unrewritten alias would block every other auto-fix on that item.
+	fixed += fixLegacyAliases(s, cfg)
 	fixed += fixRequiredFields(s, cfg)
 	fixed += fixStaleDeps(s, cfg)
 	fixed += fixReciprocalDeps(s, cfg)
@@ -24,6 +28,38 @@ func Fix(s *store.Store, cfg *config.Config) int {
 	fixed += fixDeliveryGate(s, cfg)
 	fixed += fixIndex(s, cfg)
 
+	return fixed
+}
+
+// fixLegacyAliases rewrites items whose status field matches a known
+// pre-I-433 alias to the current vocabulary. The alias map lives in
+// internal/validate (vocab_suggest.go) — sharing the lookup keeps fix
+// and the validator's suggestion engine in sync, so a new alias landing
+// there is auto-rewritten here too. Returns the number of items rewritten.
+func fixLegacyAliases(s *store.Store, _ *config.Config) int {
+	var fixed int
+	for _, item := range s.All() {
+		if item.Doc == nil {
+			continue
+		}
+		newStatus := validate.SuggestStatus(item.Status)
+		if newStatus == "" {
+			continue
+		}
+		itemID := item.ID
+		oldStatus := item.Status
+		target := newStatus
+		if err := s.Mutate(itemID, func(item *model.Item) error {
+			item.Status = target
+			item.Doc.SetField("status", target)
+			return nil
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "  error writing %s: %v\n", itemID, err)
+			continue
+		}
+		fixed++
+		fmt.Printf("  \033[33m⟳\033[0m %s: rewrote legacy status alias %q → %q\n", itemID, oldStatus, target)
+	}
 	return fixed
 }
 

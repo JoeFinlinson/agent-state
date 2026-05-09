@@ -145,6 +145,106 @@ func TestFixFull(t *testing.T) {
 	}
 }
 
+// TestFixLegacyAliases covers Bug A from I-562: items whose status is a
+// known pre-I-433 alias must be auto-rewritten to the current vocabulary
+// so st check converges without requiring a manual guard bypass. The
+// alias map lives in internal/validate/vocab_suggest.go — this test
+// covers every entry there to catch coverage drift if a new alias is
+// added but the rewrite path forgets to inherit it (regression of the
+// PR-79 review finding).
+func TestFixLegacyAliases(t *testing.T) {
+	root := t.TempDir()
+	for _, dir := range []string{"tasks", "issues", "archive", ".as"} {
+		os.MkdirAll(filepath.Join(root, dir), 0755)
+	}
+	os.WriteFile(filepath.Join(root, ".as", "config.yaml"), []byte("paths:\n  root: .\n"), 0644)
+
+	// One fixture per known legacy alias. Issues use open/resolved/wontfix;
+	// tasks use completed (the pre-I-433 task-side alias for `done`).
+	cases := []struct {
+		path       string
+		typeKind   string
+		oldStatus  string
+		wantStatus string
+	}{
+		{"issues/I-001-legacy-open.md", "issue", "open", "queued"},
+		{"issues/I-002-legacy-resolved.md", "issue", "resolved", "done"},
+		{"issues/I-003-legacy-wontfix.md", "issue", "wontfix", "abandoned"},
+		{"tasks/T-001-legacy-completed.md", "task", "completed", "done"},
+	}
+	for _, c := range cases {
+		body := "id: " + strings.TrimSuffix(strings.Split(c.path, "/")[1], ".md")[:5] + `
+type: ` + c.typeKind + `
+status: ` + c.oldStatus + `
+created: 2026-03-25T10:00:00-06:00
+last_touched: 2026-03-25T10:00:00-06:00
+title: Legacy ` + c.oldStatus + ` fixture
+depends_on:
+- []
+blocks:
+- []
+`
+		writeFile(t, filepath.Join(root, c.path), body)
+	}
+
+	// Negative case: already on current vocabulary, must not be rewritten.
+	writeFile(t, filepath.Join(root, "issues", "I-099-already-queued.md"), `id: I-099
+type: issue
+status: queued
+created: 2026-03-25T10:00:00-06:00
+last_touched: 2026-03-25T10:00:00-06:00
+title: Issue already on current vocabulary
+depends_on:
+- []
+blocks:
+- []
+`)
+
+	cfg, err := config.Load(root)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+
+	fixed := fixLegacyAliases(s, cfg)
+	if fixed != len(cases) {
+		t.Errorf("expected %d alias rewrites, got %d", len(cases), fixed)
+	}
+
+	for _, c := range cases {
+		content, err := os.ReadFile(filepath.Join(root, c.path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "status: " + c.wantStatus
+		if !strings.Contains(string(content), want) {
+			t.Errorf("%s should have %q, got:\n%s", c.path, want, string(content))
+		}
+		stale := "status: " + c.oldStatus
+		if strings.Contains(string(content), stale) {
+			t.Errorf("%s should not still contain %q, got:\n%s", c.path, stale, string(content))
+		}
+	}
+
+	// Already-current item must be untouched.
+	content, err := os.ReadFile(filepath.Join(root, "issues", "I-099-already-queued.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(content), "status: queued") {
+		t.Errorf("I-099 should still have status: queued, got:\n%s", string(content))
+	}
+
+	// Idempotence: a second pass produces zero rewrites.
+	fixed2 := fixLegacyAliases(s, cfg)
+	if fixed2 != 0 {
+		t.Errorf("second pass should produce 0 rewrites, got %d", fixed2)
+	}
+}
+
 func TestCheckWithFix(t *testing.T) {
 	s, cfg, _ := setupFixEnv(t)
 
