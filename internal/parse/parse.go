@@ -115,6 +115,31 @@ func File(path string) (*model.Item, error) {
 			storeMultiline(item, currentKey, nestKey, currentBlock)
 			inBlock = false
 			currentBlock = ""
+
+			// Re-run fence detection: the line that ended the block may
+			// itself be a fence opener (e.g. SBAR `recommendation: |-`
+			// dedenting onto a markdown ``` fence below). The earlier
+			// fence check at the top of the loop is gated on `!inBlock`,
+			// so it skipped this line on the way in. Without re-checking,
+			// the opening fence is missed and the closing fence is later
+			// misread as an opener, which marks every subsequent line
+			// IsBlock and prevents top-level fields after the markdown
+			// body (`blocks:`, `last_touched_by:`) from being parsed —
+			// see I-562 Bug B / TestParseBlockEndingOnFenceOpener.
+			//
+			// `inFence` is guaranteed false here: the top-of-loop fence
+			// handler `continue`s every line while `inFence` is true,
+			// which prevents the block-detection branch from running and
+			// thus prevents `inBlock` from becoming true inside a fence.
+			// So the two states are mutually exclusive, and we can set
+			// inFence directly rather than toggle.
+			if strings.HasPrefix(trimmed, "```") {
+				line.IsBlock = true
+				line.BlockKey = currentKey
+				doc.Lines = append(doc.Lines, line)
+				inFence = true
+				continue
+			}
 		}
 
 		// Handle markdown body separator (---)

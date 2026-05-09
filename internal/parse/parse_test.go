@@ -448,6 +448,62 @@ delivery:
 	}
 }
 
+// TestParseBlockEndingOnFenceOpener covers Bug B from I-562: when a
+// multi-line block (e.g. `recommendation: |-` inside an SBAR section)
+// ends on the SAME line that opens a markdown ``` fence, the fence is
+// missed because fence detection runs only when !inBlock and fires
+// before the block-end logic. The closing fence is then misinterpreted
+// as an opener, every subsequent line is marked IsBlock, top-level
+// fields like `blocks:` after the body never get Line.Key set, and
+// validate.HasField returns false — so st check appends a duplicate
+// `blocks:` on every run. Items I-235, I-089, T-053, I-250 in the
+// production workspace all exhibit this corruption.
+func TestParseBlockEndingOnFenceOpener(t *testing.T) {
+	// Minimal repro of the I-235 file structure: SBAR ends with a
+	// recommendation `|-` block whose terminating dedent IS the next
+	// line's ``` fence opener.
+	content := "id: I-001\n" +
+		"type: issue\n" +
+		"status: queued\n" +
+		"created: 2026-03-25T10:00:00-06:00\n" +
+		"last_touched: 2026-03-25T10:00:00-06:00\n" +
+		"title: test\n" +
+		"sbar:\n" +
+		"  recommendation: |-\n" +
+		"    TODO: proposed fix\n" +
+		"\n" +
+		"```\n" +
+		"some markdown body content\n" +
+		"```\n" +
+		"\n" +
+		"blocks:\n" +
+		"- []\n" +
+		"last_touched_by: agent-c\n"
+
+	path := writeTempFile(t, content)
+	item, err := File(path)
+	if err != nil {
+		t.Fatalf("File: %v", err)
+	}
+
+	// The post-body `blocks:` MUST be detected as a top-level field —
+	// otherwise validate.HasField returns false and the auto-fix in
+	// command/fix.go appends another `blocks:` triple, indefinitely.
+	var blocksLineFound bool
+	for _, line := range item.Doc.Lines {
+		if line.Key == "blocks" && line.Indent == 0 {
+			blocksLineFound = true
+			break
+		}
+	}
+	if !blocksLineFound {
+		t.Errorf("expected `blocks:` line to be detected as a top-level Key field; parser missed it. Dump:")
+		for i, line := range item.Doc.Lines {
+			t.Logf("  %2d: indent=%d isBlock=%t key=%q raw=%q", i, line.Indent, line.IsBlock, line.Key, line.Raw)
+		}
+	}
+}
+
 func TestParseMultilineBlock(t *testing.T) {
 	content := `id: T-001
 type: task
