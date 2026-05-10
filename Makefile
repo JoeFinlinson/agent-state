@@ -1,4 +1,4 @@
-.PHONY: build test clean install install-wrapper
+.PHONY: build test clean install install-wrapper reconcile-verify
 
 # WRAPPER_PATH is where the per-agent dispatcher lands. The default
 # (~/bin/st) is in PATH ahead of /usr/local/bin on the developer machine,
@@ -23,6 +23,18 @@ build:
 
 test:
 	go test ./... -cover
+
+# I-569 step 10 CI invariant: any item touched in the last 7 days whose
+# recorded real_tokens exceeds 1.5x the JSONL ground truth fails the
+# build. Run against the live workspace by default; CI sets --root to
+# its checkout. Skipped silently when the workspace doesn't exist (e.g.
+# fresh clone with no .claude/projects yet).
+reconcile-verify:
+	@if [ -d "$${ST_WORKSPACE_ROOT:-../theraprac-workspace}" ]; then \
+	  go run ./cmd/reconcile-tokens verify --since 7d --root "$${ST_WORKSPACE_ROOT:-../theraprac-workspace}" || exit $$?; \
+	else \
+	  echo "reconcile-verify: skipped (no workspace at $${ST_WORKSPACE_ROOT:-../theraprac-workspace})"; \
+	fi
 
 clean:
 	rm -f bin/st

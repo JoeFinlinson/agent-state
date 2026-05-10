@@ -262,6 +262,69 @@ func TestSessionLog_BySessionStartedAtIsSticky(t *testing.T) {
 	}
 }
 
+// I-569 step 10 soft cap: a payload with cache_read > 500M on a turn
+// shorter than 60s is physically impossible (the I-432 / I-441 fan-out
+// attribution bug shipped exactly this shape). SessionLog must reject it
+// without mutating the item.
+func TestSessionLog_SoftCapRejectsImplausibleSubMinuteCacheRead(t *testing.T) {
+	env := testutil.NewEnv(t)
+	SaveStack(env.Cfg, []StackEntry{{ID: "T-003"}})
+
+	implausible := SessionLogPayload{
+		SessionID:            "s",
+		Model:                "claude-opus-4-7",
+		ProcessMs:            23_000, // under the 60s threshold
+		CacheReadInputTokens: 894_000_000,
+		RegInputTokens:       1000,
+	}
+	if code := SessionLog(env.S, env.Cfg, implausible); code != 0 {
+		t.Errorf("expected exit 0 (silently rejected), got %d", code)
+	}
+
+	env.Reload(t)
+	item, _ := env.S.Get("T-003")
+	if got := readIntField(item, "time_tracking", "turn_count"); got != 0 {
+		t.Errorf("turn_count = %d, want 0 (payload should be rejected)", got)
+	}
+	if got := readIntField(item, "time_tracking", "cache_in_tokens"); got != 0 {
+		t.Errorf("cache_in_tokens = %d, want 0 (payload should be rejected)", got)
+	}
+
+	// A long-running turn with the same large cache_read passes — the cap
+	// only fires on the impossibility (huge tokens + short processing).
+	plausible := implausible
+	plausible.ProcessMs = 600_000 // 10 minutes
+	if code := SessionLog(env.S, env.Cfg, plausible); code != 0 {
+		t.Fatalf("plausible long turn rejected, exit=%d", code)
+	}
+	env.Reload(t)
+	item, _ = env.S.Get("T-003")
+	if got := readIntField(item, "time_tracking", "turn_count"); got != 1 {
+		t.Errorf("turn_count after plausible turn = %d, want 1", got)
+	}
+}
+
+// I-569 step 10: producers can no longer talk SessionLog out of computing
+// cost — even when they ship a CostUSD value, the recorded cost must come
+// from pricing × tokens. Lighter-touch version of step 3's rename target;
+// kept around as a regression invariant.
+func TestSessionLog_RejectsCostUSDFromPayload(t *testing.T) {
+	env := testutil.NewEnv(t)
+	SaveStack(env.Cfg, []StackEntry{{ID: "T-003"}})
+
+	SessionLog(env.S, env.Cfg, SessionLogPayload{
+		SessionID: "s", Model: "claude-opus-4-7",
+		RegInputTokens: 1000, // computes to $0.005
+		CostUSD:        99.99,
+	})
+	env.Reload(t)
+	item, _ := env.S.Get("T-003")
+	got := readFloatField(item, "time_tracking", "ai_cost_usd")
+	if got > 0.01 || got < 0.004 {
+		t.Errorf("ai_cost_usd = %.6f, want ≈0.005 (payload.CostUSD must not leak through)", got)
+	}
+}
+
 // formatRealTokensBlob round-trips through parseRealTokensBlob bit-exact —
 // the I-569 invariant that every accumulator write can be re-read by the
 // next turn without precision loss.

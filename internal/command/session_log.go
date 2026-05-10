@@ -136,7 +136,26 @@ func SessionLogCLI(s *store.Store, cfg *config.Config, stdin io.Reader) int {
 // SubagentStop hook, st run's recordRunMetrics) call. Schema lives in the
 // item's time_tracking block; per-turn provenance goes to
 // work_tracking.ai_turns.
+// softCapCacheRead is the I-569 step 10 sanity bound on per-turn cache_read
+// tokens. The historical incidents (I-432 / I-441 / I-443) shipped 894M
+// cache_read on 23-second subagent turns — physically impossible. Any
+// payload exceeding the cap on a sub-minute turn is logged + dropped before
+// it can poison the totals.
+const softCapCacheRead = 500_000_000
+const softCapMinProcessMs = 60_000
+
 func SessionLog(s *store.Store, cfg *config.Config, payload SessionLogPayload) int {
+	// I-569 step 10 soft cap: a turn that claims >500M cache_read tokens
+	// in under 60 seconds is rejected with a stderr warning. Real Anthropic
+	// throughput cannot produce that mix; the only known cause is the
+	// fan-out attribution bug fixed in I-448 / detached in I-569 step 1.
+	if payload.CacheReadInputTokens > softCapCacheRead && payload.ProcessMs > 0 && payload.ProcessMs < softCapMinProcessMs {
+		fmt.Fprintf(os.Stderr,
+			"session log: rejecting payload — cache_read=%d on %dms turn exceeds soft cap (>%d on <%dms)\n",
+			payload.CacheReadInputTokens, payload.ProcessMs, softCapCacheRead, softCapMinProcessMs)
+		return 0
+	}
+
 	// Resolve target item
 	itemID := payload.ItemID
 	if itemID == "" {
