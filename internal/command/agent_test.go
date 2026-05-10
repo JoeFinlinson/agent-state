@@ -82,6 +82,35 @@ func TestAgentBootstrapRunsSelectedScripts(t *testing.T) {
 	}
 }
 
+// I-560: --dry-run reports `aws=dry-run gh=dry-run` instead of
+// `aws=ok gh=ok` so a watcher grepping for the marker doesn't record
+// a dry-run as a successful provisioning. The state strings match the
+// existing `aws=run / aws=skipped / aws=dry-run` vocabulary used by
+// printIdentityBootstrapPlan.
+func TestAgentBootstrapDryRunMarkerSaysDryRun(t *testing.T) {
+	_, cfg := setupTestEnv(t)
+	scriptsDir := fakeAgentScripts(t)
+	t.Setenv("ST_AGENT_SCRIPTS_DIR", scriptsDir)
+
+	stdout := captureStdout(t, func() {
+		code := AgentBootstrap(cfg, AgentBootstrapOpts{Name: "agent-d", DryRun: true})
+		if code != 0 {
+			t.Fatalf("AgentBootstrap returned %d", code)
+		}
+	})
+
+	want := "agent bootstrap complete: agent-d (aws=dry-run gh=dry-run)"
+	if !strings.Contains(stdout, want) {
+		t.Errorf("missing dry-run marker %q:\n%s", want, stdout)
+	}
+	// Critical invariant: dry-run marker must NOT contain the literal
+	// `aws=ok` — that would make a watcher think the run actually
+	// provisioned credentials.
+	if strings.Contains(stdout, "aws=ok") {
+		t.Errorf("dry-run marker must not say aws=ok:\n%s", stdout)
+	}
+}
+
 // I-560: AgentBootstrap prints exactly one canonical flow-level
 // completion marker after both step scripts succeed, so monitoring
 // scripts can grep one unambiguous line for "the wrapped flow

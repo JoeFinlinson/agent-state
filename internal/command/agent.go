@@ -96,7 +96,11 @@ func AgentBootstrap(cfg *config.Config, opts AgentBootstrapOpts) int {
 		if code := runAgentScript(filepath.Join(dir, "agent-bootstrap-aws.sh"), args, os.Stdout, os.Stderr); code != 0 {
 			return code
 		}
-		awsState = "ok"
+		if opts.DryRun {
+			awsState = "dry-run"
+		} else {
+			awsState = "ok"
+		}
 	}
 
 	if !opts.SkipGH {
@@ -113,7 +117,11 @@ func AgentBootstrap(cfg *config.Config, opts AgentBootstrapOpts) int {
 		if code := runAgentScript(filepath.Join(dir, "agent-bootstrap-gh.sh"), args, os.Stdout, os.Stderr); code != 0 {
 			return code
 		}
-		ghState = "ok"
+		if opts.DryRun {
+			ghState = "dry-run"
+		} else {
+			ghState = "ok"
+		}
 	}
 
 	// I-560: single flow-level completion marker. The step scripts
