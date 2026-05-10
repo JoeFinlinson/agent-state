@@ -453,7 +453,7 @@ fields, and the SBAR composite stay on the single-field paths.`,
 			})
 		},
 	}
-	startCmd.Flags().String("slug", "", "branch name slug")
+	startCmd.Flags().String("slug", "", "`SLUG` for branch name (single segment). Example: --slug cost-ground-truth → fix/I-579-cost-ground-truth. A leading <type>/<id>- prefix is stripped if present, so fix/I-579-cost-ground-truth is also accepted.")
 	startCmd.Flags().StringSlice("repos", nil, "repos to create worktrees for")
 	startCmd.Flags().Bool("no-push", false, "skip auto-push onto the work stack")
 	startCmd.Flags().Bool("force", false, "bypass the I-490 queue-approval gate (logs to changelog)")

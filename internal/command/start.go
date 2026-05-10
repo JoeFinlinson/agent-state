@@ -205,7 +205,12 @@ func Start(s *store.Store, cfg *config.Config, id string, opts StartOpts) int {
 			fmt.Fprintln(os.Stderr, "--slug is required when worktree integration is enabled")
 			return 2
 		}
-		var err error
+		normalized, err := normalizeSlug(id, opts.Slug)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			return 2
+		}
+		opts.Slug = normalized
 		branch, err = createWorktrees(cfg, id, item.Type, opts)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "creating worktrees: %v\n", err)
@@ -366,6 +371,39 @@ func Start(s *store.Store, cfg *config.Config, id string, opts StartOpts) int {
 		}
 	}
 	return 0
+}
+
+// knownBranchPrefixes are the leading "<type>/" segments that
+// normalizeSlug will strip from a user-supplied --slug. Kept aligned with
+// the canonical prefixes emitted by createWorktrees (feat / fix) plus the
+// conventional-commit types operators commonly type by hand.
+var knownBranchPrefixes = []string{"feat", "fix", "chore", "refactor", "hotfix"}
+
+// normalizeSlug strips a leading "<type>/<id>-" prefix from a user-supplied
+// --slug so that calling `st start I-579 --slug fix/I-579-foo` produces the
+// same canonical branch (fix/I-579-foo) as `--slug foo`. After normalization
+// the slug must be a single path segment — any remaining slash is a user
+// error (slashes inside the slug create the broken-directory illusion that
+// motivated I-579).
+func normalizeSlug(id, slug string) (string, error) {
+	s := slug
+	for _, p := range knownBranchPrefixes {
+		if len(s) >= len(p)+1 && strings.EqualFold(s[:len(p)], p) && s[len(p)] == '/' {
+			s = s[len(p)+1:]
+			break
+		}
+	}
+	idDash := id + "-"
+	if len(s) >= len(idDash) && strings.EqualFold(s[:len(idDash)], idDash) {
+		s = s[len(idDash):]
+	}
+	if s == "" {
+		return "", fmt.Errorf("--slug is empty after stripping leading <type>/<id>- prefix; got %q", slug)
+	}
+	if strings.Contains(s, "/") {
+		return "", fmt.Errorf("--slug must be a single path segment after stripping leading <type>/<id>- prefix; got %q (normalized to %q)", slug, s)
+	}
+	return s, nil
 }
 
 // createWorktrees creates git worktrees for the given item.
