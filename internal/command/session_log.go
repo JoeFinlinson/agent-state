@@ -47,6 +47,14 @@ type SessionLogPayload struct {
 	ItemID           string  `json:"item_id,omitempty"` // if empty, resolved from stack top
 	Step             string  `json:"step,omitempty"`    // default "interactive"
 
+	// ProjectDir is the producer's CLAUDE_PROJECT_DIR. I-569 step 6's
+	// reconcile-tokens needs this to derive the correct
+	// `~/.claude/projects/<slug>/<sid>.jsonl` path back to ground truth
+	// when the session ends and we want to reconcile drift. Optional —
+	// pre-I-569 producers omit it and reconcile falls back to a
+	// best-effort lookup.
+	ProjectDir string `json:"project_dir,omitempty"`
+
 	// Optional per-turn file diff info (populated by Stop hook once live).
 	// Recorded in the ai_turns line for provenance.
 	Files        int `json:"files,omitempty"`
@@ -304,6 +312,17 @@ func SessionLog(s *store.Store, cfg *config.Config, payload SessionLogPayload) i
 		if payload.Model != "" {
 			upsertByModel(item, payload, capturedCost, capturedCostSource)
 		}
+
+		// I-569 step 2: canonical real_tokens block, plus per-step and
+		// per-session rollups. These coexist with the legacy top-level
+		// fields (reg_input_tokens, cache_*_tokens) until step 9's atomic
+		// rename retires them. The new schema names match Anthropic SDK
+		// exactly, so reconcile-tokens (step 6) can compare item state
+		// against transcript JSONL `usage` blocks without translation.
+		rt := realTokensFromPayload(payload)
+		writeRealTokens(item, readRealTokens(item).add(rt))
+		upsertByStep(item, payload.Step, rt, payload.ProcessMs)
+		upsertBySession(item, payload.SessionID, payload.ProjectDir, capturedNow, rt)
 
 		return nil
 	}); err != nil {
