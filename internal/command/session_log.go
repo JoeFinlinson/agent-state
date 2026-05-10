@@ -172,7 +172,7 @@ func SessionLog(s *store.Store, cfg *config.Config, payload SessionLogPayload) i
 	// non-zero tokens with zero cost).
 	var cost float64
 	if shouldComputeCost(payload) {
-		computed, err := pricing.ComputeCost(
+		computed, err := pricing.EstimateSyntheticCostUSD(
 			payload.Model,
 			payload.RegInputTokens, payload.RegOutputTokens,
 			payload.CacheInTokens, payload.CacheOutTokens, payload.CacheOut1hTokens,
