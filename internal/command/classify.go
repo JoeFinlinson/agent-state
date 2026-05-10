@@ -1,6 +1,8 @@
 package command
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -58,7 +60,7 @@ func Classify(s *store.Store, cfg *config.Config, id string, opts ClassifyOpts) 
 
 	res, err := classifier.Classify(in, cached, opts.Force)
 	if err != nil {
-		if errIsModelNotWired(err) {
+		if errors.Is(err, classify.ErrModelNotWired) {
 			fmt.Fprintln(os.Stderr, "classify: Model not wired — deny-list did not match and phase-2 LLM wiring is pending (I-590)")
 			return 2
 		}
@@ -71,20 +73,28 @@ func Classify(s *store.Store, cfg *config.Config, id string, opts ClassifyOpts) 
 		return 1
 	}
 
-	changelog.Append(cfg, id, changelog.Entry{
+	_ = changelog.Append(cfg, id, changelog.Entry{
 		Op:       "classify",
 		Field:    "classification.verdict",
 		NewValue: string(res.Verdict),
 		Reason:   res.Reason,
 	})
 
-	fmt.Printf("{\"id\":%q,\"verdict\":%q,\"reason\":%q,\"confidence\":%g,\"classified_by\":%q,\"input_hash\":%q}\n",
-		id, string(res.Verdict), res.Reason, res.Confidence, res.ClassifiedBy, res.InputHash)
+	line, err := json.Marshal(struct {
+		ID           string  `json:"id"`
+		Verdict      string  `json:"verdict"`
+		Reason       string  `json:"reason"`
+		Confidence   float64 `json:"confidence"`
+		ClassifiedBy string  `json:"classified_by"`
+		InputHash    string  `json:"input_hash"`
+	}{id, string(res.Verdict), res.Reason, res.Confidence, res.ClassifiedBy, res.InputHash})
+	if err != nil {
+		// Should never happen — the struct above marshals cleanly.
+		fmt.Fprintf(os.Stderr, "marshal verdict: %v\n", err)
+		return 1
+	}
+	fmt.Println(string(line))
 	return 0
-}
-
-func errIsModelNotWired(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "Model not wired")
 }
 
 // buildClassifyInputs assembles the classifier inputs from the item

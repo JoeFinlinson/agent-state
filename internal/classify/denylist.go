@@ -20,11 +20,12 @@ import (
 // change set forces a red verdict. Each pattern carries a Reason that
 // becomes part of the verdict's audit trail.
 //
-// A pattern may set either PathPrefix (matches if file starts with
-// the given prefix) or BasenameGlob (matches via filepath.Match
-// against the file's basename). Set exactly one — patterns with both
-// set are evaluated PathPrefix-first then BasenameGlob; patterns with
-// neither never match.
+// A pattern matches if EITHER PathPrefix (file starts with the given
+// prefix) OR BasenameGlob (filepath.Match against the file's basename)
+// matches. Set at least one — patterns with neither field set never
+// match. Setting both is allowed and behaves as an OR (matches if
+// either condition is satisfied); current HardRedPatterns entries set
+// exactly one for clarity.
 type DenyPattern struct {
 	PathPrefix   string
 	BasenameGlob string
