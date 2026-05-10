@@ -152,6 +152,7 @@ func Prep(s *store.Store, cfg *config.Config, sprintID string, opts PrepOpts, en
 
 	if len(unplanned) == 0 {
 		fmt.Println("All items in sprint are already planned")
+		maybeAutoApproveSprintPlan(s, cfg, sprintID, opts, engine)
 		return 0
 	}
 
@@ -209,7 +210,121 @@ func Prep(s *store.Store, cfg *config.Config, sprintID string, opts PrepOpts, en
 	} else {
 		fmt.Printf("\nPlanned %d/%d item(s)\n", planned, len(unplanned))
 	}
+	// Only auto-approve when the loop fully succeeded. On partial
+	// success, maybeAutoApproveSprintPlan would still short-circuit
+	// (since the failed items lack plan_approved), but skipping the
+	// call entirely keeps the UX honest and avoids a spurious "still
+	// unplanned" notice when the operator already saw the per-item
+	// failure messages.
+	if planned == len(unplanned) {
+		maybeAutoApproveSprintPlan(s, cfg, sprintID, opts, engine)
+	}
 	return 0
+}
+
+// maybeAutoApproveSprintPlan runs after Prep's main loop. When every
+// non-terminal item in the sprint has plan_approved=true and the
+// sprint itself is not yet plan-approved, it shows the dependency
+// analysis (via SprintPlan) and a 2-option Accept/Reject gate; on
+// Accept it sets sp.PlanApproved=true and saves the registry. I-558.
+//
+// Short-circuits when:
+//   - opts.ItemFilter is set (single-item retry — sprint-level approval
+//     should not fire from a partial run).
+//   - opts.DryRun is set.
+//   - opts.WriteOnly is set (--write-only is non-interactive by
+//     contract; sprint approval is the operator's separate step).
+//   - sp.PlanApproved is already true (idempotent).
+//   - any non-terminal item still lacks plan_approved (prints the
+//     "still unplanned" notice listing the missing IDs).
+//
+// The gate is intentionally 2-option (Accept / Reject) — sprint plans
+// are deterministic dependency analysis, so there's nothing for claude
+// to "revise" via Feedback / Interactive. To re-prep specific items,
+// the operator just re-runs `st prep`.
+func maybeAutoApproveSprintPlan(s *store.Store, cfg *config.Config, sprintID string, opts PrepOpts, engine RunEngine) {
+	if opts.ItemFilter != "" || opts.DryRun || opts.WriteOnly {
+		return
+	}
+
+	// Reload the registry + store so the freshly-written plan_approved
+	// flags from the just-finished prep loop are visible.
+	reg, err := registry.Load(cfg.EpicsPath())
+	if err != nil {
+		return
+	}
+	sp, spErr := reg.SprintByID(sprintID)
+	if spErr != nil {
+		return
+	}
+	if sp.PlanApproved {
+		return
+	}
+	freshStore, err := store.New(cfg)
+	if err != nil {
+		return
+	}
+
+	var unplanned []string
+	for _, itemID := range sp.Items {
+		item, ok := freshStore.Get(itemID)
+		if !ok {
+			continue
+		}
+		if cfg.IsTerminalStatus(item.Type, item.Status) {
+			continue
+		}
+		if !item.PlanApproved {
+			unplanned = append(unplanned, itemID)
+		}
+	}
+
+	if len(unplanned) > 0 {
+		fmt.Printf("\nSprint plan not yet auto-approvable — %d item(s) still need plan-approval: %s\n",
+			len(unplanned), strings.Join(unplanned, ", "))
+		fmt.Printf("Re-run `st prep %s` after the missing item(s) are prepped, or run `st sprint plan %s` to review what's there.\n",
+			sprintID, sprintID)
+		return
+	}
+
+	fmt.Printf("\n━━━ All items prepped — reviewing sprint plan ━━━\n\n")
+	if code := SprintPlan(freshStore, cfg, sprintID); code != 0 {
+		fmt.Fprintf(os.Stderr, "sprint plan analysis failed (exit %d) — sprint not auto-approved\n", code)
+		return
+	}
+
+	choice := showReviewGate(ReviewGateInfo{
+		ItemID:   sprintID,
+		Title:    sp.Title,
+		GateType: "Sprint Plan Review",
+	}, []menuOption{
+		{"1", "Accept — approve sprint for execution"},
+		{"2", "Reject — leave sprint unapproved"},
+	}, engine)
+
+	// Treat Ctrl-C the same as Reject — never silently approve when
+	// the operator interrupts, and don't print the "approve later" hint
+	// (the abort signal speaks for itself).
+	if choice == "^C" {
+		return
+	}
+	if choice != "1" {
+		fmt.Printf("Sprint plan not approved — run `st sprint plan %s` to approve later\n", sprintID)
+		return
+	}
+
+	sp.PlanApproved = true
+	sp.PlanApprovedAt = time.Now().Format(time.RFC3339)
+	approver := cfg.AgentID()
+	if approver == "" {
+		approver = "user"
+	}
+	sp.PlanApprovedBy = approver
+	if err := reg.Save(cfg.EpicsPath()); err != nil {
+		fmt.Fprintf(os.Stderr, "saving sprint plan approval: %v\n", err)
+		return
+	}
+	fmt.Printf("Sprint plan approved for %s (by %s)\n", sprintID, approver)
 }
 
 // prepItem runs the plan proposal + review loop for a single item.
