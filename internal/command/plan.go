@@ -100,6 +100,22 @@ func PlanApprove(s *store.Store, cfg *config.Config, id string, opts PlanApprove
 	}
 	approvedAt := time.Now().Format(time.RFC3339)
 
+	// I-565: items prepped via `st prep --write-only` defer the
+	// linked_plans stamp (no s.Mutate runs in prepItemWriteOnly), so
+	// approval here must back-fill the sidecar path the same way the
+	// interactive prepItem accept branch does — otherwise the I-512
+	// invariant (linked_plans points at the active plan content) is
+	// permanently broken for write-only items.
+	var sidecarRel, scopeRepos string
+	var draftACs []string
+	if p, _ := plan.Load(cfg.PlansDir(), id); p != nil {
+		sidecarRel = relativePlanPath(cfg.PlansDir(), cfg.Root(), id)
+		if len(p.ScopeRepos) > 0 {
+			scopeRepos = strings.Join(p.ScopeRepos, ", ")
+		}
+		draftACs = append(draftACs, p.ACs...)
+	}
+
 	if err := s.Mutate(id, func(it *model.Item) error {
 		it.PlanApproved = true
 		it.PlanApprovedAt = approvedAt
@@ -107,6 +123,25 @@ func PlanApprove(s *store.Store, cfg *config.Config, id string, opts PlanApprove
 		it.Doc.SetField("plan_approved", "true")
 		it.Doc.SetField("plan_approved_at", approvedAt)
 		it.Doc.SetField("plan_approved_by", approver)
+		if sidecarRel != "" {
+			already := false
+			for _, lp := range it.LinkedPlans {
+				if lp == sidecarRel {
+					already = true
+					break
+				}
+			}
+			if !already {
+				it.LinkedPlans = append(it.LinkedPlans, sidecarRel)
+				it.Doc.ReplaceList("linked_plans", it.LinkedPlans)
+			}
+		}
+		if scopeRepos != "" {
+			it.Doc.SetField("scope_repos", scopeRepos)
+		}
+		if len(it.AcceptanceCriteria) == 0 && len(draftACs) > 0 {
+			it.Doc.ReplaceList("acceptance_criteria", draftACs)
+		}
 		return nil
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "writing %s: %v\n", id, err)
@@ -227,16 +262,19 @@ func PlanShow(s *store.Store, cfg *config.Config, id string) int {
 	}
 
 	// And the plan-review report (write-only prep produces this).
-	fmt.Printf("\n=== Report: .plans/%s.report.md ===\n", id)
-	report, err := plan.LoadReport(plansDir, id)
-	if err != nil {
-		fmt.Printf("(error loading report: %v)\n", err)
-	} else if report == "" {
-		fmt.Printf("(no report — write-only prep was not used or report was deleted)\n")
-	} else {
-		fmt.Print(report)
-		if !strings.HasSuffix(report, "\n") {
-			fmt.Println()
+	// Mirror the plan-block guard above: only emit the section when a
+	// report sidecar actually exists, so `st plan show` on items that
+	// never used --write-only stays quiet.
+	if plan.ReportExists(plansDir, id) {
+		fmt.Printf("\n=== Report: .plans/%s.report.md ===\n", id)
+		report, err := plan.LoadReport(plansDir, id)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "(error loading report: %v)\n", err)
+		} else {
+			fmt.Print(report)
+			if !strings.HasSuffix(report, "\n") {
+				fmt.Println()
+			}
 		}
 	}
 	return 0

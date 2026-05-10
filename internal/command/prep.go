@@ -532,6 +532,7 @@ func prepItemWriteOnly(s *store.Store, cfg *config.Config, itemID string, item *
 	if plan.Exists(cfg.PlansDir(), itemID) {
 		draft, _ := plan.Load(cfg.PlansDir(), itemID)
 		if draft != nil && !draft.Approved {
+			fmt.Printf("[%s] Resuming from existing draft plan\n", itemID)
 			p = draft
 			if p.Rejected {
 				p.Rejected = false
@@ -609,7 +610,10 @@ func prepItemWriteOnly(s *store.Store, cfg *config.Config, itemID string, item *
 	reviewStep.SetName("plan_review")
 	runOpts := RunOpts{Model: opts.Model}
 	reviewSR := executeClaude(s, cfg, itemID, "", reviewStep, runOpts, engine, cwd, "", false)
-	if reviewSR.Error != "" && reviewSR.FullOutput == "" {
+	// Any non-empty Error means the review subprocess failed. Even if
+	// it produced partial output before the failure, that output is
+	// not a complete review and must not be persisted as the report.
+	if reviewSR.Error != "" {
 		fmt.Printf("[%s] FAILED: plan-review error: %s\n", itemID, reviewSR.Error)
 		return "rejected"
 	}
@@ -620,12 +624,24 @@ func prepItemWriteOnly(s *store.Store, cfg *config.Config, itemID string, item *
 	}
 
 	planRel := relativePlanPath(cfg.PlansDir(), cfg.Root(), itemID)
-	reportRel := planRel
-	if strings.HasSuffix(reportRel, ".md") {
-		reportRel = strings.TrimSuffix(reportRel, ".md") + ".report.md"
-	}
+	reportRel := relativeReportPath(cfg.PlansDir(), cfg.Root(), itemID)
 	fmt.Printf("[%s] plan saved (%s), report saved (%s), pending approval\n", itemID, planRel, reportRel)
 	return "accepted"
+}
+
+// relativeReportPath mirrors relativePlanPath for the report sidecar.
+// Falls back to the absolute path when filepath.Rel fails — same
+// semantics as relativePlanPath so log output stays consistent.
+func relativeReportPath(plansDir, root, itemID string) string {
+	abs := plan.ReportPath(plansDir, itemID)
+	if root == "" {
+		return abs
+	}
+	rel, err := filepath.Rel(root, abs)
+	if err != nil {
+		return abs
+	}
+	return rel
 }
 
 // buildPrepPrompt creates the exploration prompt for plan generation.

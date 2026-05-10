@@ -3,7 +3,6 @@ package command
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -428,5 +427,3 @@ func TestPlanShowPrintsPlanAndReportContent(t *testing.T) {
 	}
 }
 
-// silence unused-import warnings if we ever compile minimally.
-var _ = fmt.Sprintf
