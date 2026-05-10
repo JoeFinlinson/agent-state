@@ -6,6 +6,7 @@ import (
 
 	"github.com/jfinlinson/agent-state/internal/changelog"
 	"github.com/jfinlinson/agent-state/internal/model"
+	"github.com/jfinlinson/agent-state/internal/plan"
 )
 
 // I-178: PlanApprove flips PlanApproved + sets audit fields + writes a
@@ -140,6 +141,45 @@ func TestPlanApproveStrict_RefusesEmptySBAR(t *testing.T) {
 	item, _ := s.Get("T-001")
 	if item.PlanApproved {
 		t.Error("strict approve should not have flipped PlanApproved on rejected item")
+	}
+}
+
+// I-565: when a plan sidecar exists, PlanApprove back-fills the I-512
+// linked_plans field on the item — even when the plan was generated
+// via `st prep --write-only`, which doesn't mutate the item itself.
+// Without this, write-only items would permanently have linked_plans:
+// [], breaking the plan-before-code hook / st prime correlation.
+func TestPlanApproveStampsLinkedPlansFromSidecar(t *testing.T) {
+	t.Setenv("AS_AGENT_ID", "")
+	s, cfg := setupTestEnv(t)
+
+	// Drop a draft plan sidecar at .plans/T-001.md, the way prepItemWriteOnly does.
+	if err := plan.Save(cfg.PlansDir(), "T-001", &plan.Plan{
+		Approach:   "Test approach.",
+		ScopeRepos: []string{"as"},
+		ACs:        []string{"cmd: echo ok"},
+	}); err != nil {
+		t.Fatalf("seeding sidecar: %v", err)
+	}
+
+	if code := PlanApprove(s, cfg, "T-001", PlanApproveOpts{}); code != 0 {
+		t.Fatalf("approve: %d", code)
+	}
+
+	item, _ := s.Get("T-001")
+	if len(item.LinkedPlans) == 0 {
+		t.Fatal("PlanApprove should have stamped linked_plans from the sidecar")
+	}
+	want := relativePlanPath(cfg.PlansDir(), cfg.Root(), "T-001")
+	found := false
+	for _, lp := range item.LinkedPlans {
+		if lp == want {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("linked_plans = %v; want it to contain %q", item.LinkedPlans, want)
 	}
 }
 

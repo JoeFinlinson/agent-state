@@ -3,6 +3,7 @@ package command
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/jfinlinson/agent-state/internal/changelog"
@@ -99,6 +100,22 @@ func PlanApprove(s *store.Store, cfg *config.Config, id string, opts PlanApprove
 	}
 	approvedAt := time.Now().Format(time.RFC3339)
 
+	// I-565: items prepped via `st prep --write-only` defer the
+	// linked_plans stamp (no s.Mutate runs in prepItemWriteOnly), so
+	// approval here must back-fill the sidecar path the same way the
+	// interactive prepItem accept branch does — otherwise the I-512
+	// invariant (linked_plans points at the active plan content) is
+	// permanently broken for write-only items.
+	var sidecarRel, scopeRepos string
+	var draftACs []string
+	if p, _ := plan.Load(cfg.PlansDir(), id); p != nil {
+		sidecarRel = relativePlanPath(cfg.PlansDir(), cfg.Root(), id)
+		if len(p.ScopeRepos) > 0 {
+			scopeRepos = strings.Join(p.ScopeRepos, ", ")
+		}
+		draftACs = append(draftACs, p.ACs...)
+	}
+
 	if err := s.Mutate(id, func(it *model.Item) error {
 		it.PlanApproved = true
 		it.PlanApprovedAt = approvedAt
@@ -106,6 +123,25 @@ func PlanApprove(s *store.Store, cfg *config.Config, id string, opts PlanApprove
 		it.Doc.SetField("plan_approved", "true")
 		it.Doc.SetField("plan_approved_at", approvedAt)
 		it.Doc.SetField("plan_approved_by", approver)
+		if sidecarRel != "" {
+			already := false
+			for _, lp := range it.LinkedPlans {
+				if lp == sidecarRel {
+					already = true
+					break
+				}
+			}
+			if !already {
+				it.LinkedPlans = append(it.LinkedPlans, sidecarRel)
+				it.Doc.ReplaceList("linked_plans", it.LinkedPlans)
+			}
+		}
+		if scopeRepos != "" {
+			it.Doc.SetField("scope_repos", scopeRepos)
+		}
+		if len(it.AcceptanceCriteria) == 0 && len(draftACs) > 0 {
+			it.Doc.ReplaceList("acceptance_criteria", draftACs)
+		}
 		return nil
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "writing %s: %v\n", id, err)
@@ -185,7 +221,9 @@ func PlanCheck(s *store.Store, cfg *config.Config, id string) int {
 }
 
 // PlanShow renders a detailed view of an item's plan-approval state plus
-// any linked plan-file paths.
+// any linked plan-file paths. I-565 extends it to inline the plan body
+// and the plan-review report (when sidecars exist) so an agent can read
+// both artifacts in one call.
 func PlanShow(s *store.Store, cfg *config.Config, id string) int {
 	item, ok := s.Get(id)
 	if !ok {
@@ -206,6 +244,37 @@ func PlanShow(s *store.Store, cfg *config.Config, id string) int {
 		fmt.Printf("  Linked plans:\n")
 		for _, p := range item.LinkedPlans {
 			fmt.Printf("    - %s\n", p)
+		}
+	}
+
+	// I-565: inline the plan body from .plans/<id>.md if it exists.
+	plansDir := cfg.PlansDir()
+	if loaded, err := plan.Load(plansDir, id); err == nil && loaded != nil {
+		fmt.Printf("\n=== Plan: .plans/%s.md ===\n", id)
+		if loaded.RawText != "" {
+			fmt.Print(loaded.RawText)
+			if !strings.HasSuffix(loaded.RawText, "\n") {
+				fmt.Println()
+			}
+		} else {
+			fmt.Print(plan.Render(loaded))
+		}
+	}
+
+	// And the plan-review report (write-only prep produces this).
+	// Mirror the plan-block guard above: only emit the section when a
+	// report sidecar actually exists, so `st plan show` on items that
+	// never used --write-only stays quiet.
+	if plan.ReportExists(plansDir, id) {
+		fmt.Printf("\n=== Report: .plans/%s.report.md ===\n", id)
+		report, err := plan.LoadReport(plansDir, id)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "(error loading report: %v)\n", err)
+		} else {
+			fmt.Print(report)
+			if !strings.HasSuffix(report, "\n") {
+				fmt.Println()
+			}
 		}
 	}
 	return 0
