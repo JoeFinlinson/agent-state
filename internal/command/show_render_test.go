@@ -27,7 +27,7 @@ func TestRenderTimeTracking_ShowsAll1hCacheBuckets(t *testing.T) {
 		SessionID: "s", Model: "claude-opus-4-7",
 		ProcessMs: 10_000, AIMs: 8_000,
 		RegInputTokens: 1_000, RegOutputTokens: 500,
-		CacheInTokens: 50_000, CacheOutTokens: 2_000, CacheOut1hTokens: 1_000,
+		CacheReadInputTokens: 50_000, CacheCreation5mInputTokens: 2_000, CacheCreation1hInputTokens: 1_000,
 	})
 	env.Reload(t)
 	item, _ := env.S.Get("T-003")
@@ -39,7 +39,7 @@ func TestRenderTimeTracking_ShowsAll1hCacheBuckets(t *testing.T) {
 	for _, want := range []string{
 		"time_tracking:",
 		"process: ",
-		"cost: $",
+		"): $",
 		"tokens:",
 		"cache: ",
 		// Both split buckets must appear in the display
@@ -52,12 +52,12 @@ func TestRenderTimeTracking_ShowsAll1hCacheBuckets(t *testing.T) {
 	}
 
 	// cost uses %.6f — should contain 6 decimal digits after the dollar sign
-	if !strings.Contains(out, "cost: $") {
+	if !strings.Contains(out, "): $") {
 		t.Fatalf("expected cost line, got:\n%s", out)
 	}
 	costLine := ""
 	for _, ln := range strings.Split(out, "\n") {
-		if strings.Contains(ln, "cost: $") {
+		if strings.Contains(ln, "): $") {
 			costLine = ln
 			break
 		}
@@ -89,7 +89,7 @@ func TestRenderTimeTracking_5mOnlyOmits1hFromDisplay(t *testing.T) {
 	// No 1h writes — keeps the legacy display form
 	SessionLog(env.S, env.Cfg, SessionLogPayload{
 		SessionID: "s", Model: "claude-haiku-4-5",
-		RegInputTokens: 100, CacheOutTokens: 50,
+		RegInputTokens: 100, CacheCreation5mInputTokens: 50,
 	})
 	env.Reload(t)
 	item, _ := env.S.Get("T-003")
@@ -115,14 +115,14 @@ func TestRenderTimeStats_TotalsIncludeBothCacheTiers(t *testing.T) {
 	SessionLog(env.S, env.Cfg, SessionLogPayload{
 		SessionID: "a", Model: "claude-opus-4-7",
 		RegInputTokens: 1000, RegOutputTokens: 500,
-		CacheOutTokens: 1_000, CacheOut1hTokens: 2_000,
+		CacheCreation5mInputTokens: 1_000, CacheCreation1hInputTokens: 2_000,
 	})
 
 	SaveStack(env.Cfg, []StackEntry{{ID: "T-001"}})
 	SessionLog(env.S, env.Cfg, SessionLogPayload{
 		SessionID: "b", Model: "claude-haiku-4-5",
 		RegInputTokens: 200, RegOutputTokens: 100,
-		CacheOutTokens: 500, // no 1h
+		CacheCreation5mInputTokens: 500, // no 1h
 	})
 
 	env.Reload(t)
@@ -177,8 +177,8 @@ func TestRenderTimeStats_ZeroItemsShortCircuits(t *testing.T) {
 func TestFormatAITurnLine_Emits1hBucketWhenNonZero(t *testing.T) {
 	line := formatAITurnLine(SessionLogPayload{
 		SessionID: "s", Model: "claude-opus-4-7",
-		CacheOutTokens: 500, CacheOut1hTokens: 300,
-	}, 0.1, CostSourceProvided, "2026-04-23T12:00:00-07:00")
+		CacheCreation5mInputTokens: 500, CacheCreation1hInputTokens: 300,
+	}, 0.1, "2026-04-23T12:00:00-07:00")
 	if !strings.Contains(line, "cache_out:500") {
 		t.Errorf("missing cache_out:500 in %s", line)
 	}
@@ -188,8 +188,8 @@ func TestFormatAITurnLine_Emits1hBucketWhenNonZero(t *testing.T) {
 
 	// When 1h is zero, the token should NOT appear (legacy form preserved)
 	lineNo1h := formatAITurnLine(SessionLogPayload{
-		SessionID: "s", Model: "claude-opus-4-7", CacheOutTokens: 500,
-	}, 0.1, CostSourceProvided, "2026-04-23T12:00:00-07:00")
+		SessionID: "s", Model: "claude-opus-4-7", CacheCreation5mInputTokens: 500,
+	}, 0.1, "2026-04-23T12:00:00-07:00")
 	if strings.Contains(lineNo1h, "cache_out_1h:") {
 		t.Errorf("should omit cache_out_1h when zero, got: %s", lineNo1h)
 	}

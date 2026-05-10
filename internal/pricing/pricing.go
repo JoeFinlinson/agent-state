@@ -72,24 +72,65 @@ func Lookup(model string) (Rate, error) {
 	return Rate{}, &ErrUnknownModel{Model: model}
 }
 
-// ComputeCost returns the USD cost for a single turn given token counts.
+// EstimateSyntheticCostUSD returns the USD cost estimate for a single turn
+// given token counts. "Synthetic" because we apply the published rate table
+// rather than reading a real billing line — on Max plan there is no real
+// per-call billing to compare against, so this number is an estimate of what
+// the same usage would have cost on the metered API.
+//
 // regIn:  regular (uncached) input tokens
 // regOut: output tokens
 // cacheIn:  tokens read from cache (cache hits)
 // cacheOut5m: tokens written to the 5-minute cache (1.25x input rate)
 // cacheOut1h: tokens written to the 1-hour cache (2x input rate)
-func ComputeCost(model string, regIn, regOut, cacheIn, cacheOut5m, cacheOut1h int) (float64, error) {
-	r, err := Lookup(model)
+func EstimateSyntheticCostUSD(model string, regIn, regOut, cacheIn, cacheOut5m, cacheOut1h int) (float64, error) {
+	b, err := EstimateSyntheticCostBreakdown(model, regIn, regOut, cacheIn, cacheOut5m, cacheOut1h)
 	if err != nil {
 		return 0, err
 	}
+	return b.Total, nil
+}
+
+// CostBreakdown carries per-token-class USD costs alongside the total.
+// Useful for renderers (Step 5 of I-569) that want to show "$0.05 of which
+// $0.04 cache_read" without recomputing the line.
+type CostBreakdown struct {
+	Input            float64
+	Output           float64
+	CacheRead        float64
+	CacheCreation5m  float64
+	CacheCreation1h  float64
+	Total            float64
+}
+
+// EstimateSyntheticCostBreakdown returns the per-class USD cost decomposition
+// used by I-569's stats / show / status renderers. Same inputs and same rate
+// lookup as EstimateSyntheticCostUSD.
+func EstimateSyntheticCostBreakdown(model string, regIn, regOut, cacheIn, cacheOut5m, cacheOut1h int) (CostBreakdown, error) {
+	r, err := Lookup(model)
+	if err != nil {
+		return CostBreakdown{}, err
+	}
 	const perToken = 1_000_000.0
-	cost := float64(regIn)*r.Input/perToken +
-		float64(regOut)*r.Output/perToken +
-		float64(cacheIn)*r.CacheRead/perToken +
-		float64(cacheOut5m)*r.CacheWrite5m/perToken +
-		float64(cacheOut1h)*r.CacheWrite1h/perToken
-	return cost, nil
+	b := CostBreakdown{
+		Input:           float64(regIn) * r.Input / perToken,
+		Output:          float64(regOut) * r.Output / perToken,
+		CacheRead:       float64(cacheIn) * r.CacheRead / perToken,
+		CacheCreation5m: float64(cacheOut5m) * r.CacheWrite5m / perToken,
+		CacheCreation1h: float64(cacheOut1h) * r.CacheWrite1h / perToken,
+	}
+	b.Total = b.Input + b.Output + b.CacheRead + b.CacheCreation5m + b.CacheCreation1h
+	return b, nil
+}
+
+// ComputeCost is kept as a thin alias to EstimateSyntheticCostUSD. All
+// internal call sites have already moved to the explicit name; the alias
+// only exists for any out-of-tree consumer compiled against the old API.
+// Safe to delete once that audit completes.
+//
+// Deprecated: use EstimateSyntheticCostUSD.
+func ComputeCost(model string, regIn, regOut, cacheIn, cacheOut5m, cacheOut1h int) (float64, error) {
+	return EstimateSyntheticCostUSD(model, regIn, regOut, cacheIn, cacheOut5m, cacheOut1h)
 }
 
 // KnownModels returns the sorted list of model ids in the pricing table.

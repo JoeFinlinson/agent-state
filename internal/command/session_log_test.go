@@ -23,8 +23,8 @@ func TestSessionLog_BasicAccrual(t *testing.T) {
 		AIMs:            38_000,
 		RegInputTokens:  1000,
 		RegOutputTokens: 500,
-		CacheInTokens:   10_000,
-		CacheOutTokens:  200,
+		CacheReadInputTokens:   10_000,
+		CacheCreation5mInputTokens:  200,
 	}
 	if code := SessionLog(env.S, env.Cfg, p); code != 0 {
 		t.Fatalf("SessionLog exit=%d", code)
@@ -39,8 +39,16 @@ func TestSessionLog_BasicAccrual(t *testing.T) {
 	assertInt(t, item, "time_tracking", "reg_output_tokens", 500)
 	assertInt(t, item, "time_tracking", "cache_in_tokens", 10_000)
 	assertInt(t, item, "time_tracking", "cache_out_tokens", 200)
-	assertInt(t, item, "time_tracking", "total_input_tokens", 1000+10_000+200)
-	assertInt(t, item, "time_tracking", "total_output_tokens", 500)
+	// I-569 finding-3: total_input_tokens / total_output_tokens are no
+	// longer written (migrate-strip-cost retired them; SessionLog stopped
+	// resurrecting them on the next turn). real_tokens has the same data.
+	rt := readRealTokens(item)
+	if got := rt.Input + rt.CacheRead + rt.CacheCreation5m; got != 1000+10_000+200 {
+		t.Errorf("real_tokens input+cache total = %d, want %d", got, 1000+10_000+200)
+	}
+	if rt.Output != 500 {
+		t.Errorf("real_tokens.output = %d, want 500", rt.Output)
+	}
 	assertInt(t, item, "time_tracking", "turn_count", 1)
 	assertInt(t, item, "time_tracking", "session_count", 1)
 	assertString(t, item, "time_tracking", "last_session", "sess-1")
@@ -155,6 +163,10 @@ func TestSessionLog_MissingItemWritesOrphanLog(t *testing.T) {
 	}
 }
 
+// I-569 step 3: per-turn cost source tracking (last_cost_source,
+// unknown_cost_turns) was retired. The "I couldn't compute cost" signal
+// is now implicit — tokens > 0 with cost == 0. Test confirms tokens
+// still record, cost stays at 0, and no source bookkeeping is written.
 func TestSessionLog_UnknownModelRecordsTokensNoCost(t *testing.T) {
 	env := testutil.NewEnv(t)
 	SaveStack(env.Cfg, []StackEntry{{ID: "T-003"}})
@@ -171,13 +183,17 @@ func TestSessionLog_UnknownModelRecordsTokensNoCost(t *testing.T) {
 	env.Reload(t)
 	item, _ := env.S.Get("T-003")
 	assertInt(t, item, "time_tracking", "reg_input_tokens", 1000)
-	// Cost must remain zero (not silently computed at unknown rate)
 	cost := readFloatField(item, "time_tracking", "ai_cost_usd")
 	if cost != 0 {
 		t.Errorf("unknown model cost should be 0, got %.4f", cost)
 	}
-	assertString(t, item, "time_tracking", "last_cost_source", CostSourceUnknown)
-	assertInt(t, item, "time_tracking", "unknown_cost_turns", 1)
+	// last_cost_source / unknown_cost_turns are retired — no longer written.
+	if got, _ := getNestedField(item, "time_tracking", "last_cost_source"); got != "" {
+		t.Errorf("last_cost_source should not be set, got %q", got)
+	}
+	if got := readIntField(item, "time_tracking", "unknown_cost_turns"); got != 0 {
+		t.Errorf("unknown_cost_turns should not be incremented, got %d", got)
+	}
 }
 
 func TestSessionLog_OpenAIUnknownCostIsExplicit(t *testing.T) {
@@ -207,12 +223,19 @@ func TestSessionLog_OpenAIUnknownCostIsExplicit(t *testing.T) {
 	item, _ := env.S.Get("T-003")
 	assertString(t, item, "time_tracking", "last_provider", AIProviderOpenAI)
 	assertString(t, item, "time_tracking", "last_model", "gpt-5.2")
-	assertString(t, item, "time_tracking", "last_cost_source", CostSourceUnknown)
 	assertInt(t, item, "time_tracking", "reg_input_tokens", 800)
 	assertInt(t, item, "time_tracking", "cache_in_tokens", 400)
 	assertInt(t, item, "time_tracking", "reasoning_tokens", 75)
 	assertInt(t, item, "time_tracking", "total_tokens", 1500)
-	assertInt(t, item, "time_tracking", "unknown_cost_turns", 1)
+	// I-569 step 3: no last_cost_source / unknown_cost_turns / cost_source:
+	// emission. Cost renders as $0.000000 (OpenAI pricing isn't in the
+	// table; pricing returns ErrUnknownModel).
+	if got, _ := getNestedField(item, "time_tracking", "last_cost_source"); got != "" {
+		t.Errorf("last_cost_source should not be set, got %q", got)
+	}
+	if got := readIntField(item, "time_tracking", "unknown_cost_turns"); got != 0 {
+		t.Errorf("unknown_cost_turns should not be incremented, got %d", got)
+	}
 
 	raw, err := os.ReadFile(filepath.Join(env.Root, "tasks", "T-003-active.md"))
 	if err != nil {
@@ -223,34 +246,44 @@ func TestSessionLog_OpenAIUnknownCostIsExplicit(t *testing.T) {
 		"provider:openai",
 		"response:resp_123",
 		"model:gpt-5.2",
-		"cost:unknown",
-		"cost_source:unknown",
+		"cost:$0.000000",
 		"reasoning:75",
 		"total:1500",
 		"openai/gpt-5.2:",
-		"unknown_cost_turns=1",
 	} {
 		if !strings.Contains(s, needle) {
 			t.Errorf("OpenAI session log missing %q. File:\n%s", needle, s)
 		}
 	}
+	for _, banned := range []string{"cost_source:", "cost:unknown", "unknown_cost_turns="} {
+		if strings.Contains(s, banned) {
+			t.Errorf("OpenAI session log should not contain %q (I-569 step 3 retired it). File:\n%s", banned, s)
+		}
+	}
 }
 
-func TestSessionLog_PayloadCostOverridesComputed(t *testing.T) {
+// I-569 step 3: payload.CostUSD is no longer trusted — pricing × tokens
+// is the single source of truth. A producer trying to override (legacy
+// pre-step-3 producers still set CostUSD) gets ignored; the recorded
+// cost matches what the rate table would compute, not what the wire
+// said.
+func TestSessionLog_PayloadCostIgnoredAlwaysRecomputes(t *testing.T) {
 	env := testutil.NewEnv(t)
 	SaveStack(env.Cfg, []StackEntry{{ID: "T-003"}})
 
 	p := SessionLogPayload{
 		SessionID: "s", Model: "claude-opus-4-7",
 		RegInputTokens: 1000, RegOutputTokens: 500,
-		CostUSD: 0.9999, // trusted over computed
+		CostUSD: 0.9999, // ignored; computed cost wins
 	}
 	SessionLog(env.S, env.Cfg, p)
 	env.Reload(t)
 	item, _ := env.S.Get("T-003")
 	got := readFloatField(item, "time_tracking", "ai_cost_usd")
-	if abs(got-0.9999) > 1e-6 {
-		t.Errorf("expected provided cost 0.9999, got %.6f", got)
+	// Opus 4.7: 1000×$5/M + 500×$25/M = $0.005 + $0.0125 = $0.0175
+	want := 0.0175
+	if abs(got-want) > 1e-6 {
+		t.Errorf("expected recomputed cost %.6f, got %.6f (CostUSD on payload should be ignored)", want, got)
 	}
 }
 
@@ -291,7 +324,7 @@ func TestSessionLog_ByModel_SingleModel(t *testing.T) {
 		SessionLog(env.S, env.Cfg, SessionLogPayload{
 			SessionID: "s", Model: "claude-opus-4-7",
 			RegInputTokens: 1000, RegOutputTokens: 500,
-			CacheInTokens: 100, CacheOutTokens: 50,
+			CacheReadInputTokens: 100, CacheCreation5mInputTokens: 50,
 		})
 	}
 
@@ -400,8 +433,8 @@ func TestSessionLog_1hCacheTierAccruedAndPriced(t *testing.T) {
 	// 100k 5m + 50k 1h = 100,000 * 6.25/M + 50,000 * 10/M = 0.625 + 0.5 = 1.125
 	p := SessionLogPayload{
 		SessionID: "s", Model: "claude-opus-4-7",
-		CacheOutTokens:   100_000, // 5m
-		CacheOut1hTokens: 50_000,  // 1h
+		CacheCreation5mInputTokens:   100_000, // 5m
+		CacheCreation1hInputTokens: 50_000,  // 1h
 	}
 	if code := SessionLog(env.S, env.Cfg, p); code != 0 {
 		t.Fatalf("exit=%d", code)
@@ -411,8 +444,12 @@ func TestSessionLog_1hCacheTierAccruedAndPriced(t *testing.T) {
 
 	assertInt(t, item, "time_tracking", "cache_out_tokens", 100_000)
 	assertInt(t, item, "time_tracking", "cache_out_1h_tokens", 50_000)
-	// total_input_tokens = reg_in + cache_in + cache_out + cache_out_1h
-	assertInt(t, item, "time_tracking", "total_input_tokens", 150_000)
+	// I-569 finding-3: total_input_tokens retired in favor of real_tokens.
+	rt := readRealTokens(item)
+	if rt.CacheCreation5m != 100_000 || rt.CacheCreation1h != 50_000 {
+		t.Errorf("real_tokens cache split = (5m:%d, 1h:%d), want (100000, 50000)",
+			rt.CacheCreation5m, rt.CacheCreation1h)
+	}
 
 	cost := readFloatField(item, "time_tracking", "ai_cost_usd")
 	want := 1.125
@@ -662,8 +699,12 @@ func TestSessionLog_DropsDuplicateSubagentTurnsWithin60s(t *testing.T) {
 		Model:            "claude-opus-4-7",
 		RegInputTokens:   45676,
 		RegOutputTokens:  1050962,
-		CacheInTokens:    601116722,
-		CacheOut1hTokens: 5849169,
+		CacheReadInputTokens:    601116722,
+		CacheCreation1hInputTokens: 5849169,
+		// I-569 step 10 soft cap: 601M cache_read on a 0ms turn would be
+		// rejected as physically impossible. Set ProcessMs above the
+		// 60s minimum so the dedup logic gets a chance to run.
+		ProcessMs: 120_000,
 	}
 
 	// First subagent — should accrue.
@@ -715,6 +756,50 @@ func TestSessionLog_DropsDuplicateSubagentTurnsWithin60s(t *testing.T) {
 	}
 	if got := readIntField(item, "time_tracking", "cache_in_tokens"); got != 2*601116722 {
 		t.Errorf("cache_in_tokens = %d, want %d (1 subagent + 1 interactive)", got, 2*601116722)
+	}
+}
+
+// I-569: provenance-only subagent payloads (no tokens, step:subagent)
+// must NOT be silently dropped by the I-448 dedup. With all-zero token
+// tuples, every provenance marker tuple-matches every other one — the
+// pre-fix dedup would treat the second, third, ... markers as
+// duplicates and drop them, losing per-subagent attribution. The fix
+// guards the dedup behind hasTokens(payload) so zero-token markers
+// always accrue.
+func TestSessionLog_ProvenanceOnlySubagentNotDeduped(t *testing.T) {
+	env := testutil.NewEnv(t)
+	SaveStack(env.Cfg, []StackEntry{{ID: "T-003"}})
+
+	marker := SessionLogPayload{
+		Step: "subagent",
+		Role: "Explore",
+		// No model, no tokens — pure provenance signal.
+	}
+
+	first := marker
+	first.SessionID = "agent-aaa"
+	if code := SessionLog(env.S, env.Cfg, first); code != 0 {
+		t.Fatalf("first marker SessionLog exit=%d", code)
+	}
+
+	second := marker
+	second.SessionID = "agent-bbb"
+	if code := SessionLog(env.S, env.Cfg, second); code != 0 {
+		t.Fatalf("second marker SessionLog exit=%d", code)
+	}
+
+	third := marker
+	third.SessionID = "agent-ccc"
+	if code := SessionLog(env.S, env.Cfg, third); code != 0 {
+		t.Fatalf("third marker SessionLog exit=%d", code)
+	}
+
+	env.Reload(t)
+	item, _ := env.S.Get("T-003")
+
+	// All three markers must have accrued — turn_count == 3, not 1.
+	if got := readIntField(item, "time_tracking", "turn_count"); got != 3 {
+		t.Errorf("turn_count = %d, want 3 (provenance-only markers must not dedup)", got)
 	}
 }
 

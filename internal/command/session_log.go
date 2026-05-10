@@ -18,8 +18,13 @@ import (
 
 // SessionLogPayload is the per-turn metrics payload AI providers send to
 // `st session log`. All token and duration fields are for the single turn; the
-// command accrues them onto the resolved item. Legacy Claude producers can omit
-// Provider/CostSource and still get the historical behavior.
+// command accrues them onto the resolved item.
+//
+// I-569 step 3: CostUSD and CostSource are accepted on the wire (older
+// Claude Code producers still send them) but ignored. Cost is always
+// recomputed from tokens × pricing inside SessionLog so the rate table is
+// the single source of truth and migrations on price changes are
+// unnecessary.
 type SessionLogPayload struct {
 	Provider        string `json:"provider,omitempty"`
 	SessionID       string `json:"session_id"`
@@ -29,16 +34,20 @@ type SessionLogPayload struct {
 	AIMs            int64  `json:"ai_ms"`
 	RegInputTokens  int    `json:"reg_input_tokens"`
 	RegOutputTokens int    `json:"reg_output_tokens"`
-	CacheInTokens   int    `json:"cache_in_tokens"`
-	// CacheOutTokens is the 5-minute cache write bucket (1.25x input rate).
+	// I-569 step 9: JSON tags now match Anthropic SDK exactly. Hooks
+	// (stop-metrics.sh) emit these keys; older producers sending the
+	// pre-step-9 names silently lose tokens — single PR, no shim per
+	// the plan.
+	CacheReadInputTokens   int    `json:"cache_read_input_tokens"`
+	// CacheCreation5mInputTokens is the 5-minute cache write bucket (1.25x input rate).
 	// Existing producers that don't split by tier should send their total
 	// here; it's treated as all-5m and priced at 1.25x.
-	CacheOutTokens int `json:"cache_out_tokens"`
-	// CacheOut1hTokens is the 1-hour cache write bucket (2x input rate).
+	CacheCreation5mInputTokens int `json:"cache_creation_5m_input_tokens"`
+	// CacheCreation1hInputTokens is the 1-hour cache write bucket (2x input rate).
 	// When the producer can split by tier (Stop hook parses
 	// ephemeral_5m/1h_input_tokens), populate this field; pricing applies
 	// the 2x rate. Zero is safe — older producers still work.
-	CacheOut1hTokens int     `json:"cache_out_1h_tokens,omitempty"`
+	CacheCreation1hInputTokens int     `json:"cache_creation_1h_input_tokens,omitempty"`
 	ReasoningTokens  int     `json:"reasoning_tokens,omitempty"`
 	TotalTokens      int     `json:"total_tokens,omitempty"`
 	CostUSD          float64 `json:"cost_usd,omitempty"` // if 0, computed from tokens × pricing
@@ -46,6 +55,14 @@ type SessionLogPayload struct {
 	Turn             int     `json:"turn,omitempty"`    // ordinal within session; informational
 	ItemID           string  `json:"item_id,omitempty"` // if empty, resolved from stack top
 	Step             string  `json:"step,omitempty"`    // default "interactive"
+
+	// ProjectDir is the producer's CLAUDE_PROJECT_DIR. I-569 step 6's
+	// reconcile-tokens needs this to derive the correct
+	// `~/.claude/projects/<slug>/<sid>.jsonl` path back to ground truth
+	// when the session ends and we want to reconcile drift. Optional —
+	// pre-I-569 producers omit it and reconcile falls back to a
+	// best-effort lookup.
+	ProjectDir string `json:"project_dir,omitempty"`
 
 	// Optional per-turn file diff info (populated by Stop hook once live).
 	// Recorded in the ai_turns line for provenance.
@@ -119,7 +136,31 @@ func SessionLogCLI(s *store.Store, cfg *config.Config, stdin io.Reader) int {
 // SubagentStop hook, st run's recordRunMetrics) call. Schema lives in the
 // item's time_tracking block; per-turn provenance goes to
 // work_tracking.ai_turns.
+// softCapCacheRead is the I-569 step 10 sanity bound on per-turn cache_read
+// tokens. The historical incidents (I-432 / I-441 / I-443) shipped 894M
+// cache_read on 23-second subagent turns — physically impossible. Any
+// payload exceeding the cap on a sub-minute turn is logged + dropped before
+// it can poison the totals.
+const softCapCacheRead = 500_000_000
+const softCapMinProcessMs = 60_000
+
 func SessionLog(s *store.Store, cfg *config.Config, payload SessionLogPayload) int {
+	// I-569 step 10 soft cap: a turn that claims >500M cache_read tokens
+	// in under 60 seconds is rejected with a stderr warning. Real Anthropic
+	// throughput cannot produce that mix; the only known cause is the
+	// fan-out attribution bug fixed in I-448 / detached in I-569 step 1.
+	//
+	// ProcessMs == 0 ("unknown / unset") is treated as MORE suspicious than
+	// 23 seconds, not less — a producer claiming 894M cache_read with no
+	// reported duration is exactly the I-432 shape from a broken hook.
+	// Reject anything < softCapMinProcessMs, including zero.
+	if payload.CacheReadInputTokens > softCapCacheRead && payload.ProcessMs < softCapMinProcessMs {
+		fmt.Fprintf(os.Stderr,
+			"session log: rejecting payload — cache_read=%d on %dms turn exceeds soft cap (>%d on <%dms)\n",
+			payload.CacheReadInputTokens, payload.ProcessMs, softCapCacheRead, softCapMinProcessMs)
+		return 0
+	}
+
 	// Resolve target item
 	itemID := payload.ItemID
 	if itemID == "" {
@@ -150,44 +191,39 @@ func SessionLog(s *store.Store, cfg *config.Config, payload SessionLogPayload) i
 		return 0
 	}
 
-	// Compute cost if not provided. Unknown model/provider is surfaced as a
-	// warning to stderr; we still record token counts so operators can backfill
-	// later, and mark the turn's cost source as unknown instead of implying
-	// $0.00.
-	cost := payload.CostUSD
-	costSource := strings.TrimSpace(payload.CostSource)
-	if costSource == "" && cost > 0 {
-		costSource = CostSourceProvided
-	}
-	if cost == 0 && shouldComputeCost(payload) {
-		computed, err := pricing.ComputeCost(
+	// I-569 step 3: synthetic cost is ALWAYS recomputed from tokens × the
+	// pricing rate table. payload.CostUSD and payload.CostSource are
+	// accepted on the wire (back-compat for older producers) but ignored
+	// in logic — the only authoritative source is
+	// `pricing.EstimateSyntheticCostUSD`,
+	// and unknown model just means cost stays at 0 for this turn (no
+	// per-turn "unknown" bookkeeping; the absence is derivable from
+	// non-zero tokens with zero cost).
+	var cost float64
+	if shouldComputeCost(payload) {
+		computed, err := pricing.EstimateSyntheticCostUSD(
 			payload.Model,
 			payload.RegInputTokens, payload.RegOutputTokens,
-			payload.CacheInTokens, payload.CacheOutTokens, payload.CacheOut1hTokens,
+			payload.CacheReadInputTokens, payload.CacheCreation5mInputTokens, payload.CacheCreation1hInputTokens,
 		)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "session log: %v (tokens recorded without cost)\n", err)
-			costSource = CostSourceUnknown
 		} else {
 			cost = computed
-			costSource = CostSourceComputed
 		}
-	} else if cost == 0 && hasTokens(payload) && costSource == "" {
-		costSource = CostSourceUnknown
 	}
 
 	// Capture computed values for the Mutate closure (cost computation is
 	// done above — pure arithmetic, no I/O — so it's safe to run before
 	// acquiring the lock).
 	capturedCost := cost
-	capturedCostSource := costSource
 	capturedNow := time.Now().Format(time.RFC3339)
 	toucher := cfg.AgentID()
 	if toucher == "" {
 		toucher = "stop-hook"
 	}
 	capturedToucher := toucher
-	capturedTurnLine := formatAITurnLine(payload, capturedCost, capturedCostSource, capturedNow)
+	capturedTurnLine := formatAITurnLine(payload, capturedCost, capturedNow)
 
 	if err := s.Mutate(itemID, func(item *model.Item) error {
 		// I-448: drop tuple-identical SUBAGENT turns within the last 60s.
@@ -200,10 +236,17 @@ func SessionLog(s *store.Store, cfg *config.Config, payload SessionLogPayload) i
 		// I-441 / I-443 24-billion-token / $15K bug. Scoped to subagent
 		// payloads only so legitimate same-session same-token
 		// accumulation (rare, but seen in unit tests) is unaffected.
-		if payload.Step == "subagent" && isDuplicateRecentTurn(item, payload, capturedNow, 60) {
+		//
+		// I-569: also require hasTokens(payload). A subagent payload
+		// with all-zero tokens (e.g., a provenance-only marker, or any
+		// future caller using step:subagent purely for attribution)
+		// tuple-matches every other zero-token subagent payload and
+		// would be silently dropped — a regression vector now that
+		// I-569 has detached subagent provenance from the token sum.
+		if payload.Step == "subagent" && hasTokens(payload) && isDuplicateRecentTurn(item, payload, capturedNow, 60) {
 			fmt.Fprintf(os.Stderr,
 				"session log: dropped duplicate subagent turn for %s (cache_in=%d reg_out=%d within 60s)\n",
-				itemID, payload.CacheInTokens, payload.RegOutputTokens)
+				itemID, payload.CacheReadInputTokens, payload.RegOutputTokens)
 			return nil
 		}
 
@@ -222,23 +265,20 @@ func SessionLog(s *store.Store, cfg *config.Config, payload SessionLogPayload) i
 				fmt.Sprintf("%d", readIntField(item, "time_tracking", "reasoning_tokens")+payload.ReasoningTokens))
 		}
 		item.SetNested("time_tracking", "cache_in_tokens",
-			fmt.Sprintf("%d", readIntField(item, "time_tracking", "cache_in_tokens")+payload.CacheInTokens))
+			fmt.Sprintf("%d", readIntField(item, "time_tracking", "cache_in_tokens")+payload.CacheReadInputTokens))
 		item.SetNested("time_tracking", "cache_out_tokens",
-			fmt.Sprintf("%d", readIntField(item, "time_tracking", "cache_out_tokens")+payload.CacheOutTokens))
-		if payload.CacheOut1hTokens > 0 || readIntField(item, "time_tracking", "cache_out_1h_tokens") > 0 {
+			fmt.Sprintf("%d", readIntField(item, "time_tracking", "cache_out_tokens")+payload.CacheCreation5mInputTokens))
+		if payload.CacheCreation1hInputTokens > 0 || readIntField(item, "time_tracking", "cache_out_1h_tokens") > 0 {
 			item.SetNested("time_tracking", "cache_out_1h_tokens",
-				fmt.Sprintf("%d", readIntField(item, "time_tracking", "cache_out_1h_tokens")+payload.CacheOut1hTokens))
+				fmt.Sprintf("%d", readIntField(item, "time_tracking", "cache_out_1h_tokens")+payload.CacheCreation1hInputTokens))
 		}
 
-		// Derived totals — kept in the file so consumers don't need to compute
-		item.SetNested("time_tracking", "total_input_tokens",
-			fmt.Sprintf("%d",
-				readIntField(item, "time_tracking", "reg_input_tokens")+
-					readIntField(item, "time_tracking", "cache_in_tokens")+
-					readIntField(item, "time_tracking", "cache_out_tokens")+
-					readIntField(item, "time_tracking", "cache_out_1h_tokens")))
-		item.SetNested("time_tracking", "total_output_tokens",
-			fmt.Sprintf("%d", readIntField(item, "time_tracking", "reg_output_tokens")))
+		// I-569 finding-3: total_input_tokens / total_output_tokens are no
+		// longer written. The migrate-strip-cost subcommand removes them
+		// from existing items; without dropping the writers here too, the
+		// next per-turn payload would resurrect them and the migration's
+		// audit trail would look like it was undone. real_tokens has the
+		// same data in canonical Anthropic-named form.
 		if payload.TotalTokens > 0 || readIntField(item, "time_tracking", "total_tokens") > 0 {
 			item.SetNested("time_tracking", "total_tokens",
 				fmt.Sprintf("%d", readIntField(item, "time_tracking", "total_tokens")+payload.TotalTokens))
@@ -247,15 +287,10 @@ func SessionLog(s *store.Store, cfg *config.Config, payload SessionLogPayload) i
 		if capturedCost > 0 {
 			// 6-decimal precision matches by_model cost precision so the two
 			// aggregates don't drift apart across round-trips. See formatByModelLine.
+			// I-569 step 5 will move this to render-time (computed from
+			// real_tokens × current rates instead of accumulated).
 			item.SetNested("time_tracking", "ai_cost_usd",
 				fmt.Sprintf("%.6f", readFloatField(item, "time_tracking", "ai_cost_usd")+capturedCost))
-		}
-		if capturedCostSource != "" {
-			item.SetNested("time_tracking", "last_cost_source", capturedCostSource)
-			if capturedCostSource == CostSourceUnknown {
-				item.SetNested("time_tracking", "unknown_cost_turns",
-					fmt.Sprintf("%d", readIntField(item, "time_tracking", "unknown_cost_turns")+1))
-			}
 		}
 
 		item.SetNested("time_tracking", "turn_count",
@@ -295,8 +330,19 @@ func SessionLog(s *store.Store, cfg *config.Config, payload SessionLogPayload) i
 		// Upsert per-provider/model aggregate. Historical entries without Provider
 		// keep their model-only key for backwards compatibility.
 		if payload.Model != "" {
-			upsertByModel(item, payload, capturedCost, capturedCostSource)
+			upsertByModel(item, payload, capturedCost)
 		}
+
+		// I-569 step 2: canonical real_tokens block, plus per-step and
+		// per-session rollups. These coexist with the legacy top-level
+		// fields (reg_input_tokens, cache_*_tokens) until step 9's atomic
+		// rename retires them. The new schema names match Anthropic SDK
+		// exactly, so reconcile-tokens (step 6) can compare item state
+		// against transcript JSONL `usage` blocks without translation.
+		rt := realTokensFromPayload(payload)
+		writeRealTokens(item, readRealTokens(item).add(rt))
+		upsertByStep(item, payload.Step, rt, payload.ProcessMs)
+		upsertBySession(item, payload.SessionID, payload.ProjectDir, capturedNow, rt)
 
 		return nil
 	}); err != nil {
@@ -321,18 +367,22 @@ type byModelAggregate struct {
 // upsertByModel finds the existing provider/model line under
 // time_tracking.by_model (if any), adds the payload's deltas, and writes the
 // updated line back. If no line exists, it appends a new one.
-func upsertByModel(item *model.Item, p SessionLogPayload, cost float64, costSource string) {
+//
+// I-569 step 3: no longer takes a cost source. Per-turn unknown_cost_turns
+// tracking has been retired — a turn with non-zero tokens and zero cost is
+// implicitly "unknown" and stats can derive that on demand. Existing
+// unknown_cost_turns values on legacy by_model lines remain readable
+// (parseByModelLine still accepts them) but are not incremented going
+// forward.
+func upsertByModel(item *model.Item, p SessionLogPayload, cost float64) {
 	key := providerModelKey(p)
 	existing := readByModel(item, key)
 	existing.Turns++
 	existing.RegIn += p.RegInputTokens
 	existing.RegOut += p.RegOutputTokens
-	existing.CacheIn += p.CacheInTokens
-	existing.CacheOut += p.CacheOutTokens + p.CacheOut1hTokens // aggregate total cache writes per model
+	existing.CacheIn += p.CacheReadInputTokens
+	existing.CacheOut += p.CacheCreation5mInputTokens + p.CacheCreation1hInputTokens // aggregate total cache writes per model
 	existing.Cost += cost
-	if costSource == CostSourceUnknown {
-		existing.UnknownCostTurns++
-	}
 
 	line := formatByModelLine(key, existing)
 
@@ -495,7 +545,11 @@ func updateListLine(item *model.Item, parent, key string, match func(raw string)
 // formatAITurnLine produces the provenance line appended to time_tracking.ai_turns.
 // Format is space-separated key:value pairs — grep-friendly and stable enough to
 // be parsed by downstream reporting without a dedicated parser.
-func formatAITurnLine(p SessionLogPayload, cost float64, costSource string, at string) string {
+//
+// I-569 step 3: cost source is no longer tracked. cost: always renders as
+// $%.6f (zero when not computable). The implicit "unknown" signal — non-zero
+// tokens with zero cost — is derivable by any consumer that cares.
+func formatAITurnLine(p SessionLogPayload, cost float64, at string) string {
 	step := p.Step
 	if step == "" {
 		step = "interactive"
@@ -516,22 +570,15 @@ func formatAITurnLine(p SessionLogPayload, cost float64, costSource string, at s
 	if p.ResponseID != "" {
 		sb.WriteString(fmt.Sprintf("response:%s ", p.ResponseID))
 	}
-	costText := fmt.Sprintf("$%.6f", cost)
-	if costSource == CostSourceUnknown {
-		costText = "unknown"
-	}
-	sb.WriteString(fmt.Sprintf("session:%s model:%s cost:%s", sid, p.Model, costText))
-	if costSource != "" {
-		sb.WriteString(fmt.Sprintf(" cost_source:%s", costSource))
-	}
+	sb.WriteString(fmt.Sprintf("session:%s model:%s cost:$%.6f", sid, p.Model, cost))
 	sb.WriteString(fmt.Sprintf(" process:%ds ai:%ds reg_in:%d reg_out:%d cache_in:%d cache_out:%d",
 		p.ProcessMs/1000, p.AIMs/1000,
 		p.RegInputTokens, p.RegOutputTokens,
-		p.CacheInTokens, p.CacheOutTokens))
-	if p.CacheOut1hTokens > 0 {
+		p.CacheReadInputTokens, p.CacheCreation5mInputTokens))
+	if p.CacheCreation1hInputTokens > 0 {
 		// Only emit the 1h field when non-zero — keeps legacy grep patterns
 		// that don't expect cache_out_1h from breaking.
-		sb.WriteString(fmt.Sprintf(" cache_out_1h:%d", p.CacheOut1hTokens))
+		sb.WriteString(fmt.Sprintf(" cache_out_1h:%d", p.CacheCreation1hInputTokens))
 	}
 	if p.ReasoningTokens > 0 {
 		sb.WriteString(fmt.Sprintf(" reasoning:%d", p.ReasoningTokens))
@@ -666,10 +713,10 @@ func isDuplicateRecentTurn(item *model.Item, p SessionLogPayload, nowStr string,
 		if at.Before(cutoff) {
 			continue
 		}
-		if extractIntField(entry, "cache_in:") != p.CacheInTokens {
+		if extractIntField(entry, "cache_in:") != p.CacheReadInputTokens {
 			continue
 		}
-		if extractIntField(entry, "cache_out:") != p.CacheOutTokens {
+		if extractIntField(entry, "cache_out:") != p.CacheCreation5mInputTokens {
 			continue
 		}
 		if extractIntField(entry, "reg_in:") != p.RegInputTokens {
@@ -678,7 +725,7 @@ func isDuplicateRecentTurn(item *model.Item, p SessionLogPayload, nowStr string,
 		if extractIntField(entry, "reg_out:") != p.RegOutputTokens {
 			continue
 		}
-		if extractIntField(entry, "cache_out_1h:") != p.CacheOut1hTokens {
+		if extractIntField(entry, "cache_out_1h:") != p.CacheCreation1hInputTokens {
 			continue
 		}
 		if extractField(entry, "model:") != p.Model {
@@ -769,7 +816,7 @@ func writeOrphanLog(cfg *config.Config, p SessionLogPayload) error {
 
 func hasTokens(p SessionLogPayload) bool {
 	return p.RegInputTokens > 0 || p.RegOutputTokens > 0 ||
-		p.CacheInTokens > 0 || p.CacheOutTokens > 0 || p.CacheOut1hTokens > 0 ||
+		p.CacheReadInputTokens > 0 || p.CacheCreation5mInputTokens > 0 || p.CacheCreation1hInputTokens > 0 ||
 		p.ReasoningTokens > 0 || p.TotalTokens > 0
 }
 
