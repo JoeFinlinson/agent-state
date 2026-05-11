@@ -3,6 +3,7 @@ package command
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1495,5 +1496,297 @@ func TestStripBugbotMarkup(t *testing.T) {
 				t.Errorf("stripBugbotMarkup() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// setupRunStatusFixture builds a registry containing both active and
+// archived sprints under both active and non-active epics so each
+// RunStatus filter branch has something to find and something to hide.
+//
+// Layout:
+//
+//	active-epic       (status: active)
+//	  active-sprint   (status: active)   item: T-100 (queued)
+//	  done-sprint     (status: done)     item: T-101 (done)
+//	archived-epic     (status: archived)
+//	  archived-sprint (status: archived) item: T-102 (done)
+//	completed-epic    (status: completed)
+//	  completed-sprint(status: completed) item: T-103 (done)
+func setupRunStatusFixture(t *testing.T) (*store.Store, *config.Config) {
+	t.Helper()
+	root := t.TempDir()
+
+	for _, dir := range []string{"tasks", "issues", "archive", ".as"} {
+		os.MkdirAll(filepath.Join(root, dir), 0755)
+	}
+
+	os.WriteFile(filepath.Join(root, ".as", "config.yaml"), []byte(`paths:
+  root: .
+
+run:
+  permission_mode: dangerously-skip-permissions
+  default_model: claude-sonnet-4-6
+  max_parallelism: 1
+  default_budget_usd: 2.00
+  step_order: [implement, merge, close]
+  steps:
+    implement:
+      type: claude
+    merge:
+      type: command
+      command: echo merged
+    close:
+      type: close
+      resolution: completed
+`), 0644)
+
+	reg := &registry.Registry{}
+	reg.Epics = append(reg.Epics,
+		registry.Epic{ID: "active-epic", Title: "Active Epic", Status: "active"},
+		registry.Epic{ID: "archived-epic", Title: "Archived Epic", Status: "archived"},
+		registry.Epic{ID: "completed-epic", Title: "Completed Epic", Status: "completed"},
+	)
+	reg.Sprints = append(reg.Sprints,
+		registry.Sprint{
+			ID: "active-sprint", Title: "Active Sprint", Epic: "active-epic",
+			Status: "active", Items: []string{"T-100"}, PlanApproved: true,
+		},
+		registry.Sprint{
+			ID: "done-sprint", Title: "Done Sprint", Epic: "active-epic",
+			Status: "done", Items: []string{"T-101"}, PlanApproved: true,
+		},
+		registry.Sprint{
+			ID: "archived-sprint", Title: "Archived Sprint", Epic: "archived-epic",
+			Status: "archived", Items: []string{"T-102"}, PlanApproved: true,
+		},
+		registry.Sprint{
+			ID: "completed-sprint", Title: "Completed Sprint", Epic: "completed-epic",
+			Status: "completed", Items: []string{"T-103"}, PlanApproved: true,
+		},
+	)
+	reg.Save(filepath.Join(root, ".as", "epics.yaml"))
+
+	writeFile(t, filepath.Join(root, "tasks", "T-100-active.md"), `id: T-100
+type: task
+status: queued
+created: 2026-04-01T10:00:00-06:00
+last_touched: 2026-04-01T10:00:00-06:00
+
+completed: null
+
+title: Active item
+
+depends_on:
+- []
+
+sprint: active-sprint
+`)
+	writeFile(t, filepath.Join(root, "tasks", "T-101-done.md"), `id: T-101
+type: task
+status: done
+created: 2026-04-01T10:00:00-06:00
+last_touched: 2026-04-01T10:00:00-06:00
+
+completed: 2026-04-02T10:00:00-06:00
+
+title: Item in done sprint
+
+depends_on:
+- []
+
+sprint: done-sprint
+`)
+	writeFile(t, filepath.Join(root, "tasks", "T-102-arch.md"), `id: T-102
+type: task
+status: done
+created: 2026-04-01T10:00:00-06:00
+last_touched: 2026-04-01T10:00:00-06:00
+
+completed: 2026-04-02T10:00:00-06:00
+
+title: Item in archived sprint
+
+depends_on:
+- []
+
+sprint: archived-sprint
+`)
+	writeFile(t, filepath.Join(root, "tasks", "T-103-comp.md"), `id: T-103
+type: task
+status: done
+created: 2026-04-01T10:00:00-06:00
+last_touched: 2026-04-01T10:00:00-06:00
+
+completed: 2026-04-02T10:00:00-06:00
+
+title: Item in completed sprint
+
+depends_on:
+- []
+
+sprint: completed-sprint
+`)
+
+	cfg, err := config.LoadFrom(filepath.Join(root, ".as", "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s, cfg
+}
+
+func TestRunStatusDefaultHidesArchivedSprintsAndCompletedEpics(t *testing.T) {
+	s, cfg := setupRunStatusFixture(t)
+	out := captureStdout(t, func() {
+		if code := RunStatus(s, cfg, RunStatusOpts{NoRefresh: true}); code != 0 {
+			t.Fatalf("RunStatus returned %d, want 0", code)
+		}
+	})
+
+	// Active epic + active sprint must appear.
+	for _, want := range []string{"Active Epic", "active-epic", "Active Sprint", "active-sprint"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("default view missing %q\noutput:\n%s", want, out)
+		}
+	}
+	// Archived/completed epics and the done sprint inside the active epic
+	// must be hidden by default.
+	for _, gone := range []string{"Archived Epic", "archived-epic", "Completed Epic", "completed-epic",
+		"Archived Sprint", "archived-sprint", "Done Sprint", "done-sprint", "Completed Sprint", "completed-sprint"} {
+		if strings.Contains(out, gone) {
+			t.Errorf("default view should hide %q\noutput:\n%s", gone, out)
+		}
+	}
+}
+
+func TestRunStatusAllShowsArchivedAndCompleted(t *testing.T) {
+	s, cfg := setupRunStatusFixture(t)
+	out := captureStdout(t, func() {
+		if code := RunStatus(s, cfg, RunStatusOpts{ShowAll: true, NoRefresh: true}); code != 0 {
+			t.Fatalf("RunStatus returned %d, want 0", code)
+		}
+	})
+
+	// Every epic and every sprint ID is rendered.
+	for _, want := range []string{
+		"active-epic", "archived-epic", "completed-epic",
+		"active-sprint", "done-sprint", "archived-sprint", "completed-sprint",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("--all view missing %q\noutput:\n%s", want, out)
+		}
+	}
+}
+
+func TestRunStatusClosedOnlyShowsOnlyArchivedAndCompleted(t *testing.T) {
+	s, cfg := setupRunStatusFixture(t)
+	out := captureStdout(t, func() {
+		if code := RunStatus(s, cfg, RunStatusOpts{ClosedOnly: true, NoRefresh: true}); code != 0 {
+			t.Fatalf("RunStatus returned %d, want 0", code)
+		}
+	})
+
+	// Closed-only surfaces all closed sprints — including done sprints nested
+	// inside an active epic. The active epic header still appears because it
+	// owns a done sprint, but the still-active sprint under it must not.
+	for _, want := range []string{"archived-epic", "completed-epic", "done-sprint", "archived-sprint", "completed-sprint"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("-c view missing %q\noutput:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "active-sprint") {
+		t.Errorf("-c view should hide active-sprint\noutput:\n%s", out)
+	}
+}
+
+func TestRunStatusIDFilterToEpic(t *testing.T) {
+	s, cfg := setupRunStatusFixture(t)
+	out := captureStdout(t, func() {
+		if code := RunStatus(s, cfg, RunStatusOpts{ID: "archived-epic", NoRefresh: true}); code != 0 {
+			t.Fatalf("RunStatus returned %d, want 0", code)
+		}
+	})
+
+	// --id <epic> bypasses the default active-only rule and shows the named epic's sprints.
+	if !strings.Contains(out, "archived-epic") {
+		t.Errorf("--id epic view missing target epic\noutput:\n%s", out)
+	}
+	if !strings.Contains(out, "archived-sprint") {
+		t.Errorf("--id epic view missing target epic's sprint\noutput:\n%s", out)
+	}
+	// Other epics must not appear as section headers.
+	if strings.Contains(out, "(active-epic)") || strings.Contains(out, "(completed-epic)") {
+		t.Errorf("--id epic view leaked other epic headers\noutput:\n%s", out)
+	}
+}
+
+func TestRunStatusIDFilterToSprint(t *testing.T) {
+	s, cfg := setupRunStatusFixture(t)
+	out := captureStdout(t, func() {
+		if code := RunStatus(s, cfg, RunStatusOpts{ID: "done-sprint", NoRefresh: true}); code != 0 {
+			t.Fatalf("RunStatus returned %d, want 0", code)
+		}
+	})
+
+	// --id <sprint> bypasses the archived-hide rule and shows that sprint
+	// plus its parent epic header.
+	if !strings.Contains(out, "done-sprint") {
+		t.Errorf("--id sprint view missing target sprint\noutput:\n%s", out)
+	}
+	if !strings.Contains(out, "(active-epic)") {
+		t.Errorf("--id sprint view missing parent epic header\noutput:\n%s", out)
+	}
+	// Sibling sprints (same epic, different ID) must not appear.
+	if strings.Contains(out, "active-sprint") {
+		t.Errorf("--id sprint view should not include sibling sprint\noutput:\n%s", out)
+	}
+	// Other epics must not appear.
+	if strings.Contains(out, "(archived-epic)") || strings.Contains(out, "(completed-epic)") {
+		t.Errorf("--id sprint view leaked other epic headers\noutput:\n%s", out)
+	}
+}
+
+func TestRunStatusIDFilterUnknownSlugFails(t *testing.T) {
+	s, cfg := setupRunStatusFixture(t)
+
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+
+	var code int
+	captureStdout(t, func() {
+		code = RunStatus(s, cfg, RunStatusOpts{ID: "no-such-slug", NoRefresh: true})
+	})
+
+	w.Close()
+	os.Stderr = old
+	errBytes, _ := io.ReadAll(r)
+	r.Close()
+
+	if code == 0 {
+		t.Errorf("unknown --id should return non-zero, got %d", code)
+	}
+	if !strings.Contains(string(errBytes), "no epic or sprint found") {
+		t.Errorf("expected 'no epic or sprint found' error, got %q", string(errBytes))
+	}
+}
+
+func TestRunStatusRunningOnlyStillWorks(t *testing.T) {
+	s, cfg := setupRunStatusFixture(t)
+	// Fixture has no claimed items and no sessions, so --running should
+	// short-circuit to the "no running sprint" path.
+	out := captureStdout(t, func() {
+		if code := RunStatus(s, cfg, RunStatusOpts{RunningOnly: true, NoRefresh: true}); code != 0 {
+			t.Fatalf("RunStatus --running returned %d, want 0", code)
+		}
+	})
+	if !strings.Contains(out, "No running sprint") {
+		t.Errorf("--running view missing short-circuit message\noutput:\n%s", out)
 	}
 }
