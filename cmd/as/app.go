@@ -1186,10 +1186,16 @@ lets you pick one, validates the plan, and starts execution.`,
 	root.AddCommand(runCmd)
 
 	prepCmd := &cobra.Command{
-		Use:   "prep [sprint]",
-		Short: "Generate implementation plans for unplanned sprint items",
+		Use:   "prep [sprint|item]",
+		Short: "Generate implementation plans for unplanned items (sprint or standalone, no sprint required)",
 		Long: `Prep launches Claude Code to explore the codebase and create structured
-implementation plans for each unplanned item in a sprint.
+implementation plans for each unplanned item.
+
+Three forms:
+  st prep <sprint>     — plan every unplanned item in a sprint (batch)
+  st prep <id>         — plan a single item (sprint inferred, or standalone
+                         when the item has no sprint — no sprint required)
+  st prep --item <id>  — same as positional <id>; legacy/long-form
 
 For each item, Claude analyzes the codebase and proposes:
 - Approach and scope (which repos are affected)
@@ -1221,20 +1227,23 @@ implement step during st run.`,
 				// `st prep <sprint> --item I-509`. Sprint slugs (which are
 				// name-generator strings like "mainly-popular-gorilla") never
 				// match an item ID lookup, so the back-compat path is intact.
+				//
+				// I-571: when the item has no sprint, route to PrepStandalone
+				// instead of erroring — no sprint required.
 				arg := args[0]
 				if it, ok := appStore.Get(arg); ok {
 					if it.Sprint == "" {
-						fmt.Fprintf(os.Stderr, "item %s has no sprint assigned\n", arg)
-						exitCode = 1
-						return
+						opts.ItemFilter = ""
+						exitCode = command.PrepStandalone(appStore, appCfg, arg, opts, engine)
+					} else {
+						opts.ItemFilter = arg
+						exitCode = command.Prep(appStore, appCfg, it.Sprint, opts, engine)
 					}
-					opts.ItemFilter = arg
-					exitCode = command.Prep(appStore, appCfg, it.Sprint, opts, engine)
 				} else {
 					exitCode = command.Prep(appStore, appCfg, arg, opts, engine)
 				}
 			} else if item != "" {
-				// Resolve sprint from item
+				// Resolve sprint from item — or route to standalone when none.
 				it, ok := appStore.Get(item)
 				if !ok {
 					fmt.Fprintf(os.Stderr, "item not found: %s\n", item)
@@ -1242,11 +1251,12 @@ implement step during st run.`,
 					return
 				}
 				if it.Sprint == "" {
-					fmt.Fprintf(os.Stderr, "item %s has no sprint assigned\n", item)
-					exitCode = 1
-					return
+					// I-571: --item form also gets the standalone path.
+					opts.ItemFilter = ""
+					exitCode = command.PrepStandalone(appStore, appCfg, item, opts, engine)
+				} else {
+					exitCode = command.Prep(appStore, appCfg, it.Sprint, opts, engine)
 				}
-				exitCode = command.Prep(appStore, appCfg, it.Sprint, opts, engine)
 			} else {
 				exitCode = command.PrepInteractive(appStore, appCfg, opts, engine)
 			}

@@ -222,6 +222,71 @@ func Prep(s *store.Store, cfg *config.Config, sprintID string, opts PrepOpts, en
 	return 0
 }
 
+// PrepStandalone runs the prep flow on a single sprintless item. It
+// mirrors the per-item short-circuits used inside Prep()'s loop body
+// (terminal-status skip, approved sidecar no-op, rejected sidecar skip
+// unless IncludeRejected, write-only already-prepped pair skip) and
+// then dispatches to prepItem or prepItemWriteOnly for that one item.
+// It never calls maybeAutoApproveSprintPlan (no sprint to approve) and
+// never mutates registry state. I-571.
+//
+// Returns 0 on success (including idempotent no-op cases) and 1 only
+// when the item is not found. Per-item failures from prepItem* are
+// surfaced via the same "[<id>] FAILED" messaging they already emit.
+func PrepStandalone(s *store.Store, cfg *config.Config, itemID string, opts PrepOpts, engine RunEngine) int {
+	item, ok := s.Get(itemID)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "item not found: %s\n", itemID)
+		return 1
+	}
+	if cfg.IsTerminalStatus(item.Type, item.Status) {
+		fmt.Printf("Item %s is %s — nothing to plan\n", itemID, item.Status)
+		return 0
+	}
+
+	// Sidecar filters — same set used in Prep()'s loop.
+	if plan.Exists(cfg.PlansDir(), itemID) {
+		p, _ := plan.Load(cfg.PlansDir(), itemID)
+		if p != nil && p.Approved {
+			fmt.Printf("Item %s is already plan-approved\n", itemID)
+			return 0
+		}
+		if p != nil && p.Rejected && !opts.IncludeRejected {
+			fmt.Printf("Item %s has a rejected plan — re-run with --include-rejected to re-process\n", itemID)
+			return 0
+		}
+		if opts.WriteOnly && p != nil && !p.Approved && !p.Rejected && plan.ReportExists(cfg.PlansDir(), itemID) {
+			fmt.Printf("Item %s already has draft plan + report — approve with `st plan approve %s`\n", itemID, itemID)
+			return 0
+		}
+	}
+
+	if opts.DryRun {
+		fmt.Printf("Would plan 1 item:\n  %s  %s\n", itemID, item.Title)
+		return 0
+	}
+
+	// Worktree resolution mirrors Prep()'s loop body.
+	worktreeDir := ""
+	if cfg.Worktree != nil && cfg.Worktree.Enabled {
+		wtBase := cfg.WorktreeForItem(itemID)
+		if wtBase == "" {
+			wtBase = cfg.Root()
+		}
+		if _, err := os.Stat(wtBase); err == nil {
+			worktreeDir = wtBase
+		}
+	}
+
+	fmt.Printf("━━━ Planning %s — %s ━━━\n\n", itemID, item.Title)
+	if opts.WriteOnly {
+		prepItemWriteOnly(s, cfg, itemID, item, opts, engine, worktreeDir)
+	} else {
+		prepItem(s, cfg, itemID, item, opts, engine, worktreeDir)
+	}
+	return 0
+}
+
 // maybeAutoApproveSprintPlan runs after Prep's main loop. When every
 // non-terminal item in the sprint has plan_approved=true and the
 // sprint itself is not yet plan-approved, it shows the dependency
