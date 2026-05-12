@@ -525,10 +525,11 @@ func RunStatus(s *store.Store, cfg *config.Config, opts RunStatusOpts) int {
 			continue
 		}
 		if opts.ClosedOnly {
-			// Only show non-active epics
-			if epic.Status == "active" {
-				continue
-			}
+			// Don't filter epics here — an active epic may still
+			// contain closed (done/archived/completed) sprints that
+			// the operator wants surfaced. Per-sprint filtering below
+			// drops active sprints, and the epicHasItems gate prevents
+			// empty epic headers from rendering.
 		} else if !opts.ShowAll && filterEpicID == "" {
 			// Default: only show active epics
 			if epic.Status != "active" {
