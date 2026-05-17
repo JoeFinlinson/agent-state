@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -37,10 +38,11 @@ import (
 
 type fileResult struct {
 	Path      string
-	Action    string // "healed" | "skipped_clean" | "skipped_empty_sbar"
+	Action    string // healed | skipped_clean | skipped_empty_sbar | skipped_unsafe
 	BeforeLn  int
 	AfterLn   int
 	Signature string // why it was flagged corrupt
+	Unsafe    string // field that would change (skipped_unsafe only)
 }
 
 func main() {
@@ -116,6 +118,15 @@ func main() {
 	}
 
 	writeReport(*report, results, healed, len(paths), *apply)
+
+	for _, r := range results {
+		if r.Action == "skipped_unsafe" {
+			// A flagged file whose typed content would change was
+			// refused. Exit non-zero so an operator or CI sweep cannot
+			// silently miss it.
+			os.Exit(1)
+		}
+	}
 }
 
 // healFile inspects one item file. If its sbar block carries the
@@ -148,18 +159,35 @@ func healFile(path string, apply bool) (fileResult, error) {
 		return fileResult{Path: path, Action: "skipped_empty_sbar", Signature: sig}, nil
 	}
 
-	before := strings.Count(string(orig), "\n") + 1
+	before := countLines(string(orig))
 	item.Doc.SetSBARBlock(item.SBAR)
 	healed := item.Doc.String()
 	if !strings.HasSuffix(healed, "\n") {
 		healed += "\n"
 	}
-	after := strings.Count(healed, "\n")
+	after := countLines(healed)
 
 	if string(orig) == healed {
 		// Signature matched but rebuild is byte-identical: already
 		// canonical (idempotent second run). Treat as clean.
 		return fileResult{Path: path, Action: "skipped_clean"}, nil
+	}
+
+	// Content-preservation guard (definitive backstop). Re-parse the
+	// healed text and compare the typed item model to the original. The
+	// rebuild only restructures the sbar block; every real field —
+	// including the four SBAR sub-fields and all non-sbar fields — must
+	// be byte-identical after a round-trip. Garbage (col-0 prose, even
+	// when mis-parsed with a spurious key) is not a typed field, so it
+	// legitimately disappears and does not trip this. If ANY typed
+	// field would change, refuse to write and surface it rather than
+	// risk the data loss the boundary heuristics are designed to avoid.
+	if field, ok := firstChangedField(item, healed); !ok {
+		return fileResult{
+			Path: path, Action: "skipped_unsafe", Signature: sig,
+			BeforeLn: before, AfterLn: after,
+			Unsafe: field,
+		}, nil
 	}
 
 	res := fileResult{
@@ -174,15 +202,86 @@ func healFile(path string, apply bool) (fileResult, error) {
 	return res, nil
 }
 
+// countLines returns the number of text lines in s (newline-terminated
+// or not), so before/after counts in the report are consistent.
+func countLines(s string) int {
+	if s == "" {
+		return 0
+	}
+	n := strings.Count(s, "\n")
+	if !strings.HasSuffix(s, "\n") {
+		n++
+	}
+	return n
+}
+
+// firstChangedField re-parses healed and compares the typed item model
+// against orig. Returns ("", false) and the offending field name if a
+// real field would change; ("", true) if every typed field is
+// preserved. orig.Doc was mutated by SetSBARBlock but its typed fields
+// were not, so orig still reflects the pre-heal parse.
+func firstChangedField(orig *model.Item, healed string) (string, bool) {
+	tmp, err := os.CreateTemp("", "sbar-heal-verify-*.md")
+	if err != nil {
+		return "tempfile:" + err.Error(), false
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.WriteString(healed); err != nil {
+		tmp.Close()
+		return "tempwrite:" + err.Error(), false
+	}
+	tmp.Close()
+
+	got, err := parse.File(tmp.Name())
+	if err != nil {
+		return "reparse:" + err.Error(), false
+	}
+
+	a, b := *orig, *got
+	a.Doc, b.Doc = nil, nil
+	if reflect.DeepEqual(a, b) {
+		return "", true
+	}
+	// Identify the offending field for the report.
+	for name, eq := range map[string]bool{
+		"sbar":                reflect.DeepEqual(a.SBAR, b.SBAR),
+		"id":                  a.ID == b.ID,
+		"type":                a.Type == b.Type,
+		"status":              a.Status == b.Status,
+		"title":               a.Title == b.Title,
+		"depends_on":          reflect.DeepEqual(a.DependsOn, b.DependsOn),
+		"blocks":              reflect.DeepEqual(a.Blocks, b.Blocks),
+		"acceptance_criteria": reflect.DeepEqual(a.AcceptanceCriteria, b.AcceptanceCriteria),
+		"resolution":          reflect.DeepEqual(a.Resolution, b.Resolution),
+		"tags":                reflect.DeepEqual(a.Tags, b.Tags),
+		"sessions":            reflect.DeepEqual(a.Sessions, b.Sessions),
+		"work_tracking":       reflect.DeepEqual(a.WorkTracking, b.WorkTracking),
+		"testing_evidence":    reflect.DeepEqual(a.TestingEvidence, b.TestingEvidence),
+	} {
+		if !eq {
+			return name, false
+		}
+	}
+	return "other", false
+}
+
 // corruptionSignature returns a non-empty reason if the document's
-// sbar block is structurally corrupt, "" if it looks clean. The sbar
-// region is [sbar:, next recognized top-level key | --- ). Within it
-// the only legitimate lines are the `sbar:` header, the (<=4) indented
-// sub-field headers, their deeper-indented body lines, and blanks.
-// Corruption signatures: (a) any Indent==0 non-empty line in the
-// region other than the `sbar:` header (dedented col-0 garbage, incl.
-// garbage mis-parsed with a spurious Key), or (b) a sub-field header
-// appearing more than once (duplicate orphan headers).
+// sbar block carries the I-487/I-593 structural-corruption signature,
+// "" if it is clean. It uses the SAME two-regime scan as
+// model.SetSBARBlock so detection and rebuild agree exactly:
+//
+//   - Indent==0, non-empty, NO key  -> I-487 dedented col-0 prose:
+//     unambiguous corruption (a real field is always a `key:` line).
+//   - A sbar sub-field header (situation/background/assessment/
+//     recommendation) appearing more than once -> duplicate orphan
+//     headers from the I-593 setter bug.
+//
+// Crucially, an Indent==0 *keyed* line seen BEFORE any dedented prose
+// ends the scan and is NOT corruption — a structurally clean block
+// followed by a legacy/non-canonical freeform field (e.g. `impact:`,
+// `root_cause:`) is left untouched, never false-flagged. Once dedented
+// prose has been seen, keyed garbage is consumed until a canonical
+// schema key, mirroring the rebuild boundary.
 func corruptionSignature(d *model.ParsedDocument) string {
 	start := -1
 	for i, l := range d.Lines {
@@ -195,16 +294,30 @@ func corruptionSignature(d *model.ParsedDocument) string {
 		return "" // no sbar block — not this tool's concern
 	}
 	subCount := map[string]int{}
+	sawDedentedProse := false
+	var proseSample string
 	for i := start + 1; i < len(d.Lines); i++ {
 		l := d.Lines[i]
 		if strings.TrimSpace(l.Raw) == "---" {
 			break
 		}
-		if l.Indent == 0 && l.Key != "" && model.KnownTopLevelKeys[l.Key] {
-			break // reached the next genuine field
-		}
 		if l.Indent == 0 && !l.IsEmpty {
-			return fmt.Sprintf("col-0 line inside sbar block: %q", trunc(l.Raw))
+			if l.Key == "" {
+				if !sawDedentedProse {
+					proseSample = trunc(l.Raw)
+				}
+				sawDedentedProse = true
+				continue
+			}
+			// Indent==0 keyed line.
+			if !sawDedentedProse {
+				break // clean block; this is the real next field.
+			}
+			if model.CanonicalTopLevelKeys[l.Key] {
+				break // corrupt region ended at the real next field.
+			}
+			// corrupt block, keyed garbage — keep scanning.
+			continue
 		}
 		if l.Indent == 2 {
 			switch l.Key {
@@ -212,6 +325,9 @@ func corruptionSignature(d *model.ParsedDocument) string {
 				subCount[l.Key]++
 			}
 		}
+	}
+	if sawDedentedProse {
+		return fmt.Sprintf("dedented col-0 prose inside sbar block: %q", proseSample)
 	}
 	for k, n := range subCount {
 		if n > 1 {
@@ -246,14 +362,29 @@ func writeReport(path string, results []fileResult, healed, total int, apply boo
 	if apply {
 		mode = "APPLIED"
 	}
+	unsafe := 0
+	for _, r := range results {
+		if r.Action == "skipped_unsafe" {
+			unsafe++
+		}
+	}
 	fmt.Fprintf(&b, "# sbar-heal report\n\nMode: %s\n\n", mode)
-	fmt.Fprintf(&b, "Scanned %d files; %d corrupt.\n\n", total, healed)
+	fmt.Fprintf(&b, "Scanned %d files; %d healed; %d refused (skipped_unsafe).\n\n", total, healed, unsafe)
+	if unsafe > 0 {
+		fmt.Fprintf(&b, "> WARNING: %d file(s) carried a corruption signature but the\n"+
+			"> content-preservation guard found a typed field would change — they\n"+
+			"> were NOT written. Investigate each before any broader sweep.\n\n", unsafe)
+	}
 	if len(results) > 0 {
-		fmt.Fprintf(&b, "| Item file | Action | Lines (before→after) | Signature |\n")
+		fmt.Fprintf(&b, "| Item file | Action | Lines (before→after) | Signature / Unsafe field |\n")
 		fmt.Fprintf(&b, "|---|---|---|---|\n")
 		for _, r := range results {
+			detail := r.Signature
+			if r.Action == "skipped_unsafe" {
+				detail = fmt.Sprintf("WOULD CHANGE %q — %s", r.Unsafe, r.Signature)
+			}
 			fmt.Fprintf(&b, "| %s | %s | %d→%d | %s |\n",
-				filepath.Base(r.Path), r.Action, r.BeforeLn, r.AfterLn, r.Signature)
+				filepath.Base(r.Path), r.Action, r.BeforeLn, r.AfterLn, detail)
 		}
 	}
 	out := b.String()

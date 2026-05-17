@@ -174,20 +174,27 @@ func NewParsedDocument() *ParsedDocument {
 	return &ParsedDocument{}
 }
 
-// KnownTopLevelKeys is the authoritative set of legitimate top-level
-// item-schema field names. It is the union of every key the parser
-// recognizes in internal/parse storeScalar (scalars), storeList (lists)
-// and storeMultiline / the nested-parent handling (blocks + nested
-// maps), plus the canonical extras. It exists so structural repair
-// (SetSBARBlock boundary detection, cmd/sbar-heal) can tell a genuine
-// following field from corruption: I-487 dedented col-0 prose and
-// I-593 orphan continuation lines sit at column 0, and garbage lines
-// containing a stray colon are mis-parsed with a spurious Key — so
-// "next Indent==0 line with a Key" is NOT a safe boundary, but "next
-// Indent==0 line whose Key is in this set" is. Keep in sync with the
-// parser's recognized keys; an omission here would let repair swallow
-// a real field (data loss), so this is deliberately generous.
-var KnownTopLevelKeys = map[string]bool{
+// CanonicalTopLevelKeys is EXACTLY the set of top-level item-schema
+// field names the parser recognizes in internal/parse (storeScalar,
+// storeList, storeListOfMaps, and storeNestedScalar's top-level parent
+// cases). It is intentionally NOT a generous "every key seen in the
+// corpus" list — the corpus carries ~150 distinct legacy/freeform
+// top-level keys, so a generous whitelist is unmaintainable and an
+// omission would silently swallow a real field.
+//
+// This set is used ONLY as the garbage-mode terminator in
+// SetSBARBlock: once I-487 dedented col-0 prose has been observed
+// inside the block, the rebuild must consume the (possibly
+// colon-bearing) prose until it reaches the real next field, and the
+// only reliable "real next field" signal there is a canonical key. In
+// the absence of dedented prose (a structurally clean block), the
+// boundary is simply the first Indent==0 line — see SetSBARBlock — so
+// a clean item carrying a legacy non-canonical field right after the
+// sbar block is never mis-consumed regardless of this set.
+//
+// TestCanonicalTopLevelKeys_MatchesParser asserts this stays in sync
+// with internal/parse; update both together.
+var CanonicalTopLevelKeys = map[string]bool{
 	// storeScalar
 	"id": true, "type": true, "status": true, "title": true,
 	"created": true, "last_touched": true, "completed": true,
@@ -201,13 +208,12 @@ var KnownTopLevelKeys = map[string]bool{
 	"related_issues": true, "acceptance_criteria": true,
 	"next_actions": true, "resolution": true, "invariants": true,
 	"doc_changes": true, "sessions": true, "linked_plans": true,
-	// storeMultiline / nested parents / canonical extras
-	"summary": true, "description": true, "context": true,
-	"sbar": true, "work_tracking": true, "delivery": true,
-	"testing_evidence": true, "time_tracking": true, "manifest": true,
-	"scope": true, "scope_in": true, "scope_out": true,
-	"scope_repos": true, "source": true, "approach_decision": true,
-	"canonical_anchors": true,
+	"tests_written": true,
+	// storeListOfMaps / storeNestedScalar top-level parents
+	"testing_evidence": true, "work_tracking": true, "delivery": true,
+	"time_tracking": true, "manifest": true, "sbar": true,
+	// storeMultiline top-level
+	"summary": true, "context": true,
 }
 
 // SetField updates or inserts a scalar field value in the document.
@@ -267,23 +273,32 @@ func buildScalarOrBlock(key, value, comment string) []Line {
 }
 
 // buildNestedScalarOrBlock produces the line(s) for a nested (indented)
-// field at the given indent. Nested analogue of buildScalarOrBlock: a
-// value containing a newline is emitted as a nested block scalar
-// (`<indent>key: |-` followed by body indented two spaces further),
-// otherwise a single `<indent>key: value` line. Inline comments are
-// preserved on the key line. Used by SetNestedField so a multi-line
-// value no longer collapses onto one line and so the old block body is
-// rebuilt rather than stranded (I-593).
-func buildNestedScalarOrBlock(key, value string, indent int, comment string) []Line {
+// field under `parent` at the given indent. Nested analogue of
+// buildScalarOrBlock: a value containing a newline is emitted as a
+// nested block scalar (`<indent>key: |-` followed by body indented two
+// spaces further), otherwise a single `<indent>key: value` line.
+// Inline comments are preserved on the key line. Used by SetNestedField
+// so a multi-line value no longer collapses onto one line and so the
+// old block body is rebuilt rather than stranded (I-593).
+//
+// The key line carries BlockKey=parent and block-body lines carry
+// BlockKey=key, matching exactly what internal/parse assigns on
+// re-parse (parse.go sets a nested header's BlockKey to its parent and
+// a nested block body's BlockKey to the child key). Without this,
+// in-session metadata diverges from a re-parse and BlockKey-keyed
+// lookups such as RemoveNestedField silently fail. Trailing newlines
+// are trimmed before splitting, mirroring buildSBARLines (I-493), so
+// no spurious empty body line is baked in.
+func buildNestedScalarOrBlock(parent, key, value string, indent int, comment string) []Line {
 	pad := strings.Repeat(" ", indent)
 	if strings.Contains(value, "\n") {
-		header := Line{Raw: pad + key + ": |-", Key: key, Indent: indent}
+		header := Line{Raw: pad + key + ": |-", Key: key, Indent: indent, BlockKey: parent}
 		if comment != "" {
 			header.Raw += "  # " + comment
 			header.Comment = comment
 		}
 		out := []Line{header}
-		for _, ln := range strings.Split(value, "\n") {
+		for _, ln := range strings.Split(strings.TrimRight(value, "\n"), "\n") {
 			out = append(out, Line{
 				Raw:      pad + "  " + ln,
 				IsBlock:  true,
@@ -297,15 +312,16 @@ func buildNestedScalarOrBlock(key, value string, indent int, comment string) []L
 	if comment != "" {
 		raw += "  # " + comment
 	}
-	return []Line{{Raw: raw, Key: key, Value: value, Indent: indent, Comment: comment}}
+	return []Line{{Raw: raw, Key: key, Value: value, Indent: indent, Comment: comment, BlockKey: parent}}
 }
 
 // SetSBARBlock replaces the entire `sbar:` block — header line plus
 // all indented continuation lines — with a freshly-rendered version of
 // `s`. Each of the four sub-fields renders as a YAML block scalar
 // (`  key: |-` followed by indented body lines). Empty sub-fields are
-// emitted as `  key: |-` with a single empty body line, preserving the
-// schema invariant from I-487 that all four keys are present.
+// emitted as `  key: |-` with no body lines (see buildSBARLines),
+// preserving the schema invariant from I-487 that all four keys are
+// present.
 //
 // I-493 needed this because SetNestedField only handles single-line
 // nested values; SBAR sub-fields are routinely multi-paragraph, so the
@@ -334,28 +350,51 @@ func (d *ParsedDocument) SetSBARBlock(s SBAR) {
 		return
 	}
 
-	// Find the end of the sbar block. The legitimate block is the
-	// `sbar:` header plus its four indented sub-fields and their block
-	// bodies. Corruption can sit between the real sub-fields and the
-	// next genuine field: I-487 wrote dedented col-0 prose into
-	// sbar.background, I-593's SetNestedField bug stranded orphan
-	// continuation lines, and both leave duplicate orphaned
-	// situation:/background:/assessment:/recommendation: headers
-	// further down. A "first Indent==0 non-empty line" boundary is
-	// defeated because the col-0 garbage is itself at Indent==0 — and
-	// a garbage line containing a stray colon is mis-parsed with a
-	// spurious Key. So the boundary is the body separator or the next
-	// *recognized* top-level schema key (KnownTopLevelKeys); every
-	// line before it — clean sub-fields, orphans, and col-0 garbage
-	// alike — is inside [startIdx,endIdx) and replaced wholesale.
+	// Find the end of the sbar block. Two regimes, distinguished by
+	// whether I-487 dedented col-0 prose is present:
+	//
+	//   Clean block: the `sbar:` header, its indented sub-fields and
+	//   block bodies, then the next field at Indent==0. Here the
+	//   boundary is simply the first Indent==0 non-empty line (the
+	//   pre-I-593 behavior). This is correct for EVERY structurally
+	//   clean item — including legacy items whose next field is a
+	//   non-canonical freeform key — so the rebuild never mis-consumes
+	//   a real trailing field. No whitelist is consulted in this case.
+	//
+	//   Corrupt block: I-487 wrote multi-line content un-indented, so
+	//   prose sits at Indent==0 *inside* the block, and orphaned/
+	//   duplicate sub-field headers follow. Some prose lines contain a
+	//   stray colon and are mis-parsed with a spurious Key, so they are
+	//   indistinguishable from a real field by syntax alone. Once such
+	//   dedented prose (Indent==0, non-empty, Key=="") has been seen,
+	//   the only reliable "real next field" signal is a canonical
+	//   schema key, so from then on the scan consumes everything until
+	//   a CanonicalTopLevelKeys key (or `---`).
+	//
+	// Net effect: clean items are untouched-safe without any whitelist;
+	// only genuinely corrupt blocks invoke the canonical-key terminator.
 	endIdx := startIdx + 1
+	sawDedentedProse := false
 	for endIdx < len(d.Lines) {
 		l := d.Lines[endIdx]
 		if strings.TrimSpace(l.Raw) == "---" {
 			break
 		}
-		if l.Indent == 0 && l.Key != "" && KnownTopLevelKeys[l.Key] {
-			break
+		if l.Indent == 0 && !l.IsEmpty {
+			if l.Key == "" {
+				// Dedented prose — the I-487 corruption signature.
+				sawDedentedProse = true
+				endIdx++
+				continue
+			}
+			// Indent==0 keyed line.
+			if !sawDedentedProse {
+				break // clean block: this is the real next field.
+			}
+			if CanonicalTopLevelKeys[l.Key] {
+				break // corrupt block: reached the real next field.
+			}
+			// corrupt block, keyed garbage line — keep consuming.
 		}
 		endIdx++
 	}
@@ -536,7 +575,7 @@ func (d *ParsedDocument) SetNestedField(path, value string) bool {
 				}
 				break
 			}
-			newLines := buildNestedScalarOrBlock(child, value, childIndent, line.Comment)
+			newLines := buildNestedScalarOrBlock(parent, child, value, childIndent, line.Comment)
 			tail := append([]Line{}, d.Lines[end:]...)
 			d.Lines = append(d.Lines[:i], append(newLines, tail...)...)
 			return true

@@ -179,6 +179,50 @@ func TestItemIDFromFilename(t *testing.T) {
 	}
 }
 
+// Finding A (PR #106 review): a structurally clean sbar block followed
+// by a legacy non-canonical top-level field must NOT be flagged corrupt
+// (no false positive, no data loss) — the data-loss class the runtime
+// guard + tightened signature exist to prevent for the I-595 sweep.
+const cleanThenLegacyFixture = `id: T-997
+type: issue
+status: queued
+title: clean sbar then legacy field
+created: 2026-05-16T00:00:00-06:00
+last_touched: 2026-05-16T00:00:00-06:00
+sbar:
+  situation: |-
+    clean situation
+  background: |-
+    clean background
+  assessment: |-
+    clean assessment
+  recommendation: |-
+    clean recommendation
+impact: >
+  This is a legacy freeform field that predates the SBAR schema and is
+  not a canonical key. It must survive untouched.
+root_cause: another legacy field
+blocks:
+- []
+`
+
+func TestHealFile_CleanSbarThenLegacyKeyUntouched(t *testing.T) {
+	dir := t.TempDir()
+	p := writeFixture(t, dir, "T-997.md", cleanThenLegacyFixture)
+
+	r, err := healFile(p, true)
+	if err != nil {
+		t.Fatalf("healFile: %v", err)
+	}
+	if r.Action != "skipped_clean" {
+		t.Errorf("action = %q, want skipped_clean (clean sbar + legacy field must not be flagged)", r.Action)
+	}
+	got, _ := os.ReadFile(p)
+	if string(got) != cleanThenLegacyFixture {
+		t.Errorf("clean+legacy file was modified (data-loss risk):\n%s", string(got))
+	}
+}
+
 func boolToInt(b bool) int {
 	if b {
 		return 1

@@ -1,6 +1,9 @@
 package model
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // I-593: SetNestedField overwriting a `key: |-` block scalar must drop
 // the old block body, not strand it beneath the new value.
@@ -128,6 +131,105 @@ func TestSetSBARBlock_HealsColZeroGarbageAndDuplicateHeaders(t *testing.T) {
 	if got := doc.String(); got != want {
 		t.Errorf("corrupt sbar not healed.\n got:\n%s\nwant:\n%s", got, want)
 	}
+}
+
+// Finding B (PR #106 review): the rebuilt nested header must carry
+// BlockKey=parent, matching what the parser assigns on re-parse, so an
+// in-session SetNestedField followed by RemoveNestedField (which
+// matches on BlockKey==parent) still works.
+func TestSetNestedField_RoundTripEnablesRemove(t *testing.T) {
+	doc := &ParsedDocument{Lines: []Line{
+		{Raw: "sbar:", Key: "sbar"},
+		{Raw: "  situation: |-", Key: "situation", Indent: 2, BlockKey: "sbar"},
+		{Raw: "    old", IsBlock: true, BlockKey: "situation", Indent: 4},
+		{Raw: "  background: |-", Key: "background", Indent: 2, BlockKey: "sbar"},
+		{Raw: "    bg", IsBlock: true, BlockKey: "background", Indent: 4},
+		{Raw: "blocks:", Key: "blocks"},
+	}}
+	if !doc.SetNestedField("sbar.situation", "fresh") {
+		t.Fatal("SetNestedField should find sbar.situation")
+	}
+	// Header line must carry BlockKey == "sbar".
+	for _, l := range doc.Lines {
+		if l.Key == "situation" && l.Indent == 2 && l.BlockKey != "sbar" {
+			t.Fatalf("rebuilt situation header BlockKey = %q, want \"sbar\"", l.BlockKey)
+		}
+	}
+	if !doc.RemoveNestedField("sbar.situation") {
+		t.Error("RemoveNestedField failed in-session after SetNestedField (BlockKey not set)")
+	}
+}
+
+// Finding A (PR #106 review): a structurally CLEAN sbar block followed
+// immediately by a non-canonical legacy freeform field must NOT have
+// that field consumed by SetSBARBlock. No dedented prose => boundary is
+// the first Indent==0 line regardless of whether its key is canonical.
+func TestSetSBARBlock_CleanBlockThenLegacyKeyNotConsumed(t *testing.T) {
+	doc := &ParsedDocument{Lines: []Line{
+		{Raw: "sbar:", Key: "sbar"},
+		{Raw: "  situation: |-", Key: "situation", Indent: 2, BlockKey: "sbar"},
+		{Raw: "    s", IsBlock: true, BlockKey: "situation", Indent: 4},
+		{Raw: "  background: |-", Key: "background", Indent: 2, BlockKey: "sbar"},
+		{Raw: "    b", IsBlock: true, BlockKey: "background", Indent: 4},
+		{Raw: "  assessment: |-", Key: "assessment", Indent: 2, BlockKey: "sbar"},
+		{Raw: "    a", IsBlock: true, BlockKey: "assessment", Indent: 4},
+		{Raw: "  recommendation: |-", Key: "recommendation", Indent: 2, BlockKey: "sbar"},
+		{Raw: "    r", IsBlock: true, BlockKey: "recommendation", Indent: 4},
+		// legacy, non-canonical, NOT in CanonicalTopLevelKeys:
+		{Raw: "impact: a real legacy field value", Key: "impact", Value: "a real legacy field value"},
+		{Raw: "root_cause: also real", Key: "root_cause", Value: "also real"},
+	}}
+	doc.SetSBARBlock(SBAR{Situation: "s", Background: "b", Assessment: "a", Recommendation: "r"})
+	got := doc.String()
+	if !strings.Contains(got, "impact: a real legacy field value") ||
+		!strings.Contains(got, "root_cause: also real") {
+		t.Errorf("clean-block legacy field was consumed by SetSBARBlock:\n%s", got)
+	}
+}
+
+// The CanonicalTopLevelKeys set must mirror exactly what internal/parse
+// recognizes as top-level fields. Update both together if the parser
+// changes. (Sub-keys situation/background/assessment/recommendation and
+// the testing_evidence-nested required_suites/scope_suites are NOT
+// top-level and are intentionally excluded.)
+func TestCanonicalTopLevelKeys_MatchesParser(t *testing.T) {
+	want := map[string]bool{
+		// storeScalar
+		"id": true, "type": true, "status": true, "title": true,
+		"created": true, "last_touched": true, "completed": true,
+		"priority": true, "severity": true, "category": true, "repo": true,
+		"assigned_to": true, "last_touched_by": true, "epic": true,
+		"sprint": true, "claimed_by": true, "claimed_at": true,
+		"plan_approved": true, "plan_approved_at": true,
+		"plan_approved_by": true, "parallel_group": true,
+		// storeList
+		"tags": true, "depends_on": true, "blocks": true,
+		"related_issues": true, "acceptance_criteria": true,
+		"next_actions": true, "resolution": true, "invariants": true,
+		"doc_changes": true, "sessions": true, "linked_plans": true,
+		"tests_written": true,
+		// storeListOfMaps / storeNestedScalar top-level parents
+		"testing_evidence": true, "work_tracking": true, "delivery": true,
+		"time_tracking": true, "manifest": true, "sbar": true,
+		// storeMultiline top-level
+		"summary": true, "context": true,
+	}
+	if !reflectDeepEqualStringSet(want, CanonicalTopLevelKeys) {
+		t.Errorf("CanonicalTopLevelKeys drifted from the parser-recognized set.\n got:  %v\n want: %v",
+			CanonicalTopLevelKeys, want)
+	}
+}
+
+func reflectDeepEqualStringSet(a, b map[string]bool) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k := range a {
+		if !b[k] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestSetSBARBlock_CleanCaseRegressionAndIdempotent(t *testing.T) {
