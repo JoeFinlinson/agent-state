@@ -29,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -157,6 +158,26 @@ func healFile(path string, apply bool) (fileResult, error) {
 	s := item.SBAR
 	if strings.TrimSpace(s.Situation+s.Background+s.Assessment+s.Recommendation) == "" {
 		return fileResult{Path: path, Action: "skipped_empty_sbar", Signature: sig}, nil
+	}
+
+	// Ambiguity guard for the consumed region. In corrupt mode the
+	// rebuild consumes col-0 keyed lines that are not canonical keys.
+	// Genuine I-487 garbage is dedented PROSE that the parser mis-keys
+	// — its "key" is a long phrase with spaces/punctuation. A real
+	// legacy/freeform field (`design:`, `linked_tasks:`,
+	// `current_state_assessment:`) is a short snake_case identifier and
+	// is NOT stored in the typed model, so the firstChangedField guard
+	// below cannot see its deletion. If such an identifier-like
+	// non-canonical key sits in the region we would replace, we cannot
+	// prove it is garbage — refuse and surface it (the I-595 sweep does
+	// the per-item human judgment). Prose-keyed garbage (spaces, etc.)
+	// is not identifier-like, so genuinely-corrupt items like T-196
+	// still heal.
+	if k := ambiguousConsumedField(item.Doc); k != "" {
+		return fileResult{
+			Path: path, Action: "skipped_unsafe", Signature: sig,
+			Unsafe: "non-canonical field in consumed region: " + k,
+		}, nil
 	}
 
 	before := countLines(string(orig))
@@ -332,6 +353,68 @@ func corruptionSignature(d *model.ParsedDocument) string {
 	for k, n := range subCount {
 		if n > 1 {
 			return fmt.Sprintf("duplicate sbar sub-field header %q (x%d)", k, n)
+		}
+	}
+	return ""
+}
+
+// fieldIdentifierRe matches a plausible schema/legacy field key: a
+// short snake_case identifier. Dedented I-487 prose that the parser
+// mis-keys produces "keys" that are long phrases containing spaces,
+// uppercase, punctuation, parentheses, etc. — those do NOT match, so
+// they are correctly treated as consumable garbage.
+var fieldIdentifierRe = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
+
+func looksLikeFieldIdentifier(key string) bool {
+	return len(key) <= 40 && fieldIdentifierRe.MatchString(key)
+}
+
+// ambiguousConsumedField walks the same two-regime region SetSBARBlock
+// would replace. If, in corrupt mode, it finds an Indent==0 keyed line
+// that is (a) not canonical, (b) not one of the four sbar sub-keys,
+// and (c) looks like a real field identifier, it returns that key.
+// Such a line cannot be proven to be garbage vs a genuine legacy
+// freeform field — and because legacy fields are not in the typed
+// model, firstChangedField cannot detect their deletion. Returning
+// non-empty makes healFile refuse (skipped_unsafe) so the I-595 sweep
+// resolves it with human judgment. Prose-keyed garbage is not
+// identifier-like, so genuinely-corrupt items still heal.
+func ambiguousConsumedField(d *model.ParsedDocument) string {
+	start := -1
+	for i, l := range d.Lines {
+		if l.Key == "sbar" && l.Indent == 0 {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return ""
+	}
+	subKeys := map[string]bool{
+		"situation": true, "background": true,
+		"assessment": true, "recommendation": true,
+	}
+	sawDedentedProse := false
+	for i := start + 1; i < len(d.Lines); i++ {
+		l := d.Lines[i]
+		if strings.TrimSpace(l.Raw) == "---" {
+			break
+		}
+		if l.Indent == 0 && !l.IsEmpty {
+			if l.Key == "" {
+				sawDedentedProse = true
+				continue
+			}
+			if !sawDedentedProse {
+				break // clean block; real next field.
+			}
+			if model.CanonicalTopLevelKeys[l.Key] {
+				break // corrupt region ended at the real next field.
+			}
+			// corrupt-mode keyed line that would be consumed.
+			if !subKeys[l.Key] && looksLikeFieldIdentifier(l.Key) {
+				return l.Key
+			}
 		}
 	}
 	return ""

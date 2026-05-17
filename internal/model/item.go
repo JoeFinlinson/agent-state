@@ -174,13 +174,20 @@ func NewParsedDocument() *ParsedDocument {
 	return &ParsedDocument{}
 }
 
-// CanonicalTopLevelKeys is EXACTLY the set of top-level item-schema
-// field names the parser recognizes in internal/parse (storeScalar,
-// storeList, storeListOfMaps, and storeNestedScalar's top-level parent
-// cases). It is intentionally NOT a generous "every key seen in the
-// corpus" list — the corpus carries ~150 distinct legacy/freeform
-// top-level keys, so a generous whitelist is unmaintainable and an
-// omission would silently swallow a real field.
+// CanonicalTopLevelKeys is the set of top-level item-schema field
+// names the parser recognizes in internal/parse: storeScalar,
+// storeList, storeListOfMaps, storeMultiline's top-level cases
+// (summary/context), and the storeNestedScalar parent cases that are
+// genuine top-level containers (work_tracking, delivery,
+// testing_evidence, time_tracking, manifest, sbar). It deliberately
+// EXCLUDES storeNestedScalar's `required_suites`/`scope_suites` cases:
+// those are second-level keys nested under `testing_evidence`, never
+// top-level fields, so they are not block terminators.
+//
+// It is intentionally NOT a generous "every key seen in the corpus"
+// list — the corpus carries ~150 distinct legacy/freeform top-level
+// keys, so a generous whitelist is unmaintainable and an omission
+// would silently swallow a real field.
 //
 // This set is used ONLY as the garbage-mode terminator in
 // SetSBARBlock: once I-487 dedented col-0 prose has been observed

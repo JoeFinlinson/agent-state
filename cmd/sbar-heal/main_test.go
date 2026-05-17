@@ -223,6 +223,50 @@ func TestHealFile_CleanSbarThenLegacyKeyUntouched(t *testing.T) {
 	}
 }
 
+// R1 (re-review): a corrupt block whose consumed region contains a
+// non-canonical *identifier-like* legacy field (not in the typed
+// model, so firstChangedField is blind to it) must be REFUSED, not
+// silently healed-with-deletion.
+const corruptWithLegacyFieldFixture = `id: T-996
+type: task
+status: queued
+title: corrupt then legacy identifier field
+created: 2026-05-16T00:00:00-06:00
+last_touched: 2026-05-16T00:00:00-06:00
+sbar:
+  situation: clean situation text
+  background: clean background text
+  assessment: clean assessment text
+  recommendation: clean recommendation text
+PROBLEM
+some dedented I-487 narrative line
+design: |
+  A real legacy freeform field, snake_case identifier, NOT in the typed
+  model. Must not be silently deleted by the heal.
+blocks:
+- []
+`
+
+func TestHealFile_RefusesAmbiguousLegacyFieldInCorruptRegion(t *testing.T) {
+	dir := t.TempDir()
+	p := writeFixture(t, dir, "T-996.md", corruptWithLegacyFieldFixture)
+
+	r, err := healFile(p, true)
+	if err != nil {
+		t.Fatalf("healFile: %v", err)
+	}
+	if r.Action != "skipped_unsafe" {
+		t.Fatalf("action = %q, want skipped_unsafe (legacy `design:` in consumed region)", r.Action)
+	}
+	if !strings.Contains(r.Unsafe, "design") {
+		t.Errorf("Unsafe = %q, want it to name `design`", r.Unsafe)
+	}
+	got, _ := os.ReadFile(p)
+	if string(got) != corruptWithLegacyFieldFixture {
+		t.Errorf("file modified despite skipped_unsafe (data loss):\n%s", string(got))
+	}
+}
+
 func boolToInt(b bool) int {
 	if b {
 		return 1
