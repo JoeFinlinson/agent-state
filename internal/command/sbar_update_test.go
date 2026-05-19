@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jfinlinson/agent-state/internal/changelog"
 	"github.com/jfinlinson/agent-state/internal/config"
 	"github.com/jfinlinson/agent-state/internal/store"
 )
@@ -31,7 +32,8 @@ const fourSectionBuf = "situation: |-\n" +
 	"  Rec body.\n"
 
 // pipeStdin swaps os.Stdin for a pipe preloaded with content and returns
-// a restore func, mirroring the established patch_test.go pattern.
+// a restore func — a named wrapper around the inline os.Stdin-swap
+// pattern used ad hoc in patch_test.go.
 func pipeStdin(t *testing.T, content string) func() {
 	t.Helper()
 	old := os.Stdin
@@ -237,5 +239,89 @@ func TestUpdateSBAR_DottedOnCleanMappingStillWorks(t *testing.T) {
 	// Sibling sections must survive the targeted edit.
 	if !strings.Contains(item.SBAR.Recommendation, "Keep priority and queued status stable.") {
 		t.Errorf("recommendation clobbered by dotted situation write: %q", item.SBAR.Recommendation)
+	}
+}
+
+// I-670 review fix 3: the UpdateBatch corrupted-scalar guard mirrors the
+// single-field one and must be covered too.
+func TestUpdateBatch_RejectsDottedSBAROnCorruptedScalar(t *testing.T) {
+	s, cfg := setupTestEnvWithChangelog(t)
+	s = writeCorruptScalarItem(t, s, cfg)
+
+	path, _ := s.Path("I-900")
+	before, _ := os.ReadFile(path)
+
+	var code int
+	stderr := captureStderr(t, func() int {
+		code = UpdateBatch(s, cfg, "I-900", []FieldValue{{Field: "sbar.situation", Value: "sneak"}})
+		return code
+	})
+	if code != 2 {
+		t.Fatalf("batch dotted sbar on corrupted scalar returned %d, want 2", code)
+	}
+	if !strings.Contains(stderr, "corrupted scalar") || !strings.Contains(stderr, "st update I-900 sbar --stdin") {
+		t.Errorf("stderr lacked diagnosis + recovery pointer: %q", stderr)
+	}
+	after, _ := os.ReadFile(path)
+	if string(after) != string(before) {
+		t.Errorf("item mutated on refused batch write.\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+}
+
+// I-670 review fix 1: `st update <id> summary` routes through
+// updateSummaryShim BEFORE the dotted guard; on a corrupted scalar it
+// must refuse rather than silently blanking the other three sections.
+func TestUpdateSummary_RefusesOnCorruptedScalar(t *testing.T) {
+	s, cfg := setupTestEnvWithChangelog(t)
+	s = writeCorruptScalarItem(t, s, cfg)
+
+	path, _ := s.Path("I-900")
+	before, _ := os.ReadFile(path)
+
+	var code int
+	stderr := captureStderr(t, func() int {
+		code = Update(s, cfg, "I-900", "summary", "new background text", UpdateModeValue)
+		return code
+	})
+	if code != 2 {
+		t.Fatalf("summary on corrupted scalar returned %d, want 2", code)
+	}
+	if !strings.Contains(stderr, "corrupted scalar") || !strings.Contains(stderr, "st update I-900 sbar --stdin") {
+		t.Errorf("stderr lacked diagnosis + recovery pointer: %q", stderr)
+	}
+	after, _ := os.ReadFile(path)
+	if string(after) != string(before) {
+		t.Errorf("item mutated on refused summary write.\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+}
+
+// I-670 review fix 2: an identical-content sbar re-write through the
+// stdin path must be a silent no-op (no Mutate, no new changelog entry),
+// preserving the I-493 invariant the editor path already held.
+func TestUpdateSBAR_NoOpOnIdenticalContent(t *testing.T) {
+	s, cfg := setupTestEnvWithChangelog(t)
+
+	r1 := pipeStdin(t, fourSectionBuf)
+	if code := Update(s, cfg, "I-001", "sbar", "", UpdateModeStdin); code != 0 {
+		r1()
+		t.Fatalf("first sbar write returned %d, want 0", code)
+	}
+	r1()
+
+	entriesBefore, _ := changelog.Read(cfg, "I-001")
+
+	// Re-open the store so item.SBAR reflects the persisted value, then
+	// pipe byte-identical content.
+	s2, _ := store.New(cfg)
+	r2 := pipeStdin(t, fourSectionBuf)
+	defer r2()
+	if code := Update(s2, cfg, "I-001", "sbar", "", UpdateModeStdin); code != 0 {
+		t.Fatalf("second identical sbar write returned %d, want 0", code)
+	}
+
+	entriesAfter, _ := changelog.Read(cfg, "I-001")
+	if len(entriesAfter) != len(entriesBefore) {
+		t.Errorf("identical re-write added %d changelog entr(ies); want 0 (no-op)",
+			len(entriesAfter)-len(entriesBefore))
 	}
 }

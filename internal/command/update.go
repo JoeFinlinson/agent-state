@@ -556,6 +556,19 @@ func updateSBARViaEditor(s *store.Store, cfg *config.Config, id string, item *mo
 // to render the old value for the changelog.
 func commitSBAR(s *store.Store, cfg *config.Config, id string, item *model.Item, newSBAR model.SBAR) int {
 	oldRendered := sbarSeedBuffer(item.SBAR)
+	// I-670 (review fix): preserve the I-493 invariant that an
+	// identical-content sbar write is silent (no Mutate, no spurious
+	// GitSync commit). The editor path had its own seed-equality guard;
+	// the stdin/positional paths route straight here, so the no-op check
+	// belongs at this shared chokepoint. A scalar-corrupted item is the
+	// deliberate exception — its rendered "old" is an empty template, so
+	// equality could otherwise block the recovery heal; force the write
+	// through whenever the doc is currently corrupt.
+	corrupt := item.Doc != nil && item.Doc.SBARIsScalarCorrupted()
+	if !corrupt && sbarSeedBuffer(newSBAR) == oldRendered {
+		fmt.Println("No changes.")
+		return 0
+	}
 	mutateErr := s.Mutate(id, func(it *model.Item) error {
 		it.SBAR = newSBAR
 		it.Doc.SetSBARBlock(newSBAR)
@@ -627,6 +640,22 @@ func updateSummaryShim(s *store.Store, cfg *config.Config, id, value string, mod
 			return code
 		}
 		value = newVal
+	}
+
+	// I-670: on a scalar-corrupted item the parser yields an empty
+	// item.SBAR, so routing summary→sbar.background here would write
+	// SetSBARBlock with situation/assessment/recommendation blank —
+	// a silent lossy heal that drops the other three sections. Refuse
+	// loudly with the recovery pointer (symmetric with the Update() and
+	// UpdateBatch() dotted-sbar guards); a clean item is unaffected.
+	if item.Doc != nil && item.Doc.SBARIsScalarCorrupted() {
+		fmt.Fprintf(os.Stderr,
+			"update: %s sbar is a corrupted scalar (not a 4-section mapping);\n"+
+				"  routing summary→sbar.background here would blank the other\n"+
+				"  three sections. Recover the block first:\n"+
+				"    st update %s sbar --stdin < <four-section-buffer>\n",
+			id, id)
+		return 2
 	}
 
 	if value == item.SBAR.Background {
