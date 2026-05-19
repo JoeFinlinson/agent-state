@@ -74,9 +74,10 @@ func searchUp(start string) string {
 // by AgentID (deterministic). It uses os.ReadDir so a missing OR
 // unreadable directory surfaces as an error (the caller reports the
 // absence — never a silent empty table; filepath.Glob would have hidden
-// a permissions failure as zero matches). An individual unparseable
-// file is skipped (best-effort, one bad file must not blank the whole
-// fleet view).
+// a permissions failure as zero matches). An individual unreadable
+// file is skipped, and a parseable-but-incomplete one falls back to
+// its filename stem for the AgentID (best-effort: one bad file must
+// not blank — or drop an agent from — the whole fleet view).
 func LoadRoster(dir string) ([]RosterAgent, error) {
 	if dir == "" {
 		return nil, os.ErrNotExist

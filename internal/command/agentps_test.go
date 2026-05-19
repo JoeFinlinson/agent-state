@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -74,6 +75,11 @@ func TestAgentPS_RendersFleetWithLiveAndActiveItem(t *testing.T) {
 			t.Errorf("agent-tt row missing %q:\n%s", want, row)
 		}
 	}
+	// LAST-UPDATE must be populated from the fixture session's JSONL
+	// mtime (transcript.ResolveSessionByID → os.Stat wiring), not "—".
+	if !strings.Contains(row, "ago") {
+		t.Errorf("agent-tt LAST-UPDATE not populated from session mtime:\n%s", row)
+	}
 
 	// --json emits the joined rows pre-render.
 	jout := captureStdout(t, func() {
@@ -101,9 +107,22 @@ func TestLessItemID(t *testing.T) {
 	if !lessItemID("I-5", "T-5") { // different prefix → prefix order
 		t.Error("I-5 should sort before T-5")
 	}
-	// Non-conforming ids fall back to string compare (no panic).
+	// Non-conforming ids still get a strict, total, transitive order
+	// (sort.Slice contract) — no panic, deterministic regardless of
+	// input permutation.
 	if lessItemID("weird", "T-1") == lessItemID("T-1", "weird") {
-		t.Error("fallback compare should be a strict order")
+		t.Error("compare must be a strict order (asymmetric)")
+	}
+	for _, perm := range [][]string{
+		{"T-2", "T-10", "T-1abc", "I-3", "weird"},
+		{"weird", "T-1abc", "I-3", "T-10", "T-2"},
+		{"I-3", "T-10", "weird", "T-2", "T-1abc"},
+	} {
+		cp := append([]string(nil), perm...)
+		sort.Slice(cp, func(i, j int) bool { return lessItemID(cp[i], cp[j]) })
+		if got := strings.Join(cp, ","); got != "I-3,T-2,T-10,T-1abc,weird" {
+			t.Errorf("non-total order: perm %v sorted to %q", perm, got)
+		}
 	}
 }
 

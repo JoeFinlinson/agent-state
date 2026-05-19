@@ -60,7 +60,6 @@ func Join(roster []RosterAgent, regs map[string]Reg, active map[string]ItemRef, 
 	return rows
 }
 
-// Opts are render options.
 // FilterByWorkspace narrows rows to those whose Workspace path contains
 // sub (sub=="" ⇒ unchanged). Applied by the caller BEFORE the
 // render/JSON split so `--workspace` is honoured in BOTH outputs (the

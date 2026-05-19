@@ -134,31 +134,43 @@ func AgentPS(s *store.Store, cfg *config.Config, opts AgentPSOpts) int {
 	return 0
 }
 
-// lessItemID orders agent-state ids (e.g. "T-9", "I-203") by prefix
-// then NUMERIC suffix, so T-9 sorts before T-10 (a plain string
-// compare would invert them and pick the wrong "current" item for an
-// agent with several active items). Falls back to a string compare for
-// ids that don't match the "<prefix>-<digits>" shape.
+// lessItemID is a TOTAL, transitive order over agent-state ids (so it
+// is a sound sort.Slice comparator for every input, not just the
+// well-formed corpus): order by the letter prefix, then — within an
+// equal prefix — numeric-suffix ids before non-numeric ones, numerics
+// by value (T-9 < T-10, not the lexical T-10 < T-9), and any remaining
+// ties / non-numeric suffixes by raw-suffix string order. Composing
+// total orders only descending on equality keeps it transitive for
+// arbitrary strings.
 func lessItemID(a, b string) bool {
-	pa, na, oka := splitItemID(a)
-	pb, nb, okb := splitItemID(b)
-	if oka && okb && pa == pb {
-		return na < nb
-	}
-	if oka && okb && pa != pb {
+	pa, sa, na, oka := splitItemID(a)
+	pb, sb, nb, okb := splitItemID(b)
+	if pa != pb {
 		return pa < pb
 	}
-	return a < b
+	if oka != okb {
+		return oka // numeric-suffix ids sort before non-numeric
+	}
+	if oka { // both numeric
+		if na != nb {
+			return na < nb
+		}
+		return sa < sb // tie-break (e.g. leading-zero variants)
+	}
+	return sa < sb // both non-numeric
 }
 
-func splitItemID(id string) (prefix string, num int, ok bool) {
+// splitItemID decomposes "<prefix>-<suffix>". No '-' ⇒ the whole id is
+// the prefix with an empty, non-numeric suffix. numeric is true only
+// when the suffix parses as an int.
+func splitItemID(id string) (prefix, suffix string, num int, numeric bool) {
 	i := strings.LastIndexByte(id, '-')
-	if i < 0 || i == len(id)-1 {
-		return "", 0, false
+	if i < 0 {
+		return id, "", 0, false
 	}
-	n, err := strconv.Atoi(id[i+1:])
-	if err != nil {
-		return "", 0, false
+	prefix, suffix = id[:i], id[i+1:]
+	if n, err := strconv.Atoi(suffix); err == nil {
+		return prefix, suffix, n, true
 	}
-	return id[:i], n, true
+	return prefix, suffix, 0, false
 }
