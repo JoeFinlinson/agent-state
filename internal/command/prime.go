@@ -87,14 +87,27 @@ func (pi *primeItem) fillSBAR(item *model.Item) {
 // source=compact, but a COLD session sees only `st prime` — whose Next
 // Action never referenced resume, so the pickup depended on the operator
 // remembering to say "run st resume first" (the exact failure I-679
-// exists to kill). Emitting this directly under `Current: <id>` makes the
-// trigger ride in the dashboard every session already gets, with zero
-// reliance on memory. Single helper so the two Next-Action sites (compact
-// + non-compact) cannot drift. Unconditional for any active item:
-// `st resume` works for any item and is rich for multi-session ones
-// (I-679 design decision #5) — no multisession-tag dependency.
-func resumePointer(id string) string {
-	return fmt.Sprintf("  → load the cross-session record first:  st resume %s\n", id)
+// exists to kill). Emitting it directly under the Next-Action
+// `Current: <id>` line makes the trigger ride in the dashboard every
+// session already gets, with zero reliance on memory.
+//
+// Scope/conditions (precise — the I-697 guarantee rests on this):
+//   - Emitted at the two Next-Action `Current:` sites only
+//     (sprintScopedPrime + globalPrime). The stack `← current` and queue
+//     `← ACTIVE` markers, which also name the active item, deliberately
+//     do NOT carry it — one trigger per dashboard, at Next Action.
+//   - Shown whenever a `Current:` block is shown, i.e. an active item
+//     with a non-empty NextAction (the block itself is gated on
+//     `action != ""`). Not literally "every active item".
+//   - Not gated on any multisession tag: `st resume` works for any item
+//     and is rich for multi-session ones (I-679 design decision #5).
+//
+// `arrow` is supplied by the caller so the line matches its host block's
+// existing glyph (sprintScopedPrime uses ASCII `->`, globalPrime uses
+// `→` — a pre-existing, out-of-scope divergence). The single helper still
+// centralizes the message text, which is the real anti-drift concern.
+func resumePointer(arrow, id string) string {
+	return fmt.Sprintf("  %s load the cross-session record first:  st resume %s\n", arrow, id)
 }
 
 func Prime(s *store.Store, cfg *config.Config, opts PrimeOpts) int {
@@ -298,7 +311,7 @@ func sprintScopedPrime(s *store.Store, cfg *config.Config, opts PrimeOpts, sprin
 		if action != "" {
 			b.WriteString("## Next Action\n")
 			b.WriteString(fmt.Sprintf("  Current: %s\n", activeID))
-			b.WriteString(resumePointer(activeID))
+			b.WriteString(resumePointer("->", activeID))
 			b.WriteString(fmt.Sprintf("  -> %s\n", action))
 			b.WriteString("\n")
 		}
@@ -495,7 +508,7 @@ func globalPrime(s *store.Store, cfg *config.Config, opts PrimeOpts) int {
 		if action != "" {
 			b.WriteString("## Next Action\n")
 			b.WriteString(fmt.Sprintf("  Current: %s\n", activeID))
-			b.WriteString(resumePointer(activeID))
+			b.WriteString(resumePointer("→", activeID))
 			b.WriteString(fmt.Sprintf("  → %s\n", action))
 			b.WriteString("\n")
 		}
