@@ -183,7 +183,10 @@ func CompressByAgent(rows []TaggedRow, opts RenderOpts) []string {
 	// and stamp a spurious truncation marker on it (false signal). A
 	// generous prefix allowance keeps the marker honest — it appears
 	// only when content was really clipped.
-	const stripPrefixAllowance = 32 // "[longest-agent-tag] HH:MM:SS "
+	// Covers "[<tag>] HH:MM:SS " for a generous tag length (≈36 chars)
+	// — long enough that a realistic agent id never trips a spurious
+	// truncation marker on an in-spec body.
+	const stripPrefixAllowance = 48
 	var out []string
 	for _, tag := range order {
 		lines := Render(byTag[tag], opts)

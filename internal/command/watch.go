@@ -24,7 +24,7 @@ import (
 // WatchOpts configures `st watch`.
 type WatchOpts struct {
 	Interval time.Duration // base poll interval; <=0 → 1s
-	MaxIdle  time.Duration // backoff cap for idle ticks; <base → 30s
+	MaxIdle  time.Duration // backoff cap for idle ticks; <=0 → 30s; then floored at base (never faster than --interval)
 	Once     bool          // single pass then return (snapshot / tests)
 }
 
@@ -118,8 +118,16 @@ func Watch(cfg *config.Config, opts WatchOpts) int {
 			}
 		} else {
 			chgWarned = false
-			for _, entries := range all {
-				for _, e := range entries {
+			// Iterate item ids in sorted order so accumulation into
+			// recent["chg"] is deterministic even when two items have
+			// equal-timestamp entries (determinism is a kept invariant).
+			ids := make([]string, 0, len(all))
+			for id := range all {
+				ids = append(ids, id)
+			}
+			sort.Strings(ids)
+			for _, id := range ids {
+				for _, e := range all[id] {
 					if ts := parseRFC3339(e.Timestamp); ts.After(lastChg) {
 						lastChg = ts
 						addRow("chg", changelogRow(e).Row)
