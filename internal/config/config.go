@@ -393,8 +393,19 @@ func (c *Config) ManifestDir() string {
 }
 
 // PlansDir returns the path to the plans sidecar directory.
+//
+// I-690: plans live at the WORKSPACE ROOT `.plans/`, NOT nested under the
+// item-store root (`c.Paths.Root`, e.g. `agent-state/`). This is the live,
+// documented convention: CLAUDE.md instructs agents to author `.plans/<id>.md`
+// (workspace-root relative), the plan-before-code-guard hook's rejection
+// message references `.plans/<id>.md` there, and every actively-maintained
+// plan sidecar already lives at `<root>/.plans`. The previous
+// `filepath.Join(c.root, c.Paths.Root, ".plans")` pointed at a stale location
+// (`<root>/agent-state/.plans`) that held only pre-convention fossils, so
+// `plan.Load` returned nil for every real plan — silently breaking `st resume`,
+// `st plan show`, `st prep`, `st run`, `st split`, and `st classify` at once.
 func (c *Config) PlansDir() string {
-	return filepath.Join(c.root, c.Paths.Root, ".plans")
+	return filepath.Join(c.root, ".plans")
 }
 
 // RunPermissionMode returns the configured claude permission mode for st run.
