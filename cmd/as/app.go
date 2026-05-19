@@ -552,8 +552,9 @@ authoritative SESSION, PID liveness) populate in 'st agent ps' and
 Invoked automatically by the SessionStart hook with the Claude PID and
 session id; rarely run by hand. Idempotent and hook-safe: it always
 exits 0 (a missing identity or write failure is a stderr warning, never
-a broken session start), and sweeps dead-PID registrations first so
-.as/agents/ self-cleans without a deregister hook.`,
+a broken session start). It overwrites only this agent's own record
+(never the shared dir's peer registrations); UPTIME stays continuous
+across a same-session resume/compact.`,
 		Example: `  # done for you by the SessionStart hook
   st agent register --pid 12345 --session 0f630d0d-...`,
 		Args: cobra.NoArgs,

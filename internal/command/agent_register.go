@@ -24,19 +24,19 @@ type AgentRegisterOpts struct {
 // problem must never break session start (and T-356's JSONL
 // ground-truth overlay still works without it).
 //
-// It sweeps dead-PID registrations first so .as/agents/ self-cleans
-// without a deregister hook (Claude Code has no SessionEnd event and
-// Stop fires per-turn — see as/.plans/T-357.md).
+// It does NOT sweep the shared .as/agents/ dir: that directory is the
+// single canonical workspace dir every agent symlinks to, so sweeping
+// it here would let one agent delete a live PEER's registration.
+// RegisterSelf overwrites only THIS agent's own record; a peer's stale
+// record is correctly rendered "stale" by T-356 and replaced by that
+// peer's own next register (Claude Code has no SessionEnd event and
+// Stop fires per-turn, so there is deliberately no deregister hook —
+// see as/.plans/T-357.md).
 func AgentRegister(cfg *config.Config, opts AgentRegisterOpts) int {
 	id := cfg.Identity().ID
 	if id == "" {
 		fmt.Fprintln(os.Stderr, "agent register: no resolvable agent identity — skipping (st agent ps still works via the JSONL overlay)")
 		return 0
-	}
-	if _, err := agent.Sweep(cfg); err != nil {
-		// Non-fatal: a stale file we couldn't remove doesn't stop us
-		// writing our own; T-356 renders it "stale" meanwhile.
-		fmt.Fprintf(os.Stderr, "agent register: warning: sweep: %v\n", err)
 	}
 	reg, err := agent.RegisterSelf(cfg, agent.SelfOptions{
 		AgentID:   id,
@@ -57,8 +57,10 @@ func AgentRegister(cfg *config.Config, opts AgentRegisterOpts) int {
 func AgentDeregister(cfg *config.Config) int {
 	id := cfg.Identity().ID
 	if id == "" {
-		fmt.Fprintln(os.Stderr, "agent deregister: no resolvable agent identity")
-		return 1
+		// Nothing to remove ⇒ nothing to do. Idempotent teardown
+		// returns success (mirrors AgentRegister's no-identity exit-0).
+		fmt.Fprintln(os.Stderr, "agent deregister: no resolvable agent identity — nothing to deregister")
+		return 0
 	}
 	if err := agent.DeregisterSelf(cfg, id); err != nil {
 		fmt.Fprintf(os.Stderr, "agent deregister: %v\n", err)

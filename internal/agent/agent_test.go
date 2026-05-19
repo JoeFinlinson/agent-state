@@ -349,3 +349,45 @@ func TestRegisterSelfAndDeregister(t *testing.T) {
 		t.Errorf("DeregisterSelf (absent) should be a no-op, got %v", err)
 	}
 }
+
+func TestRegisterSelf_StartedReset(t *testing.T) {
+	cfg := setupAgentTestCfg(t)
+	dir := cfg.AgentsDir()
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Seed a prior registration with a distinctly OLD Started + session
+	// S1 (writeRegistration is package-private — accessible here).
+	old := "2020-01-01T00:00:00Z"
+	if err := writeRegistration(filepath.Join(dir, "agent-b.yaml"), &Registration{
+		AgentID: "agent-b", Root: "agent-b", PID: 1, Started: old, SessionID: "S1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Same session → Started preserved (deterministic string equality).
+	if _, err := RegisterSelf(cfg, SelfOptions{AgentID: "agent-b", PID: 2, SessionID: "S1"}); err != nil {
+		t.Fatal(err)
+	}
+	g, _ := LoadRegistration(cfg, "agent-b")
+	if g.Started != old {
+		t.Errorf("same-session resume: Started = %q, want preserved %q", g.Started, old)
+	}
+	if g.PID != 2 {
+		t.Errorf("same-session resume: PID not refreshed (%d)", g.PID)
+	}
+
+	// Different session → genuinely new run → Started recomputed. It is
+	// time.Now() (2026+) which can NEVER equal the 2020 sentinel, so
+	// this is fully deterministic (no same-second collision risk).
+	if _, err := RegisterSelf(cfg, SelfOptions{AgentID: "agent-b", PID: 3, SessionID: "S2"}); err != nil {
+		t.Fatal(err)
+	}
+	g, _ = LoadRegistration(cfg, "agent-b")
+	if g.Started == old {
+		t.Errorf("new session must reset Started, but kept the %q sentinel", old)
+	}
+	if g.SessionID != "S2" {
+		t.Errorf("new session not recorded: %q", g.SessionID)
+	}
+}

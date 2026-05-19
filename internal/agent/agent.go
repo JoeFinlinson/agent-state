@@ -260,7 +260,7 @@ func noop() {}
 // model.
 type SelfOptions struct {
 	AgentID   string // base id, e.g. "agent-b" (from cfg.Identity().ID)
-	PID       int    // 0 → os.Getpid()
+	PID       int    // <=0 → the parent process (os.Getppid); see RegisterSelf
 	SessionID string
 	Role      string
 }
@@ -268,25 +268,39 @@ type SelfOptions struct {
 // RegisterSelf writes (idempotently overwrites) the registration file
 // for THIS workspace agent at <AgentsDir>/<AgentID>.yaml — keyed by the
 // base id (no nextSuffix) so the T-354/T-356 roster⋈registration join
-// matches by AgentID. Re-invoking (e.g. on session resume) refreshes
-// PID/SessionID/Started in place. Distinct from Register, which is the
-// suffixed spawn-worker path; that is intentionally left untouched.
+// matches by AgentID. Distinct from Register, the suffixed spawn-worker
+// path, which is intentionally left untouched.
+//
+// PID defaults to os.Getppid() (the invoker — the SessionStart hook's
+// parent is the long-lived Claude process), NOT os.Getpid(): the `st`
+// process exits immediately, so its own pid would be dead-on-arrival.
+// The hook passes the real Claude PID explicitly.
+//
+// Started is PRESERVED when an existing registration for the same
+// AgentID has the same SessionID (a resume/compact of the same session
+// re-fires SessionStart — UPTIME should be continuous, not reset every
+// turn). A different SessionID is a genuinely new run → fresh Started.
 func RegisterSelf(cfg *config.Config, opts SelfOptions) (*Registration, error) {
 	if opts.AgentID == "" {
 		return nil, fmt.Errorf("agent.RegisterSelf: AgentID required")
 	}
-	if opts.PID == 0 {
-		opts.PID = os.Getpid()
+	if opts.PID <= 0 {
+		opts.PID = os.Getppid()
 	}
 	dir := cfg.AgentsDir()
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, fmt.Errorf("agent.RegisterSelf: mkdir %s: %w", dir, err)
 	}
+	started := time.Now().Format(time.RFC3339)
+	if prev, err := LoadRegistration(cfg, opts.AgentID); err == nil && prev != nil &&
+		prev.SessionID != "" && prev.SessionID == opts.SessionID && prev.Started != "" {
+		started = prev.Started // same session resumed → continuous uptime
+	}
 	reg := &Registration{
 		AgentID:   opts.AgentID,
 		Root:      opts.AgentID,
 		PID:       opts.PID,
-		Started:   time.Now().Format(time.RFC3339),
+		Started:   started,
 		SessionID: opts.SessionID,
 		Role:      opts.Role,
 		Commit:    buildinfo.Commit,

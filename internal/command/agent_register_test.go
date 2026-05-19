@@ -51,4 +51,41 @@ func TestAgentRegister_HookSafeWithoutIdentity(t *testing.T) {
 	if code := AgentRegister(cfg, AgentRegisterOpts{}); code != 0 {
 		t.Errorf("AgentRegister with no identity exit %d, want 0 (hook-safe)", code)
 	}
+	// ...and it must NOT have written anything (the comment's full
+	// claim is "exit 0, no file").
+	if m, _ := filepath.Glob(filepath.Join(cfg.AgentsDir(), "*.yaml")); len(m) != 0 {
+		t.Errorf("AgentRegister with no identity wrote %v, want nothing", m)
+	}
+	// Deregister with no identity is also a no-op success (idempotent).
+	if code := AgentDeregister(cfg); code != 0 {
+		t.Errorf("AgentDeregister with no identity exit %d, want 0 (idempotent)", code)
+	}
+}
+
+func TestRegisterSelf_PreservesStartedAcrossSameSessionResume(t *testing.T) {
+	_, cfg := setupTestEnv(t)
+	t.Setenv("AS_AGENT_ID", "agent-tt")
+
+	if code := AgentRegister(cfg, AgentRegisterOpts{PID: 11, SessionID: "S1"}); code != 0 {
+		t.Fatalf("first register exit %d", code)
+	}
+	first, _ := agent.LoadRegistration(cfg, "agent-tt")
+
+	// Same session re-register (resume/compact re-fires SessionStart):
+	// PID may change, Started must stay → continuous UPTIME.
+	if code := AgentRegister(cfg, AgentRegisterOpts{PID: 22, SessionID: "S1"}); code != 0 {
+		t.Fatalf("resume register exit %d", code)
+	}
+	resumed, _ := agent.LoadRegistration(cfg, "agent-tt")
+	if resumed.Started != first.Started {
+		t.Errorf("same-session resume reset Started: %q → %q (want preserved)", first.Started, resumed.Started)
+	}
+	if resumed.PID != 22 {
+		t.Errorf("resume did not refresh PID: %d", resumed.PID)
+	}
+
+	// (The "new SessionID resets Started" half is proven
+	// deterministically in agent.TestRegisterSelf_StartedReset using a
+	// 2020 sentinel — comparing two time.Now() RFC3339 values here
+	// would be flaky when both land in the same second.)
 }
