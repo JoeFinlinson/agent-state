@@ -392,20 +392,21 @@ func (c *Config) ManifestDir() string {
 	return filepath.Join(c.root, c.Paths.Root, ".manifest")
 }
 
-// PlansDir returns the path to the plans sidecar directory.
+// PlansDir returns the path to the plans sidecar directory: the item-store
+// root's `.plans/` (e.g. `<root>/agent-state/.plans`). This is the canonical
+// location the `st` tooling authoritatively reads and writes — `st prep`,
+// `st plan approve`, `st plan show`, `st run`, `st split`, `st classify` —
+// and the directory `internal/store` git-auto-stages (I-575). Keep it
+// consistent with the sibling accessors (ItemDir/ManifestDir/…), which all
+// nest under `c.Paths.Root`.
 //
-// I-690: plans live at the WORKSPACE ROOT `.plans/`, NOT nested under the
-// item-store root (`c.Paths.Root`, e.g. `agent-state/`). This is the live,
-// documented convention: CLAUDE.md instructs agents to author `.plans/<id>.md`
-// (workspace-root relative), the plan-before-code-guard hook's rejection
-// message references `.plans/<id>.md` there, and every actively-maintained
-// plan sidecar already lives at `<root>/.plans`. The previous
-// `filepath.Join(c.root, c.Paths.Root, ".plans")` pointed at a stale location
-// (`<root>/agent-state/.plans`) that held only pre-convention fossils, so
-// `plan.Load` returned nil for every real plan — silently breaking `st resume`,
-// `st plan show`, `st prep`, `st run`, `st split`, and `st classify` at once.
+// NOTE (I-690): CLAUDE.md and the plan-before-code-guard hook tell agents to
+// author `.plans/<id>.md` *workspace-root relative*, which drifts from this
+// tooling path. That doc-vs-tooling drift is tracked separately; do NOT
+// "fix" it by relocating this accessor — that silently orphans every plan
+// the tooling already wrote here (incl. peer agents' active in-sprint work).
 func (c *Config) PlansDir() string {
-	return filepath.Join(c.root, ".plans")
+	return filepath.Join(c.root, c.Paths.Root, ".plans")
 }
 
 // RunPermissionMode returns the configured claude permission mode for st run.
