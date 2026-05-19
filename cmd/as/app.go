@@ -128,25 +128,28 @@ context for LLM agents. Works standalone or with CI/hooks.`,
 
 	tuiCmd := &cobra.Command{
 		Use:   "tui",
-		Short: "Static Layout-A orchestration TUI (T-372, sub-layer a)",
-		Long: "Render the Layout-A frame once — top agent strip, focused\n" +
-			"composite item pane (st show --full), planning queue\n" +
-			"(st recommend), bottom alerts band. STATIC v1: no live\n" +
-			"refresh (T-373) and no keyboard navigation (T-374); this\n" +
-			"command lays down the Bubble Tea model/View substrate those\n" +
-			"layers plug into. --item focuses a specific item; default =\n" +
-			"the next eligible queue pick.",
+		Short: "Layout-A orchestration TUI (live by default; --once for static, T-372)",
+		Long: "Open the Layout-A frame: top agent strip, focused composite\n" +
+			"item pane (st show --full), planning queue (st recommend),\n" +
+			"bottom alerts band. Default is LIVE — fsnotify-driven\n" +
+			"soft-refresh on substrate change (T-373). --once renders the\n" +
+			"frame statically and exits (T-372). q / Ctrl-C / Esc quits.\n" +
+			"--item focuses a specific item; default = the next eligible\n" +
+			"queue pick (the same dispatch source the coordinator uses).\n" +
+			"The §3/§5 navigation/keyboard model is T-374.",
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			item, _ := cmd.Flags().GetString("item")
 			width, _ := cmd.Flags().GetInt("width")
+			once, _ := cmd.Flags().GetBool("once")
 			exitCode = command.Tui(appStore, appCfg, command.TuiOpts{
-				Item: item, Width: width,
+				Item: item, Width: width, Once: once,
 			})
 		},
 	}
 	tuiCmd.Flags().String("item", "", "focus a specific item id (default: next queue pick)")
-	tuiCmd.Flags().Int("width", 0, "render width override (default: 120; T-373 will read live terminal width)")
+	tuiCmd.Flags().Int("width", 0, "render width override (default: 120; live mode reads terminal width)")
+	tuiCmd.Flags().Bool("once", false, "render the static frame once and exit (T-372 behaviour)")
 	root.AddCommand(tuiCmd)
 
 	artifactCmd := &cobra.Command{
