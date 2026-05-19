@@ -15,20 +15,28 @@ import (
 	"github.com/jfinlinson/agent-state/internal/validate"
 )
 
-// listFields are top-level fields stored as YAML lists. A value for one of
-// these is written as list items, never a scalar — a scalar under a list
-// key is silently dropped by the parser's storeScalar (I-691).
+// listFields are the TOP-LEVEL fields stored as YAML lists. A value for
+// one of these is written as list items via ReplaceList, never a scalar —
+// a scalar under a list key is silently dropped by the parser's
+// storeScalar (I-691).
 //
-// This set MUST stay in sync with parse.isListKey / parse.storeList: any
-// key the parser stores as a list must take the list WRITE path here, or
-// `st update` writes a scalar the parser then has to coerce on read. The
-// two sets are kept symmetric on purpose — if you add a list key to the
-// parser, add it here too (and vice-versa).
+// Relationship to the parser's list-key set (parse.isListKey /
+// parse.storeList): listFields is exactly that set MINUS `tests_written`.
+// `tests_written` is a LIST on read (the parser routes it into the
+// testing_evidence map) but it is NOT a top-level key — it lives nested
+// under `testing_evidence:` and its writer is the dedicated nested
+// appender (Doc.AppendToNestedList("testing_evidence","tests_written",…)
+// in pr.go). Putting it here would make ReplaceList (which only matches
+// indent-0 keys) append a SECOND, orphaned top-level `tests_written:`
+// block while leaving the nested one stale — structural corruption. So
+// the asymmetry is deliberate: every key here MUST be in parse.isListKey,
+// but parse.isListKey has the one extra nested key. Keep them in sync
+// under that rule.
 var listFields = map[string]bool{
 	"acceptance_criteria": true, "depends_on": true, "blocks": true,
 	"related_issues": true, "next_actions": true, "resolution": true,
 	"invariants": true, "doc_changes": true, "linked_plans": true,
-	"tags": true, "sessions": true, "tests_written": true,
+	"tags": true, "sessions": true,
 }
 
 // listItemRaw formats v as a canonical YAML list-item line ("- v", or
@@ -251,14 +259,15 @@ func Update(s *store.Store, cfg *config.Config, id, field, value string, mode Up
 			}
 			item.Doc.ReplaceList(field, lines)
 		case listFields[field]:
-			// I-691: a SINGLE-LINE value for a list field (no newline, so
-			// the multi-line case above did not match) is ONE list item,
-			// not a scalar. Written as a scalar (`key: value`) it is
-			// silently dropped on reload — the parser's storeScalar has no
-			// case for any list key. Because listFields is kept symmetric
-			// with the parser's list-key set, this branch now covers every
-			// list field; emit the canonical list-item line, quoted exactly
-			// as the migrate builder's emitList would, so update.go and a
+			// I-691: a SINGLE-LINE value for a top-level list field (no
+			// newline, so the multi-line case above did not match) is ONE
+			// list item, not a scalar. Written as a scalar (`key: value`)
+			// it is silently dropped on reload — the parser's storeScalar
+			// has no case for any list key. This branch covers every
+			// top-level list field (listFields; the only parser list key
+			// excluded is the nested `tests_written` — see listFields'
+			// doc); emit the canonical list-item line, quoted exactly as
+			// the migrate builder's emitList would, so update.go and a
 			// later builder re-render agree byte-for-byte.
 			//
 			// oldValue via GetField is "" for a well-formed existing list

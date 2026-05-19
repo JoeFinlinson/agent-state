@@ -99,3 +99,32 @@ func TestUpdate_SingleLineListField_TagsAndLeadingQuote(t *testing.T) {
 		t.Errorf("RelatedIssues = %#v, want exactly [%q] (leading-quote round-trip)", item.RelatedIssues, quoted)
 	}
 }
+
+// I-691 review fix (regression guard): `tests_written` must NOT be in
+// listFields. It is a LIST on read but lives nested under
+// `testing_evidence:`; routing it through the top-level ReplaceList path
+// would APPEND a second, orphaned top-level `tests_written:` block (the
+// indent-0-only ReplaceList never finds the nested one) — structural
+// corruption. This pins the deliberate WRITE⊂READ asymmetry: a generic
+// `st update <id> tests_written "x"` must fall to the scalar path and
+// never emit a top-level `tests_written:` list block.
+func TestUpdate_TestsWrittenNotRoutedThroughReplaceList(t *testing.T) {
+	s, cfg := setupTestEnvWithChangelog(t)
+
+	if listFields["tests_written"] {
+		t.Fatal("tests_written must NOT be in listFields (nested key — ReplaceList would corrupt the file)")
+	}
+
+	if code := Update(s, cfg, "T-001", "tests_written", "internal/foo_test.go", UpdateModeValue); code != 0 {
+		t.Fatalf("Update tests_written returned %d, want 0", code)
+	}
+
+	path, _ := s.Path("T-001")
+	body, _ := os.ReadFile(path)
+	if strings.Contains(string(body), "tests_written:\n-") {
+		t.Fatalf("tests_written written as a top-level list block (corruption — must be scalar/nested):\n%s", string(body))
+	}
+	if strings.Count(string(body), "tests_written:") > 1 {
+		t.Fatalf("duplicate tests_written blocks (corruption):\n%s", string(body))
+	}
+}

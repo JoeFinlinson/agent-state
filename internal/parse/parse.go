@@ -548,11 +548,17 @@ func isEmptyListScalar(v string) bool {
 	return false
 }
 
-// isListKey reports whether key is stored as a list. It MUST stay in sync
-// with storeList's switch below (every key storeList recognizes is one whose
-// scalar form must be coerced — I-691 — rather than dropped by storeScalar)
-// AND with command.listFields on the write side, so a single-line
-// `st update` writes the list form instead of a to-be-coerced scalar.
+// isListKey reports whether key is stored as a list. It MUST equal
+// storeList's switch below (every key storeList recognizes is one whose
+// scalar form must be coerced — I-691 — rather than dropped by
+// storeScalar). It relates to command.listFields (the WRITE side) by
+// exactly: isListKey == command.listFields ∪ {"tests_written"}. The extra
+// key, `tests_written`, is a list on READ (storeList routes it into the
+// testing_evidence map, so a stray top-level scalar still self-heals here)
+// but is intentionally absent from command.listFields because it is
+// nested under `testing_evidence:` and written by a dedicated nested
+// appender — never via the top-level ReplaceList path. Keep the three in
+// sync under that rule.
 func isListKey(key string) bool {
 	switch key {
 	case "tags", "depends_on", "blocks", "related_issues",
