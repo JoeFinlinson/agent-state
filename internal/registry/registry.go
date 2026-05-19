@@ -22,14 +22,28 @@ import (
 // only guards new writes.
 const MaxNoteBytes = 256 * 1024
 
-// ValidateNoteMessage rejects a note message above MaxNoteBytes with an
-// actionable error. Enforced at the write entry points (NoteAdd /
-// NoteEdit), not in the dumb store mutators.
+// ValidateNoteMessage enforces the note-message write contract at the
+// entry points (NoteAdd / NoteEdit), not in the dumb store mutators:
+//
+//   - size: at most MaxNoteBytes (giant-paste backstop).
+//   - single line: no embedded '\n'/'\r'. Save serializes a note as a
+//     single `message: <text>` physical line and yamlQuote does NOT
+//     escape newlines, so a multi-line message would Save as multiple
+//     lines and Load's splitKV would silently drop every line after the
+//     first — silent data loss. The flat registry format has no
+//     multi-line scalar; reject loudly instead (notes are short
+//     breadcrumbs — link to an item/doc for anything that needs
+//     structure). This closes the silent-failure path the I-673 family
+//     is about; it does not change the on-disk format.
 func ValidateNoteMessage(message string) error {
 	if len(message) > MaxNoteBytes {
 		return fmt.Errorf(
 			"note message is %d bytes; max is %d (%d KB) — keep notes short and link to an item/doc for detail",
 			len(message), MaxNoteBytes, MaxNoteBytes/1024)
+	}
+	if strings.ContainsAny(message, "\n\r") {
+		return fmt.Errorf(
+			"note message must be a single line (the registry stores it as one `message:` line; multi-line input would silently lose every line after the first) — condense it or link to an item/doc for detail")
 	}
 	return nil
 }
@@ -97,8 +111,14 @@ func Load(path string) (*Registry, error) {
 	// with no degrade path. These registry files are small operational
 	// state (the pathology is one big line, not a big file), so reading
 	// the whole file and splitting on newlines is correct, simple, and
-	// has no size ceiling. Trailing '\r' is stripped per line to match
-	// the prior bufio.ScanLines CRLF behavior exactly.
+	// has no size ceiling. Per-line `\r` is trimmed so CRLF files parse
+	// identically to LF. This is behaviorally equivalent to the old
+	// scanner for every input this format produces — NOT slice-identical
+	// to bufio.ScanLines: Split keeps a trailing "" element on the
+	// newline-terminated files Save always writes; the `trimmed == ""`
+	// guard in the loop swallows it, so no record is mis-parsed. The
+	// removed `scanner.Err()` check is subsumed by io.ReadAll's error
+	// return below (it surfaces any read error up front).
 	data, err := io.ReadAll(f)
 	if err != nil {
 		return nil, err

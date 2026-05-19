@@ -18,6 +18,11 @@ import (
 // it prints a clear WARNING to stderr and returns an empty registry so
 // index regeneration stays resilient — never hard-fails, never silently
 // omits a whole section without a signal.
+//
+// The empty registry returned on error is a READ/DISPLAY-ONLY sentinel:
+// it must never be written back via Registry.Save, or an unloadable but
+// otherwise-valid registry file would be clobbered with empty data.
+// `st index` only reads it (writeNotes/writeQueuedTasks), which is safe.
 func loadRegistryOrWarn(path, label string) *registry.Registry {
 	reg, err := registry.Load(path)
 	if err != nil {

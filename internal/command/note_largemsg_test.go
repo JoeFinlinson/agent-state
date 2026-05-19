@@ -13,13 +13,39 @@ import (
 
 func TestNoteAdd_RejectsOversizedMessage(t *testing.T) {
 	_, cfg := setupTestEnv(t)
-	code := NoteAdd(cfg, strings.Repeat("x", registry.MaxNoteBytes+1))
+	var code int
+	stderr := captureStderr(t, func() int {
+		code = NoteAdd(cfg, strings.Repeat("x", registry.MaxNoteBytes+1))
+		return code
+	})
 	if code != 2 {
 		t.Fatalf("NoteAdd oversized returned %d, want 2", code)
+	}
+	if !strings.Contains(stderr, "note message is") || !strings.Contains(stderr, "bytes") {
+		t.Errorf("stderr lacked actionable size error: %q", stderr)
 	}
 	r, _ := registry.Load(cfg.NotesPath())
 	if len(r.Notes) != 0 {
 		t.Errorf("oversized note was persisted (%d notes); want 0 — must reject before write", len(r.Notes))
+	}
+}
+
+func TestNoteAdd_RejectsMultilineMessage(t *testing.T) {
+	_, cfg := setupTestEnv(t)
+	var code int
+	stderr := captureStderr(t, func() int {
+		code = NoteAdd(cfg, "line one\nline two would be silently lost")
+		return code
+	})
+	if code != 2 {
+		t.Fatalf("NoteAdd multiline returned %d, want 2", code)
+	}
+	if !strings.Contains(stderr, "single line") {
+		t.Errorf("stderr lacked single-line guidance: %q", stderr)
+	}
+	r, _ := registry.Load(cfg.NotesPath())
+	if len(r.Notes) != 0 {
+		t.Errorf("multiline note was persisted (%d notes); want 0", len(r.Notes))
 	}
 }
 
@@ -31,9 +57,16 @@ func TestNoteEdit_RejectsOversizedMessage(t *testing.T) {
 	r, _ := registry.Load(cfg.NotesPath())
 	id := r.Notes[0].ID
 
-	code := NoteEdit(cfg, id, strings.Repeat("y", registry.MaxNoteBytes+1))
+	var code int
+	stderr := captureStderr(t, func() int {
+		code = NoteEdit(cfg, id, strings.Repeat("y", registry.MaxNoteBytes+1))
+		return code
+	})
 	if code != 2 {
 		t.Fatalf("NoteEdit oversized returned %d, want 2", code)
+	}
+	if !strings.Contains(stderr, "note message is") || !strings.Contains(stderr, "bytes") {
+		t.Errorf("stderr lacked actionable size error: %q", stderr)
 	}
 	r2, _ := registry.Load(cfg.NotesPath())
 	if r2.Notes[0].Message != "original short note" {
