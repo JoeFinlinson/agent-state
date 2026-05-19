@@ -59,3 +59,43 @@ func TestUpdate_SingleLineListFieldRoundTrips(t *testing.T) {
 		t.Errorf("Resolution = %#v, want exactly [%q]", item.Resolution, resVal)
 	}
 }
+
+// I-691 review fix: listFields must stay symmetric with the parser's
+// list-key set — `tags`/`sessions`/`tests_written` were absent, so a
+// single-line `st update <id> tags "x"` previously took the scalar path
+// and was dropped. Also exercises listItemRaw's leading-quote branch
+// (a value starting with `'` must round-trip, not corrupt).
+func TestUpdate_SingleLineListField_TagsAndLeadingQuote(t *testing.T) {
+	s, cfg := setupTestEnvWithChangelog(t)
+
+	const tagVal = "needs-followup"
+	const quoted = "'already quoted' value"
+
+	if code := Update(s, cfg, "T-001", "tags", tagVal, UpdateModeValue); code != 0 {
+		t.Fatalf("Update tags returned %d, want 0", code)
+	}
+	if code := Update(s, cfg, "T-001", "related_issues", quoted, UpdateModeValue); code != 0 {
+		t.Fatalf("Update related_issues returned %d, want 0", code)
+	}
+
+	path, _ := s.Path("T-001")
+	body, _ := os.ReadFile(path)
+	if strings.Contains(string(body), "tags: "+tagVal) {
+		t.Fatalf("tags written as scalar (listFields desync regression):\n%s", string(body))
+	}
+
+	s2, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("re-open store: %v", err)
+	}
+	item, ok := s2.Get("T-001")
+	if !ok {
+		t.Fatal("T-001 missing after re-parse")
+	}
+	if len(item.Tags) != 1 || item.Tags[0] != tagVal {
+		t.Errorf("Tags = %#v, want exactly [%q]", item.Tags, tagVal)
+	}
+	if len(item.RelatedIssues) != 1 || item.RelatedIssues[0] != quoted {
+		t.Errorf("RelatedIssues = %#v, want exactly [%q] (leading-quote round-trip)", item.RelatedIssues, quoted)
+	}
+}

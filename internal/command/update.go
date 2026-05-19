@@ -15,12 +15,20 @@ import (
 	"github.com/jfinlinson/agent-state/internal/validate"
 )
 
-// listFields are top-level fields stored as YAML lists. Multi-line values
-// for these fields are split into list items rather than block scalars.
+// listFields are top-level fields stored as YAML lists. A value for one of
+// these is written as list items, never a scalar — a scalar under a list
+// key is silently dropped by the parser's storeScalar (I-691).
+//
+// This set MUST stay in sync with parse.isListKey / parse.storeList: any
+// key the parser stores as a list must take the list WRITE path here, or
+// `st update` writes a scalar the parser then has to coerce on read. The
+// two sets are kept symmetric on purpose — if you add a list key to the
+// parser, add it here too (and vice-versa).
 var listFields = map[string]bool{
 	"acceptance_criteria": true, "depends_on": true, "blocks": true,
 	"related_issues": true, "next_actions": true, "resolution": true,
 	"invariants": true, "doc_changes": true, "linked_plans": true,
+	"tags": true, "sessions": true, "tests_written": true,
 }
 
 // listItemRaw formats v as a canonical YAML list-item line ("- v", or
@@ -243,14 +251,20 @@ func Update(s *store.Store, cfg *config.Config, id, field, value string, mode Up
 			}
 			item.Doc.ReplaceList(field, lines)
 		case listFields[field]:
-			// I-691: a SINGLE-LINE value for a list field is one list
-			// item, NOT a scalar. The scalar form (`key: value`) is
-			// silently dropped on reload — the parser's storeScalar has
-			// no case for any list key — so every single-line
-			// `st update <id> <listfield> "..."` previously lost the
-			// value with no error. Emit the canonical list-item line,
-			// quoted exactly as the migrate builder's emitList would, so
-			// update.go and a later re-render agree byte-for-byte.
+			// I-691: a SINGLE-LINE value for a list field (no newline, so
+			// the multi-line case above did not match) is ONE list item,
+			// not a scalar. Written as a scalar (`key: value`) it is
+			// silently dropped on reload — the parser's storeScalar has no
+			// case for any list key. Because listFields is kept symmetric
+			// with the parser's list-key set, this branch now covers every
+			// list field; emit the canonical list-item line, quoted exactly
+			// as the migrate builder's emitList would, so update.go and a
+			// later builder re-render agree byte-for-byte.
+			//
+			// oldValue via GetField is "" for a well-formed existing list
+			// (the header line carries no inline value) — same limitation
+			// as the sibling scalar branch; git history is the source of
+			// truth for prior list contents (accepted, PR #107 #5).
 			oldValue, _ = item.Doc.GetField(field)
 			item.Doc.ReplaceList(field, []string{listItemRaw(value)})
 		case strings.Contains(field, "."):
@@ -780,15 +794,18 @@ func UpdateBatch(s *store.Store, cfg *config.Config, id string, pairs []FieldVal
 				id, id)
 			return 2
 		}
-		// I-504 (review fix): list fields silently corrupt schema
-		// when written as a scalar. depends_on/blocks/etc. need the
-		// list-replacement path which only the single-field --stdin
-		// flow exposes today; reject in batch with a clear redirect.
+		// I-504 (review fix): list fields silently corrupt schema when
+		// written as a scalar. depends_on/blocks/etc. need the
+		// list-replacement path, which batch mode does not expose;
+		// reject in batch with a clear redirect to the single-field
+		// forms (I-691 added the one-line positional form alongside
+		// the multi-line --stdin form).
 		if listFields[p.Field] {
 			fmt.Fprintf(os.Stderr,
 				"update: %s is a list field — batch mode cannot set list fields as a scalar.\n"+
-					"  Use: st update %s %s --stdin  (multi-line list replacement)\n",
-				p.Field, id, p.Field)
+					"  Use: st update %s %s \"<single item>\"   (one-line list replacement), or\n"+
+					"       st update %s %s --stdin             (multi-line list replacement)\n",
+				p.Field, id, p.Field, id, p.Field)
 			return 2
 		}
 		if p.Field == "summary" {

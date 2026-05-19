@@ -275,9 +275,13 @@ func File(path string) (*model.Item, error) {
 				if isListKey(key) && !isEmptyListScalar(val) {
 					storeList(item, key, nestKey, []string{unquote(val)})
 				} else {
-					// Store scalar value (a no-op for list keys; the
-					// real items arrive on following `- ` lines and
-					// flush via storeList).
+					// Scalar store. For a well-formed list key the val
+					// here is an empty/sentinel (`key:` then `- a` on
+					// following lines, or `key: []`): storeScalar has no
+					// case for list keys so it is inert for them, and the
+					// real items arrive via the `- ` branch and flush
+					// through storeList. For genuine scalar keys it stores
+					// normally.
 					storeScalar(item, key, val)
 				}
 			} else {
@@ -545,8 +549,10 @@ func isEmptyListScalar(v string) bool {
 }
 
 // isListKey reports whether key is stored as a list. It MUST stay in sync
-// with storeList's switch below — any key storeList recognizes is one whose
-// scalar form must be coerced (I-691) rather than dropped by storeScalar.
+// with storeList's switch below (every key storeList recognizes is one whose
+// scalar form must be coerced — I-691 — rather than dropped by storeScalar)
+// AND with command.listFields on the write side, so a single-line
+// `st update` writes the list form instead of a to-be-coerced scalar.
 func isListKey(key string) bool {
 	switch key {
 	case "tags", "depends_on", "blocks", "related_issues",

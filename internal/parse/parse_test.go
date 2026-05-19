@@ -940,3 +940,22 @@ next_actions:
 		t.Errorf("NextActions = %#v, want [first action, second action]", item.NextActions)
 	}
 }
+
+// I-691 review fix: the `[[]]` inline sentinel (and `null`/`~`) under a
+// list key must be treated as EMPTY, not coerced into a literal element —
+// isEmptyListScalar guards this. Mirrors the existing `- [[]]` list-marker
+// convention the parser already recognized.
+func TestParseInlineEmptyListSentinelsNotCoerced(t *testing.T) {
+	for _, sentinel := range []string{"[[]]", "null", "~"} {
+		content := "id: T-003\ntype: task\nstatus: queued\n" +
+			"created: 2026-05-18T10:00:00-06:00\nlast_touched: 2026-05-18T10:00:00-06:00\n" +
+			"title: t\n\nnext_actions: " + sentinel + "\n"
+		item, err := File(writeTempFile(t, content))
+		if err != nil {
+			t.Fatalf("File(%q): %v", sentinel, err)
+		}
+		if len(item.NextActions) != 0 {
+			t.Errorf("next_actions: %s → NextActions = %#v, want empty", sentinel, item.NextActions)
+		}
+	}
+}
