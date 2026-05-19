@@ -37,11 +37,12 @@ func ProjectSlug(projectDir string) string {
 // ClaudeProjectsDir returns ~/.claude/projects. CLAUDE_PROJECTS_DIR
 // overrides it (tests, alternate-home agent layouts). If os.UserHomeDir
 // cannot resolve the home directory, $HOME is tried before giving up.
-// Only if both fail is the result home-relative-empty — in which case
-// ResolveSessionJSONL finds nothing and returns an empty slice, which
-// the caller observes directly: the absence is visible, not a swallowed
-// error producing a wrong absolute path (operator silent-failure
-// principle).
+// If both fail (a stripped environment) the result is the relative path
+// ".claude/projects", which will not exist — so ResolveSessionJSONL's
+// Stat/ReadDir simply find nothing and it returns an empty slice. That
+// is the intended degradation: the caller sees a visible empty result,
+// not a crash and not a swallowed error reported as success (operator
+// silent-failure principle).
 func ClaudeProjectsDir() string {
 	if d := os.Getenv("CLAUDE_PROJECTS_DIR"); d != "" {
 		return d

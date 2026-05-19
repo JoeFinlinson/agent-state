@@ -183,6 +183,17 @@ func TestParseLine_UnknownBlockAndMixedResult(t *testing.T) {
 	if got != "saw\n[image block]" {
 		t.Errorf("mixed-array tool_result Content = %q, want non-text block surfaced as a marker", got)
 	}
+
+	// "content":[] is genuinely no output — must flatten to "", not the
+	// literal raw "[]" (a Phase 2 renderer keys "no output" off "").
+	empty := []byte(`{"type":"user","timestamp":"2026-05-18T17:00:02Z","message":{"role":"user","content":[{"tool_use_id":"t2","type":"tool_result","content":[],"is_error":false}]}}`)
+	rows = ParseLine(empty)
+	if len(rows) != 1 || rows[0].ToolResult == nil {
+		t.Fatalf("want 1 tool_result row, got %+v", rows)
+	}
+	if rows[0].ToolResult.Content != "" {
+		t.Errorf("empty-array tool_result Content = %q, want \"\"", rows[0].ToolResult.Content)
+	}
 }
 
 func findKind(rows []Row, k Kind) *Row {

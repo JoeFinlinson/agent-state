@@ -253,10 +253,12 @@ func parseTS(s string) time.Time {
 
 // flattenResultContent normalizes tool_result.content, which Claude Code
 // emits either as a plain string or as an array of {type:"text",text:..}
-// (and occasionally non-text blocks). Non-text blocks in a mixed array
-// are surfaced as a visible "[<type> block]" marker — never silently
-// dropped (silent-failure principle). Content we can't parse as either
-// shape is preserved as its raw JSON so nothing is lost.
+// (and occasionally non-text blocks). An empty array is no output → "".
+// Non-text blocks in a mixed array are surfaced as a visible
+// "[<type> block]" marker — never silently dropped (silent-failure
+// principle). Content we can't parse as either shape — or a block array
+// that yields nothing renderable — is preserved as its raw JSON so
+// nothing is lost.
 func flattenResultContent(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
@@ -269,7 +271,10 @@ func flattenResultContent(raw json.RawMessage) string {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	}
-	if err := json.Unmarshal(raw, &blocks); err == nil && len(blocks) > 0 {
+	if err := json.Unmarshal(raw, &blocks); err == nil {
+		if len(blocks) == 0 {
+			return "" // "content":[] is genuinely no output, not raw "[]"
+		}
 		var parts []string
 		for _, b := range blocks {
 			switch {
