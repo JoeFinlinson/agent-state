@@ -896,3 +896,51 @@ func TestGitSync_NoAutoPushSkipsVerify(t *testing.T) {
 		t.Errorf("AutoPush=false must commit-only without verification error, got: %v", err)
 	}
 }
+
+// TestVerifyPushLanded_DistinctDiagnostics (I-684 review): a missing
+// refs/remotes/origin/main must NOT be reported with the misleading
+// "oversized file / pre-receive" hint — that is a different failure mode
+// (no upstream ref) and the durability primitive must not cry wolf with
+// the wrong remediation.
+func TestVerifyPushLanded_DistinctDiagnostics(t *testing.T) {
+	root := t.TempDir()
+	bare := t.TempDir()
+	run := func(dir string, args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run(bare, "init", "--bare")
+	run(root, "init")
+	run(root, "config", "user.email", "t@t.co")
+	run(root, "config", "user.name", "T")
+	os.WriteFile(filepath.Join(root, "f"), []byte("x"), 0644)
+	run(root, "add", "-A")
+	run(root, "commit", "-m", "c1")
+	run(root, "branch", "-M", "main")
+	// Add origin with NO fetch refspec → `git fetch origin main` updates
+	// FETCH_HEAD but never creates refs/remotes/origin/main.
+	run(root, "remote", "add", "origin", bare)
+	run(root, "config", "--unset-all", "remote.origin.fetch")
+	run(root, "push", "origin", "refs/heads/main:refs/heads/main")
+
+	err := verifyPushLanded(root)
+	if err == nil {
+		t.Fatal("verifyPushLanded must not certify when refs/remotes/origin/main is absent")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "no refs/remotes/origin/main") && !strings.Contains(msg, "upstream") {
+		t.Errorf("missing-remote-ref case must get the no-upstream diagnostic, got: %q", msg)
+	}
+	if strings.Contains(msg, "oversized") || strings.Contains(msg, "pre-receive gate") {
+		t.Errorf("missing-remote-ref must NOT use the stranded/oversized hint (wrong remediation): %q", msg)
+	}
+
+	// With the default fetch refspec restored, the same landed push verifies.
+	run(root, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+	if err := verifyPushLanded(root); err != nil {
+		t.Errorf("a genuinely-landed push must verify clean once the remote-tracking ref exists, got: %v", err)
+	}
+}

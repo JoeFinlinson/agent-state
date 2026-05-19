@@ -333,11 +333,21 @@ func (s *Store) GitSync(message string, newPaths ...string) error {
 
 // verifyPushLanded confirms the local `refs/heads/main` HEAD is reachable
 // from `refs/remotes/origin/main` after a push — i.e. the remote genuinely
-// received our commit. It re-fetches origin/main (the push may have moved
-// the remote without updating our remote-tracking ref, or not moved it at
-// all) then uses `merge-base --is-ancestor` (exit 0 ⇔ localHEAD is an
-// ancestor of, or equal to, origin/main). Any failure to prove containment
-// is reported as a loud, actionable error — the whole point of I-684.
+// received our commit. It re-fetches origin/main then uses
+// `merge-base --is-ancestor` (exit 0 ⇔ localHEAD is an ancestor of, or
+// equal to, origin/main). Each distinct failure mode gets its OWN
+// actionable diagnostic — the durability primitive must not cry wolf with
+// the wrong remediation (that erodes trust in the exact signal I-684
+// exists to make trustworthy):
+//   - fetch failed                 → the fetch's stderr, surfaced verbatim
+//   - no refs/remotes/origin/main  → "no upstream ref" (NOT "oversized file")
+//   - localHEAD not an ancestor    → genuinely stranded local-only
+//
+// CONCURRENCY CONTRACT: this MUST be called while GitSync's `.st-git.lock`
+// is held (it re-fetches and reads the remote-tracking ref, and relies on
+// the single-writer invariant — see the lock comment ~L211). It is invoked
+// from GitSync before the deferred unlock fires; do NOT hoist it out of
+// GitSync / past unlock() or the I-501 fetch-during-sync race returns.
 func verifyPushLanded(root string) error {
 	localOut, err := gitOutput(root, "rev-parse", "refs/heads/main")
 	if err != nil {
@@ -346,10 +356,26 @@ func verifyPushLanded(root string) error {
 	localHead := strings.TrimSpace(localOut)
 
 	// Refresh the remote-tracking ref so the ancestor test reflects the
-	// remote's true state, not a stale snapshot. A fetch failure here is
-	// itself a reason we cannot certify the sync — surface it.
-	if err := gitCmdQuiet(root, "fetch", "origin", "main"); err != nil {
-		return fmt.Errorf("post-push verify: cannot fetch origin/main to confirm the push landed (agent-state may be stranded local-only): %w", err)
+	// remote's true state, not a stale snapshot. A fetch failure is itself
+	// a reason we cannot certify the sync — surface its stderr verbatim
+	// (consistent with the gitCapture "surface WHY" principle, not a bare
+	// "exit status 1").
+	if fetchErr, err := gitCapture(root, "fetch", "origin", "main"); err != nil {
+		detail := strings.TrimSpace(fetchErr)
+		if detail == "" {
+			detail = err.Error()
+		}
+		return fmt.Errorf("post-push verify: cannot fetch origin/main to confirm the push landed (agent-state may be stranded local-only): %s", detail)
+	}
+
+	// Distinguish "no remote-tracking ref" (exit 128 / missing upstream —
+	// NOT an oversized-file rejection) from "ref exists but does not
+	// contain our commit" (the genuine stranded case). Conflating them
+	// sends the operator down the wrong path.
+	if err := gitCmdQuiet(root, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/main"); err != nil {
+		return fmt.Errorf(
+			"post-push verify: no refs/remotes/origin/main after fetch — cannot certify the push for local commit %s landed. Check `git remote -v` / the origin fetch refspec / upstream config; agent-state may be stranded local-only",
+			shortSHA(localHead))
 	}
 
 	if err := gitCmdQuiet(root, "merge-base", "--is-ancestor", localHead, "refs/remotes/origin/main"); err != nil {
