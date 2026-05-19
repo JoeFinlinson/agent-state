@@ -82,6 +82,21 @@ func (pi *primeItem) fillSBAR(item *model.Item) {
 	pi.Recommendation = item.SBAR.Recommendation
 }
 
+// resumePointer is the I-697 fresh-session pickup trigger. I-679 made
+// `st resume <id>` the breadcrumb-killer and Phase B auto-injects it on
+// source=compact, but a COLD session sees only `st prime` — whose Next
+// Action never referenced resume, so the pickup depended on the operator
+// remembering to say "run st resume first" (the exact failure I-679
+// exists to kill). Emitting this directly under `Current: <id>` makes the
+// trigger ride in the dashboard every session already gets, with zero
+// reliance on memory. Single helper so the two Next-Action sites (compact
+// + non-compact) cannot drift. Unconditional for any active item:
+// `st resume` works for any item and is rich for multi-session ones
+// (I-679 design decision #5) — no multisession-tag dependency.
+func resumePointer(id string) string {
+	return fmt.Sprintf("  → load the cross-session record first:  st resume %s\n", id)
+}
+
 func Prime(s *store.Store, cfg *config.Config, opts PrimeOpts) int {
 	// Check if session is bound to a sprint
 	sprintID := resolveSessionSprint(cfg)
@@ -283,6 +298,7 @@ func sprintScopedPrime(s *store.Store, cfg *config.Config, opts PrimeOpts, sprin
 		if action != "" {
 			b.WriteString("## Next Action\n")
 			b.WriteString(fmt.Sprintf("  Current: %s\n", activeID))
+			b.WriteString(resumePointer(activeID))
 			b.WriteString(fmt.Sprintf("  -> %s\n", action))
 			b.WriteString("\n")
 		}
@@ -479,6 +495,7 @@ func globalPrime(s *store.Store, cfg *config.Config, opts PrimeOpts) int {
 		if action != "" {
 			b.WriteString("## Next Action\n")
 			b.WriteString(fmt.Sprintf("  Current: %s\n", activeID))
+			b.WriteString(resumePointer(activeID))
 			b.WriteString(fmt.Sprintf("  → %s\n", action))
 			b.WriteString("\n")
 		}
