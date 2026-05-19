@@ -95,6 +95,25 @@ func Close(s *store.Store, cfg *config.Config, id, resolution string, opts Close
 		}
 	}
 
+	// I-696: post-merge local-main full-e2e gate. There is no GHA e2e
+	// (I-637), so this is the only verification that the *merged* code is
+	// releasable before the item closes / main becomes the deploy artifact.
+	// Runs OUTSIDE the Mutate lock (slow, like the LOC snapshot below).
+	// Self-gates on applicability (PR touched an e2e spec + PostMergeCmd
+	// configured); honors an explicit web_e2e scope skip.
+	recordPostMerge := false
+	if !opts.Force && resolution != "abandoned" && resolution != "declined" {
+		web, _ := item.Doc.GetNestedField("testing_evidence.scope_suites.web_e2e")
+		if !strings.HasPrefix(strings.TrimSpace(web), "skip") {
+			if msg := postMergeE2E(cfg, id); msg != "" {
+				fmt.Fprintln(os.Stderr, msg)
+				fmt.Fprintln(os.Stderr, "post-merge e2e gate failed (full suite vs merged local main); fix and re-close, or use --force to bypass")
+				return 1
+			}
+			recordPostMerge = true
+		}
+	}
+
 	// Transition
 	oldStatus := item.Status
 	now := time.Now()
@@ -120,6 +139,12 @@ func Close(s *store.Store, cfg *config.Config, id, resolution string, opts Close
 		// Always set (not advance) so abandon paths surface as "closed"
 		// in render too.
 		item.SetNested("delivery", "stage", "closed")
+
+		// I-696: persist the post-merge e2e pass as scope-suite evidence so
+		// the gate is auditable in st show / st uat after close.
+		if recordPostMerge {
+			item.SetNested("testing_evidence", "web_e2e_postmerge", "pass "+nowStr)
+		}
 
 		// Record completion time tracking
 		item.SetNested("time_tracking", "completed_at", nowStr)

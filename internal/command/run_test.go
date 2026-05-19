@@ -1391,6 +1391,84 @@ func TestPostDeployE2ENoPostDeployConfig(t *testing.T) {
 	}
 }
 
+// --- I-696: postMergeE2E (post-merge local-main full-e2e gate) ---
+
+func TestPostMergeE2ENoManifest(t *testing.T) {
+	_, cfg := setupRunTestEnv(t)
+	if got := postMergeE2E(cfg, "T-999"); got != "" {
+		t.Errorf("no manifest: want \"\", got %q", got)
+	}
+}
+
+func TestPostMergeE2ENonE2EFilesSkipped(t *testing.T) {
+	_, cfg := setupRunTestEnv(t)
+	cfg.Testing = &config.TestingConfig{ScopeSuites: map[string]config.ScopeSuiteConfig{
+		"web_e2e": {Command: "x", PostMergeCmd: "false"}, // would fail IF it ran
+	}}
+	os.MkdirAll(cfg.ManifestDir(), 0755)
+	m := &manifest.Manifest{PRs: []manifest.PRRecord{{
+		Repo: "api", PRNumber: 1,
+		Files: []manifest.FileRecord{{Path: "internal/db/billing.go", Action: "M", Type: "app"}},
+	}}}
+	data, _ := json.Marshal(m)
+	os.WriteFile(filepath.Join(cfg.ManifestDir(), "T-001.json"), data, 0644)
+	if got := postMergeE2E(cfg, "T-001"); got != "" {
+		t.Errorf("api-only change must skip post-merge e2e: got %q", got)
+	}
+}
+
+func TestPostMergeE2ENoPostMergeConfig(t *testing.T) {
+	_, cfg := setupRunTestEnv(t)
+	cfg.Testing = &config.TestingConfig{ScopeSuites: map[string]config.ScopeSuiteConfig{
+		"web_e2e": {Command: "scripts/e2e-local.sh run"}, // no PostMergeCmd
+	}}
+	os.MkdirAll(cfg.ManifestDir(), 0755)
+	m := &manifest.Manifest{PRs: []manifest.PRRecord{{
+		Repo: "web", PRNumber: 9,
+		Files: []manifest.FileRecord{{Path: "src/app/(app)/app/notes/page.tsx", Action: "M", Type: "app"}},
+	}}}
+	data, _ := json.Marshal(m)
+	os.WriteFile(filepath.Join(cfg.ManifestDir(), "T-001.json"), data, 0644)
+	if got := postMergeE2E(cfg, "T-001"); got != "" {
+		t.Errorf("no PostMergeCmd configured: want \"\", got %q", got)
+	}
+}
+
+func TestPostMergeE2EPassesWhenCmdSucceeds(t *testing.T) {
+	_, cfg := setupRunTestEnv(t)
+	cfg.Testing = &config.TestingConfig{ScopeSuites: map[string]config.ScopeSuiteConfig{
+		"web_e2e": {Command: "x", PostMergeCmd: "true"},
+	}}
+	os.MkdirAll(cfg.ManifestDir(), 0755)
+	m := &manifest.Manifest{PRs: []manifest.PRRecord{{
+		Repo: "web", PRNumber: 9,
+		Files: []manifest.FileRecord{{Path: "src/app/(app)/app/billing/page.tsx", Action: "M", Type: "app"}},
+	}}}
+	data, _ := json.Marshal(m)
+	os.WriteFile(filepath.Join(cfg.ManifestDir(), "T-001.json"), data, 0644)
+	if got := postMergeE2E(cfg, "T-001"); got != "" {
+		t.Errorf("passing post-merge cmd: want \"\", got %q", got)
+	}
+}
+
+func TestPostMergeE2EFailsWhenCmdFails(t *testing.T) {
+	_, cfg := setupRunTestEnv(t)
+	cfg.Testing = &config.TestingConfig{ScopeSuites: map[string]config.ScopeSuiteConfig{
+		"web_e2e": {Command: "x", PostMergeCmd: "false"},
+	}}
+	os.MkdirAll(cfg.ManifestDir(), 0755)
+	m := &manifest.Manifest{PRs: []manifest.PRRecord{{
+		Repo: "web", PRNumber: 9,
+		Files: []manifest.FileRecord{{Path: "src/app/(app)/app/billing/page.tsx", Action: "M", Type: "app"}},
+	}}}
+	data, _ := json.Marshal(m)
+	os.WriteFile(filepath.Join(cfg.ManifestDir(), "T-001.json"), data, 0644)
+	got := postMergeE2E(cfg, "T-001")
+	if got == "" || !strings.Contains(got, "Post-merge E2E FAILED") {
+		t.Errorf("failing post-merge cmd must return failure summary, got %q", got)
+	}
+}
+
 // --- AC path rewriting tests ---
 
 func TestRewriteACPathsRelativeToWorktree(t *testing.T) {

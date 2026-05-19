@@ -2461,6 +2461,73 @@ func postDeployE2E(cfg *config.Config, itemID string) string {
 	return "Post-deploy E2E results:\n" + strings.Join(results, "\n")
 }
 
+// postMergeE2E (I-696) runs the configured scope-suite PostMergeCmd as a
+// gate AFTER a PR has merged: the FULL local e2e suite against the
+// agent-root main checkout (the merged, integrated code) — NOT the
+// worktree, NOT dev. There is no GitHub Actions e2e (I-637), so this is
+// the only thing that verifies main is releasable before the item closes.
+//
+// Applicability: only fires when the item has recorded PR(s) whose changed
+// files map to an e2e spec (same e2eSpecFor mapping post-deploy uses), so
+// doc-only / api-only / non-web items are correctly skipped. Returns "" on
+// pass or not-applicable, a non-empty failure summary on red.
+func postMergeE2E(cfg *config.Config, itemID string) string {
+	m, err := manifest.Load(cfg.ManifestDir(), itemID)
+	if err != nil || len(m.PRs) == 0 {
+		return ""
+	}
+
+	// Applicability: did any merged PR touch a file that maps to an e2e spec?
+	touchesE2E := false
+	for _, pr := range m.PRs {
+		for _, f := range pr.Files {
+			if f.Action == "D" {
+				continue
+			}
+			if e2eSpecFor(f.Path) != "" {
+				touchesE2E = true
+				break
+			}
+		}
+		if touchesE2E {
+			break
+		}
+	}
+	if !touchesE2E {
+		return ""
+	}
+
+	if cfg.Testing == nil {
+		return ""
+	}
+	var mergeCmd string
+	for _, suite := range cfg.Testing.ScopeSuites {
+		if suite.PostMergeCmd != "" {
+			mergeCmd = suite.PostMergeCmd
+			break
+		}
+	}
+	if mergeCmd == "" {
+		return ""
+	}
+
+	// Run the FULL suite from the agent-root (cfg.Root()) — deliberately NOT
+	// worktree-rewritten: we are verifying merged main, and the command's
+	// own `git checkout main && git pull` (in config) pins it to the merge
+	// result.
+	runDir := cfg.Root()
+	fmt.Printf("[%s] Running post-merge E2E against local main (full suite)...\n", itemID)
+	output, exitCode, err := runCmdInDir(runDir, mergeCmd)
+	if err == nil && exitCode == 0 {
+		return ""
+	}
+	tail := string(output)
+	if len(tail) > 1500 {
+		tail = tail[len(tail)-1500:]
+	}
+	return fmt.Sprintf("Post-merge E2E FAILED against local main (exit %d):\n%s", exitCode, tail)
+}
+
 // executeUATReview runs UAT, then enters a conversational loop where the user
 // can approve, reject, or give plain-text feedback that gets routed to claude.
 // Claude acts on the feedback (writes tests, fixes code, etc.), then UAT re-runs
