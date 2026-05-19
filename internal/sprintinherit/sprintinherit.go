@@ -75,6 +75,7 @@ func blockedItems(id string, it *model.Item, g *deps.Graph) []string {
 func Resolve(id string, all map[string]*model.Item, g *deps.Graph, reg *registry.Registry) (target *Target, ambiguous []string) {
 	it := all[id]
 	bySprint := map[string]*Target{}
+	var order []string // distinct active sprint IDs, first-seen order
 	for _, blockedID := range blockedItems(id, it, g) {
 		y := all[blockedID]
 		if y == nil || y.Sprint == "" {
@@ -86,21 +87,19 @@ func Resolve(id string, all map[string]*model.Item, g *deps.Graph, reg *registry
 		}
 		if _, ok := bySprint[sp.ID]; !ok {
 			bySprint[sp.ID] = &Target{SprintID: sp.ID, EpicID: sp.Epic, Via: blockedID}
+			order = append(order, sp.ID)
 		}
 	}
-	switch len(bySprint) {
+	switch len(order) {
 	case 0:
 		return nil, nil
 	case 1:
-		for _, t := range bySprint {
-			return t, nil
-		}
+		return bySprint[order[0]], nil
+	default:
+		ambiguous = append([]string(nil), order...)
+		sort.Strings(ambiguous)
+		return nil, ambiguous
 	}
-	for s := range bySprint {
-		ambiguous = append(ambiguous, s)
-	}
-	sort.Strings(ambiguous)
-	return nil, ambiguous
 }
 
 // Drift returns one validate.Error per non-terminal item that has no

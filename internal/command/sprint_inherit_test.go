@@ -85,3 +85,30 @@ func TestStartGate_ForceBypassLeavesItemSprintless(t *testing.T) {
 		t.Fatalf("T-001 status=%q, want active (started despite gate)", got.Status)
 	}
 }
+
+// TestStartGate_DependencyGateRunsBeforeSprintGate locks in the review fix:
+// the read-only dependency gate must fire BEFORE the I-681 sprint gate, so
+// an item that can't start anyway is never mutated into a sprint. I-001 is
+// put in the active sprint and made to depend on T-002 (so T-002 blocks an
+// active-sprint member); T-002 itself depends on T-001 (baseline fixture,
+// queued/non-terminal) so T-002 is blocked. Even with --add-to-sprint, the
+// dependency gate must reject first and leave T-002 sprintless — on the
+// pre-fix ordering --add-to-sprint would have called SprintAdd before the
+// blocked-by check and left T-002 in the sprint.
+func TestStartGate_DependencyGateRunsBeforeSprintGate(t *testing.T) {
+	s, cfg, _, sprintID := setupSprintTestEnv(t)
+	if rc := SprintAdd(s, cfg, sprintID, []string{"I-001"}); rc != 0 {
+		t.Fatalf("seed SprintAdd rc=%d", rc)
+	}
+	if rc := DepAdd(s, cfg, "I-001", "T-002"); rc != 0 {
+		t.Fatalf("seed DepAdd rc=%d", rc)
+	}
+
+	if rc := Start(s, cfg, "T-002", StartOpts{AddToSprint: true}); rc != 1 {
+		t.Fatalf("Start rc=%d, want 1 (dependency gate before sprint gate)", rc)
+	}
+	got, _ := s.Get("T-002")
+	if got.Sprint != "" {
+		t.Fatalf("T-002 sprint=%q, want empty — dep gate must reject before SprintAdd runs", got.Sprint)
+	}
+}

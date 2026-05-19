@@ -116,11 +116,17 @@ func Check(s *store.Store, cfg *config.Config, quiet bool, fix bool) int {
 	// here would block every agent's session-start `st check` on a peer's
 	// drift the current agent must not touch. The real enforcement is the
 	// per-owner gate in `st start` plus auto-inherit in `st push`.
-	if reg, rerr := registry.Load(cfg.EpicsPath()); rerr == nil {
-		for _, e := range sprintinherit.Drift(s.All(), g, reg, cfg) {
-			if !quiet {
+	//
+	// Skipped entirely in quiet mode: that is the CI/session-hook
+	// read-only fast-path, the warning has no output there, and the
+	// registry.Load + Drift walk is non-essential I/O on that path.
+	if !quiet {
+		if reg, rerr := registry.Load(cfg.EpicsPath()); rerr == nil {
+			for _, e := range sprintinherit.Drift(s.All(), g, reg, cfg) {
 				fmt.Printf("  \033[33m⚠\033[0m %s\n", e)
 			}
+		} else {
+			fmt.Fprintf(os.Stderr, "  warning: sprint-drift check skipped — registry unreadable: %v\n", rerr)
 		}
 	}
 

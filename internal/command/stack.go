@@ -118,10 +118,19 @@ func StackPush(s *store.Store, cfg *config.Config, id string, opts StackPushOpts
 	// SkipSprintInherit: `st start` force-bypassed the I-681 gate; honor
 	// that explicit off-sprint decision instead of silently re-adding via
 	// the internal tail-push.
+	inherited := false
 	if !opts.SkipSprintInherit {
 		if t, ambiguous := resolveSprintInheritance(s, cfg, id); t != nil {
 			if rc := SprintAdd(s, cfg, t.SprintID, []string{id}); rc == 0 {
+				inherited = true
 				fmt.Printf("  ↳ inherited sprint %s (blocks %s in that active sprint)\n", t.SprintID, t.Via)
+			} else {
+				// Best-effort, but never silent: the stack write below
+				// still commits; surface the failed inherit so the drift
+				// is visible now rather than only at the next `st check`.
+				fmt.Fprintf(os.Stderr,
+					"  warning: sprint auto-inherit failed (rc=%d) — run `st sprint add %s %s`\n",
+					rc, t.SprintID, id)
 			}
 		} else if len(ambiguous) > 0 {
 			fmt.Fprintf(os.Stderr,
@@ -130,7 +139,13 @@ func StackPush(s *store.Store, cfg *config.Config, id string, opts StackPushOpts
 		}
 	}
 
-	autoSync(s, fmt.Sprintf("st push: %s (depth %d)", id, depth))
+	// SprintAdd already ran a tree-wide autoSync that picked up the
+	// already-saved stack file, so a second push-labeled commit would be
+	// redundant. Only sync here when inherit did not (no inherit, skipped,
+	// ambiguous, or SprintAdd failed).
+	if !inherited {
+		autoSync(s, fmt.Sprintf("st push: %s (depth %d)", id, depth))
+	}
 	return 0
 }
 

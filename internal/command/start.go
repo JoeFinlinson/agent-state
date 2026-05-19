@@ -176,18 +176,36 @@ func Start(s *store.Store, cfg *config.Config, id string, opts StartOpts) int {
 		return 1
 	}
 
+	// Check: dependencies resolved
+	g := deps.Build(s.All(), cfg)
+	if g.IsBlocked(id) {
+		unresolved := g.UnresolvedDeps(id)
+		fmt.Fprintf(os.Stderr, "%s is blocked by: %v\n", id, unresolved)
+		return 1
+	}
+
 	// I-681: mid-sprint follow-up gate. If this item blocks a member of
 	// an active sprint but has no sprint of its own, we'd be working a
 	// sprint's blocker off the sprint — refuse. --add-to-sprint resolves
 	// it in one step; --force bypasses (audited like the I-490 bypass).
 	// Ambiguous links (>1 active sprint) always reject — never auto-pick.
+	//
+	// Deliberately placed AFTER the read-only dependency gate: a blocked
+	// item should surface its actionable "blocked by" message first, and
+	// the only state-mutating branch here (--add-to-sprint → SprintAdd)
+	// must not run for an item that can't start anyway. All earlier gates
+	// (status, I-490, assignment, deps) are read-only, so by this point
+	// the start is prerequisite-clean; if --add-to-sprint adds the item
+	// and a later claim race loses, the sprint membership is still
+	// correct (it belongs there regardless of who works it — that is
+	// precisely the I-681 invariant), so the write is not misleading.
 	if t, ambiguous := resolveSprintInheritance(s, cfg, id); t != nil {
 		switch {
 		case opts.AddToSprint:
 			if rc := SprintAdd(s, cfg, t.SprintID, []string{id}); rc != 0 {
 				return rc
 			}
-			fmt.Fprintf(os.Stderr, "added %s to active sprint %s (blocks %s)\n", id, t.SprintID, t.Via)
+			fmt.Printf("added %s to active sprint %s (blocks %s)\n", id, t.SprintID, t.Via)
 			if it2, ok := s.Get(id); ok {
 				item = it2 // refresh: SprintAdd mutated sprint/epic
 			}
@@ -208,14 +226,6 @@ func Start(s *store.Store, cfg *config.Config, id string, opts StartOpts) int {
 			"%s blocks members of multiple active sprints %v but is in none.\n"+
 				"  fix: st sprint add <sprint> %s   (pick the correct sprint)\n",
 			id, ambiguous, id)
-		return 1
-	}
-
-	// Check: dependencies resolved
-	g := deps.Build(s.All(), cfg)
-	if g.IsBlocked(id) {
-		unresolved := g.UnresolvedDeps(id)
-		fmt.Fprintf(os.Stderr, "%s is blocked by: %v\n", id, unresolved)
 		return 1
 	}
 

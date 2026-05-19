@@ -128,7 +128,7 @@ func Reconcile(s *store.Store, cfg *config.Config, opts ReconcileOpts) int {
 	// add` it. Reconcile must not auto-move items here: membership change
 	// edits the item, which may belong to a peer agent.
 	fmt.Println("Phase 8: Sprint-inheritance drift (informational)")
-	reconcileSprintDrift(s, cfg)
+	reconcileSprintDrift(s, cfg, opts)
 
 	// Phase 9: Regenerate index
 	fmt.Println("Phase 9: Regenerate index")
@@ -151,7 +151,12 @@ func Reconcile(s *store.Store, cfg *config.Config, opts ReconcileOpts) int {
 // sprint of its own. Read-only by design — fixing it edits the item, which
 // may be owned by another agent; the owner resolves it via `st sprint add`
 // (or `st start --add-to-sprint`).
-func reconcileSprintDrift(s *store.Store, cfg *config.Config) {
+// opts is accepted for signature parity with every other reconcile phase
+// helper (so a future mutating variant needs no signature change); this
+// phase is read-only so DryRun has no effect — drift output is identical
+// in dry-run and live, which is correct for a purely informational phase.
+func reconcileSprintDrift(s *store.Store, cfg *config.Config, opts ReconcileOpts) {
+	_ = opts
 	reg, err := registry.Load(cfg.EpicsPath())
 	if err != nil {
 		return
