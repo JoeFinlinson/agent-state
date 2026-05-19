@@ -2,8 +2,8 @@
 package registry
 
 import (
-	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strconv"
@@ -12,6 +12,45 @@ import (
 
 	"github.com/jfinlinson/agent-state/internal/namegen"
 )
+
+// MaxNoteBytes caps a single note message. A note is a short session
+// breadcrumb; anything larger is almost certainly an accidental giant
+// paste, which (pre-I-673) could bloat the shared registry file. The cap
+// is deliberately generous so it never bites a real note — it is a
+// backstop, not a content policy. The loader itself is unbounded
+// (I-673), so an over-cap line that already exists still loads; this
+// only guards new writes.
+const MaxNoteBytes = 256 * 1024
+
+// ValidateNoteMessage enforces the note-message write contract at the
+// entry points (NoteAdd / NoteEdit), not in the dumb store mutators:
+//
+//   - size: at most MaxNoteBytes (giant-paste backstop).
+//   - single line: no embedded '\n'/'\r'. Save serializes a note as one
+//     `message: <text>` physical line, and a multi-line message is
+//     corrupted on round-trip either way: if it has no other YAML-special
+//     char, yamlQuote leaves the raw '\n' in, so Save writes multiple
+//     physical lines and Load's splitKV silently drops every line after
+//     the first; if it also contains a special char, yamlQuote uses %q
+//     and the '\n' survives as a literal two-char "\n" sequence that
+//     splitKV never un-escapes — still silent data loss, just a
+//     different shape. The flat registry format has no multi-line
+//     scalar; reject loudly instead (notes are short breadcrumbs — link
+//     to an item/doc for anything that needs structure). Closes the
+//     silent-failure path the I-673 family is about; on-disk format
+//     unchanged.
+func ValidateNoteMessage(message string) error {
+	if len(message) > MaxNoteBytes {
+		return fmt.Errorf(
+			"note message is %d bytes; max is %d (%d KB) — keep notes short and link to an item/doc for detail",
+			len(message), MaxNoteBytes, MaxNoteBytes/1024)
+	}
+	if strings.ContainsAny(message, "\n\r") {
+		return fmt.Errorf(
+			"note message must be a single line (the registry stores it as one `message:` line; multi-line input would silently lose every line after the first) — condense it or link to an item/doc for detail")
+	}
+	return nil
+}
 
 // Epic represents a long-lived work stream.
 type Epic struct {
@@ -69,8 +108,26 @@ func Load(path string) (*Registry, error) {
 	}
 	defer f.Close()
 
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 512*1024)
+	// I-673: read with an unbounded reader. The previous bufio.Scanner
+	// had a fixed 512 KB max-token cap, so a single oversized line
+	// (e.g. an accidental giant note paste) made the WHOLE shared
+	// registry — notes, epics, and sprints — permanently unreadable
+	// with no degrade path. These registry files are small operational
+	// state (the pathology is one big line, not a big file), so reading
+	// the whole file and splitting on newlines is correct, simple, and
+	// has no size ceiling. Per-line `\r` is trimmed so CRLF files parse
+	// identically to LF. This is behaviorally equivalent to the old
+	// scanner for every input this format produces — NOT slice-identical
+	// to bufio.ScanLines: Split keeps a trailing "" element on the
+	// newline-terminated files Save always writes; the `trimmed == ""`
+	// guard in the loop swallows it, so no record is mis-parsed. The
+	// removed `scanner.Err()` check is subsumed by io.ReadAll's error
+	// return below (it surfaces any read error up front).
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, err
+	}
+	lines := strings.Split(string(data), "\n")
 
 	var section string // "epics", "sprints", "notes"
 	var current map[string]string
@@ -124,8 +181,8 @@ func Load(path string) (*Registry, error) {
 		currentLists = nil
 	}
 
-	for scanner.Scan() {
-		line := scanner.Text()
+	for _, raw := range lines {
+		line := strings.TrimSuffix(raw, "\r")
 		trimmed := strings.TrimSpace(line)
 
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
@@ -178,10 +235,6 @@ func Load(path string) (*Registry, error) {
 		}
 	}
 	flush()
-
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
 	return r, nil
 }
 
