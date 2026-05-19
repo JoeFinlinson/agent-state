@@ -31,6 +31,10 @@ func showFull(s *store.Store, cfg *config.Config, item *model.Item, all bool) in
 	if title == "" {
 		title = "(untitled)"
 	}
+	// Orienting document header. The id/title also appear in the `item`
+	// facet body below — that is intentional: the banner says "what am I
+	// looking at", the `item` facet is the identity entry of the §4
+	// taxonomy. The scout deliberately shows the whole taxonomy.
 	fmt.Printf("%s — %s\n", item.ID, title)
 	fmt.Println(strings.Repeat("─", 60))
 

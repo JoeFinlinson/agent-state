@@ -118,7 +118,7 @@ func TestNonEmptyOr(t *testing.T) {
 		{"as#130", "manifest", "as#130"},
 		{"", "manifest", "manifest"},
 		{"  ", "manifest", "manifest"},
-		{nil, "fallback", "<nil>"}, // %v of nil = "<nil>" → non-blank, kept
+		{nil, "fallback", "fallback"}, // %v of nil = "<nil>" → treated blank → fallback
 		{[]any{"as#1", "as#1"}, "manifest", "[as#1 as#1]"},
 	}
 	for _, c := range cases {

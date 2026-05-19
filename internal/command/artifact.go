@@ -372,7 +372,8 @@ func mapFacet(m map[string]interface{}, label string) facetResult {
 // (found in T-371 live-verify: an empty value produced a meaningless
 // "(—)" header).
 func nonEmptyOr(v any, fallback string) string {
-	if s := strings.TrimSpace(fmt.Sprintf("%v", v)); s != "" {
+	s := strings.TrimSpace(fmt.Sprintf("%v", v))
+	if s != "" && s != "<nil>" { // a nil scalar must not become a "(<nil>)" header
 		return s
 	}
 	return fallback
