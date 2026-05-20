@@ -314,13 +314,12 @@ var knownRepoPrefixes = []string{
 	"as/",
 }
 
+// containsRepoPrefix is a thin alias around matchedRepoPrefix for
+// call sites (`pathsForRepo`) that only need a bool. Keeps the
+// prefix-walk centralized so a future addition to
+// knownRepoPrefixes only updates one place.
 func containsRepoPrefix(p string) bool {
-	for _, pfx := range knownRepoPrefixes {
-		if strings.HasPrefix(p, pfx) {
-			return true
-		}
-	}
-	return false
+	return matchedRepoPrefix(p) != ""
 }
 
 // defaultGitRunner runs `git -C <root> <args...>` and returns

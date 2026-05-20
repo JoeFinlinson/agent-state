@@ -124,6 +124,28 @@ func TestCheckFileExistence_StillFlagsMissingScopedFile(t *testing.T) {
 	}
 }
 
+// TestCheckFileExistence_AbsolutePathStatsAsIs — review F6: the
+// absolute-path branch in checkFileExistence's resolution priority
+// stats the path verbatim without any prefix or workspace join.
+func TestCheckFileExistence_AbsolutePathStatsAsIs(t *testing.T) {
+	body := "see /etc/hosts.go" // .go extension to trip the path regex
+	var statted string
+	statter := func(path string) error {
+		statted = path
+		return nil
+	}
+	repoRoot := func(string) (string, bool) {
+		t.Errorf("repoRoot should NOT be consulted for absolute paths; was called")
+		return "", false
+	}
+	if got := checkFileExistence(body, "/wsroot", repoRoot, statter); len(got) != 0 {
+		t.Errorf("expected no findings; got %v", got)
+	}
+	if statted != "/etc/hosts.go" {
+		t.Errorf("statter called with %q; want absolute path as-is", statted)
+	}
+}
+
 // TestCheckFileExistence_SkipsScopedPathWhenRepoRootUnknown — when
 // the closure returns (false) for a known prefix, the path is
 // SKIPPED entirely (fail-open). This prevents false STALE

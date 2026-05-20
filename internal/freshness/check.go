@@ -26,9 +26,12 @@ type CheckOpts struct {
 	GitRunner func(root string, args []string) ([]byte, error)
 
 	// RepoRoot maps a scope-repo name to its on-disk path. The
-	// production caller wires this to the worktree layout (each
-	// scope_repo lives at `<worktree>/<repo>`). When nil, all repos
-	// are treated as not-present (git-churn heuristic no-ops).
+	// production caller wires this to the standard agent-workspace
+	// layout (each scope_repo lives at `<dirname(cfg.Root())>/<repo>`).
+	// When nil, all repos are treated as not-present: git-churn
+	// heuristic no-ops AND file-existence heuristic skips
+	// known-prefix paths (I-719). Unrecognized-prefix paths still
+	// fall back to workspace-relative resolution regardless.
 	RepoRoot func(name string) (string, bool)
 
 	// SkipCache disables read+write to the freshness cache. Used

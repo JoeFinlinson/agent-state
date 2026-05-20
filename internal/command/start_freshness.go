@@ -11,23 +11,29 @@ import (
 )
 
 // defaultRepoRoot resolves a scope-repo name to its conventional
-// on-disk location: a sibling of the workspace clone. The standard
-// agent-workspace layout puts each repo at
-// `<agent-root>/<repo-name>`, and the workspace itself lives at
-// `<agent-root>/theraprac-workspace`. So
-// `filepath.Dir(cfg.Root())/<name>` is the canonical resolution.
+// on-disk location under the standard agent-workspace layout: each
+// scope repo lives as a SIBLING of the workspace clone, at
+// `<agent-root>/<repo-name>`. The workspace itself is at
+// `<agent-root>/theraprac-workspace`, so `theraprac-workspace`
+// resolves to cfg.Root() directly and every other recognized repo
+// resolves to `filepath.Dir(cfg.Root())/<name>`. Non-standard
+// layouts (e.g., an agent with a stripped-down checkout missing
+// some siblings) get ("", false) for absent repos, which the
+// freshness heuristic treats as fail-open (skip rather than flag
+// missing).
 //
-// Returns ("", false) when the candidate path does not exist on
-// disk so the heuristic's fail-open branch fires (don't falsely
-// flag a file missing when the repo itself isn't present in this
-// layout, e.g. an agent that doesn't check out every sibling).
+// statter is injectable so tests can avoid real filesystem probes.
+// In production runFreshnessGate passes os.Stat directly.
 //
 // I-719.
-func defaultRepoRoot(cfg *config.Config) func(name string) (string, bool) {
-	return func(name string) (string, bool) {
-		if cfg == nil {
-			return "", false
+func defaultRepoRoot(cfg *config.Config, statter func(string) error) func(name string) (string, bool) {
+	if statter == nil {
+		statter = func(path string) error {
+			_, err := os.Stat(path)
+			return err
 		}
+	}
+	return func(name string) (string, bool) {
 		// theraprac-workspace resolves to the workspace itself,
 		// preserving today's workspace-relative behavior for any
 		// docs/* or .plans/* path that happened to be written
@@ -36,7 +42,7 @@ func defaultRepoRoot(cfg *config.Config) func(name string) (string, bool) {
 			return cfg.Root(), true
 		}
 		candidate := filepath.Join(filepath.Dir(cfg.Root()), name)
-		if _, err := os.Stat(candidate); err != nil {
+		if err := statter(candidate); err != nil {
 			return "", false
 		}
 		return candidate, true
@@ -59,7 +65,7 @@ func defaultRepoRoot(cfg *config.Config) func(name string) (string, bool) {
 // glues that into command.StartOpts (specifically --ack-drift).
 func runFreshnessGate(cfg *config.Config, s *store.Store, id string, opts StartOpts) int {
 	result, err := freshness.Check(cfg, s, id, freshness.CheckOpts{
-		RepoRoot: defaultRepoRoot(cfg),
+		RepoRoot: defaultRepoRoot(cfg, nil),
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: freshness gate errored on %s (%v) — proceeding without re-validation\n", id, err)
