@@ -993,7 +993,7 @@ in-flight, run 'st release' against the active items first.
 	startCmd.Flags().String("slug", "", "`SLUG` for branch name (single segment). Example: --slug cost-ground-truth → fix/I-579-cost-ground-truth. A leading <type>/<id>- prefix is stripped if present, so fix/I-579-cost-ground-truth is also accepted.")
 	startCmd.Flags().StringSlice("repos", nil, "repos to create worktrees for")
 	startCmd.Flags().Bool("no-push", false, "skip auto-push onto the work stack")
-	startCmd.Flags().Bool("force", false, "bypass the I-490 queue-approval gate (logs to changelog)")
+	startCmd.Flags().Bool("force", false, "bypass the I-490 queue-approval gate and the I-681 sprint-inheritance gate (logs to changelog). NOTE: does NOT bypass the I-711 freshness gate — use --ack-drift for Drift; Stale requires re-prep.")
 	startCmd.Flags().Bool("add-to-sprint", false, "resolve the I-681 sprint-inheritance gate by adding this item to the active sprint of an in-progress item it blocks")
 	startCmd.Flags().String("ack-drift", "", "operator-supplied one-line note acknowledging plan drift surfaced by the I-711 freshness gate; proceeds activation despite drift findings")
 	root.AddCommand(startCmd)

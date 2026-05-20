@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -24,6 +23,13 @@ func cachePath(workspaceRoot, id, planBody, head string) string {
 
 // loadCache reads a previously-evaluated Result for (id, plan,
 // head). Returns (nil, false) on miss or parse error.
+//
+// Defensive read-side guard: if a cached entry somehow has
+// Verdict==Stale (e.g., written by an older binary or a test that
+// bypassed storeCache), treat it as a miss so the freshness gate
+// re-evaluates. storeCache already refuses to persist Stale; this
+// guard makes the read side robust against on-disk corruption /
+// regression.
 func loadCache(workspaceRoot, id, planBody, head string) (*Result, bool) {
 	if workspaceRoot == "" || id == "" || planBody == "" || head == "" {
 		return nil, false
@@ -34,6 +40,9 @@ func loadCache(workspaceRoot, id, planBody, head string) (*Result, bool) {
 	}
 	var r Result
 	if err := json.Unmarshal(data, &r); err != nil {
+		return nil, false
+	}
+	if r.Verdict == VerdictStale {
 		return nil, false
 	}
 	return &r, true
@@ -129,6 +138,3 @@ func hashPlanBody(planBody string) string {
 	return hex.EncodeToString(sum[:])[:16]
 }
 
-// ensure unused-import quiet — fmt referenced inside future
-// formatter changes; the file currently has no direct fmt usage.
-var _ = fmt.Sprintf

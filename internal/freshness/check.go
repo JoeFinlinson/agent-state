@@ -37,19 +37,21 @@ type CheckOpts struct {
 }
 
 // Check evaluates plan + SBAR freshness for `id` against the
-// current workspace state. Returns (Fresh|Drift|Stale, findings)
-// per the two-phase design documented on the package.
+// current workspace state. Returns (Fresh|Drift|Stale, findings).
 //
 // Behavior:
 //
 //   - If plan_approved is false, returns Fresh with no findings
 //     (no plan to validate). Callers that require a plan must
 //     gate on PlanApproved separately.
-//   - Reads the cache first; instant return on hit unless the
-//     cached verdict is Stale (those are never cached).
-//   - Cheap heuristics fire first. Any Stale candidate is terminal.
-//   - Drift candidates trigger the Claude phase IF an engine is
-//     wired; otherwise the heuristic verdict stands.
+//   - If the plan sidecar is missing, returns Fresh (matching the
+//     I-710 missing-sidecar carve-out).
+//   - Reads the cache first; instant return on hit. storeCache
+//     never writes Stale, and loadCache has a defensive read-side
+//     guard, so a cache hit can't be Stale.
+//   - Heuristics fire next. Any file-missing finding or
+//     age-over-StaleAfter is terminal Stale; otherwise any finding
+//     is Drift; otherwise Fresh.
 //   - Result is cached on disk before return (except Stale).
 func Check(cfg *config.Config, s *store.Store, id string, opts CheckOpts) (*Result, error) {
 	item, ok := s.Get(id)
@@ -106,9 +108,21 @@ func Check(cfg *config.Config, s *store.Store, id string, opts CheckOpts) (*Resu
 	findings = append(findings, checkFileExistence(planBody, workspaceRoot, statter)...)
 	findings = append(findings, checkAge(approvedAt, now, th)...)
 	findings = append(findings, checkDependencyClosure(loaded, itemDependencies(item), approvedAt, s)...)
-	findings = append(findings, checkGitChurn(loaded, approvedAt, repoRoot, th, gitRunner)...)
+	// Review F6 fix: pass the same planBody used by file-existence
+	// so churn extraction sees Approach content when RawText is
+	// empty.
+	findings = append(findings, checkGitChurn(loaded, planBody, approvedAt, repoRoot, th, gitRunner)...)
 
-	verdict := classifyHeuristics(findings, now.Sub(approvedAt), th)
+	// Review F7 fix: when approvedAt is the zero value (item
+	// missing PlanApprovedAt or with a malformed timestamp), pass
+	// 0 instead of ~56 years to classifyHeuristics so a
+	// non-age-derived finding can't be silently escalated to Stale
+	// via the `age > StaleAfter` branch.
+	age := time.Duration(0)
+	if !approvedAt.IsZero() {
+		age = now.Sub(approvedAt)
+	}
+	verdict := classifyHeuristics(findings, age, th)
 
 	r := &Result{
 		Verdict:     verdict,

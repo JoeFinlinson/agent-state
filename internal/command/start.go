@@ -442,6 +442,18 @@ func Start(s *store.Store, cfg *config.Config, id string, opts StartOpts) int {
 			Reason: "bypassed I-681 mid-sprint follow-up sprint-inheritance gate via --force",
 		})
 	}
+	// I-711: record a --ack-drift acknowledgement post-Mutate. The
+	// freshness gate already printed the findings + ack to stderr;
+	// this is the audit-trail counterpart, parallel to the three
+	// bypass logs above. The note carries the operator-supplied
+	// reason so future readers can correlate the bypass with
+	// whatever context the operator cared about at activation.
+	if opts.AckDrift != "" {
+		_ = changelog.Append(cfg, id, changelog.Entry{
+			Op:     "start_ack_drift",
+			Reason: "bypassed I-711 freshness drift gate via --ack-drift: " + opts.AckDrift,
+		})
+	}
 
 	fmt.Printf("Started %s — %s\n", id, item.Title)
 	if agentID != "" {

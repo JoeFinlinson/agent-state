@@ -169,11 +169,21 @@ func parseRFC3339(s string) (time.Time, error) {
 // repoRoot is a closure from scope-repo name → on-disk path so the
 // caller can wire this to the real workspace layout (worktrees vs
 // canonical clones).
-func checkGitChurn(p *plan.Plan, approvedAt time.Time, repoRoot func(name string) (string, bool), th Thresholds, runner func(repo string, args []string) ([]byte, error)) []Finding {
+//
+// Review F1/F6: takes an explicit `planBody` rather than reading
+// p.RawText directly, so the caller can pass the same body used by
+// checkFileExistence (RawText with Approach fallback). Paths
+// extracted from the plan are stripped of any leading scope-repo
+// prefix before being handed to `git log`, since git resolves
+// paths relative to the per-repo root — a workspace-prefixed path
+// like `theraprac-api/internal/foo.go` would be looked up as
+// `theraprac-api/internal/foo.go` UNDER /wsroot/theraprac-api,
+// silently returning zero commits.
+func checkGitChurn(p *plan.Plan, planBody string, approvedAt time.Time, repoRoot func(name string) (string, bool), th Thresholds, runner func(repo string, args []string) ([]byte, error)) []Finding {
 	if p == nil || approvedAt.IsZero() {
 		return nil
 	}
-	paths := extractReferencedPaths(p.RawText)
+	paths := extractReferencedPaths(planBody)
 	if len(paths) == 0 {
 		return nil
 	}
@@ -184,8 +194,12 @@ func checkGitChurn(p *plan.Plan, approvedAt time.Time, repoRoot func(name string
 		if !ok {
 			continue
 		}
+		repoPaths := pathsForRepo(repo, paths)
+		if len(repoPaths) == 0 {
+			continue
+		}
 		args := []string{"log", "--oneline", "--since=" + since, "--"}
-		args = append(args, paths...)
+		args = append(args, repoPaths...)
 		out, err := runner(root, args)
 		if err != nil {
 			continue
@@ -204,6 +218,50 @@ func checkGitChurn(p *plan.Plan, approvedAt time.Time, repoRoot func(name string
 		}
 	}
 	return findings
+}
+
+// pathsForRepo filters paths to those belonging to the given
+// scope repo, stripping the repo-name prefix so the resulting
+// paths resolve correctly when `git log` runs INSIDE that repo.
+// Returns the repo-relative path set. Paths without a recognizable
+// scope-repo prefix are included as-is — they're assumed to
+// already be repo-relative (the common case for plans scoped to a
+// single repo).
+func pathsForRepo(repo string, paths []string) []string {
+	var out []string
+	prefix := repo + "/"
+	for _, p := range paths {
+		if strings.HasPrefix(p, prefix) {
+			out = append(out, strings.TrimPrefix(p, prefix))
+			continue
+		}
+		// No prefix → assume already repo-relative.
+		if !containsRepoPrefix(p) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// knownRepoPrefixes is the set of repos that may appear as leading
+// path segments in plan bodies. Used to distinguish "already
+// repo-relative" from "scoped to a different repo than the one
+// currently being scanned".
+var knownRepoPrefixes = []string{
+	"theraprac-api/",
+	"theraprac-web/",
+	"theraprac-infra/",
+	"theraprac-workspace/",
+	"as/",
+}
+
+func containsRepoPrefix(p string) bool {
+	for _, pfx := range knownRepoPrefixes {
+		if strings.HasPrefix(p, pfx) {
+			return true
+		}
+	}
+	return false
 }
 
 // defaultGitRunner runs `git -C <root> <args...>` and returns

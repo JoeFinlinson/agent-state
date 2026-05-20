@@ -147,7 +147,7 @@ func TestCheckGitChurn_FlagsAboveThreshold(t *testing.T) {
 		}
 		return []byte(strings.Join(lines, "\n")), nil
 	}
-	findings := checkGitChurn(p, approved, repoRoot, DefaultThresholds(), runner)
+	findings := checkGitChurn(p, p.RawText, approved, repoRoot, DefaultThresholds(), runner)
 	if len(findings) != 1 || findings[0].Category != CategoryGitChurn {
 		t.Errorf("expected 1 git-churn finding; got %v", findings)
 	}
@@ -163,7 +163,48 @@ func TestCheckGitChurn_NoFindingBelowThreshold(t *testing.T) {
 	runner := func(root string, args []string) ([]byte, error) {
 		return []byte("abc123 c1\ndef456 c2"), nil
 	}
-	if got := checkGitChurn(p, approved, repoRoot, DefaultThresholds(), runner); len(got) != 0 {
+	if got := checkGitChurn(p, p.RawText, approved, repoRoot, DefaultThresholds(), runner); len(got) != 0 {
 		t.Errorf("2 commits < churn cutoff; expected no findings; got %v", got)
+	}
+}
+
+// TestCheckGitChurn_StripsRepoPrefix verifies the review F1 fix:
+// workspace-prefixed paths (e.g. "theraprac-api/internal/foo.go")
+// are stripped to repo-relative form before being passed to `git
+// log` inside the per-repo root.
+func TestCheckGitChurn_StripsRepoPrefix(t *testing.T) {
+	p := &plan.Plan{
+		ScopeRepos: []string{"theraprac-api"},
+		RawText:    "Touch theraprac-api/internal/auth/middleware.go",
+	}
+	approved := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	repoRoot := func(name string) (string, bool) { return "/wsroot/" + name, true }
+
+	var capturedArgs []string
+	runner := func(root string, args []string) ([]byte, error) {
+		capturedArgs = append([]string(nil), args...)
+		// Return enough commits to trip churn.
+		var lines []string
+		for i := 0; i < 12; i++ {
+			lines = append(lines, "abc123 c")
+		}
+		return []byte(strings.Join(lines, "\n")), nil
+	}
+	findings := checkGitChurn(p, p.RawText, approved, repoRoot, DefaultThresholds(), runner)
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding; got %v", findings)
+	}
+	// Args end with the path list after the `--` sentinel.
+	foundStripped := false
+	for _, a := range capturedArgs {
+		if a == "internal/auth/middleware.go" {
+			foundStripped = true
+		}
+		if a == "theraprac-api/internal/auth/middleware.go" {
+			t.Errorf("workspace-prefixed path was not stripped: %v", capturedArgs)
+		}
+	}
+	if !foundStripped {
+		t.Errorf("expected stripped path `internal/auth/middleware.go` in git args; got %v", capturedArgs)
 	}
 }

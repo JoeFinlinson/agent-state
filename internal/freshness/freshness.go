@@ -1,22 +1,30 @@
 // Package freshness implements the I-711 plan/SBAR freshness gate
-// that fires inside `command.Start` between worktree creation and
-// the activation changelog entry. Re-validates plan premises
-// against the current code state so a stale plan can't be silently
-// activated.
+// that fires inside `command.Start` BEFORE worktree creation (so a
+// refusal can't leave orphan filesystem state). Re-validates plan
+// premises against the current code state so a stale plan can't be
+// silently activated.
 //
-// Two-phase design:
+// Current implementation is heuristics-only:
 //
-//   - Cheap heuristics phase (this package, no LLM): file existence
-//     on plan-referenced paths, dependency-closure keyword match,
-//     age threshold, git churn on touched paths.
-//   - Claude sub-agent phase (optional, gated on engine != nil and
-//     heuristic drift signal): builds a freshness prompt and runs
-//     the existing Claude integration; verdict can promote/demote
-//     a heuristic finding.
+//   - File existence on plan-referenced paths.
+//   - Age threshold (Drift after 7 days, Stale after 14 days; see
+//     DefaultThresholds for the production cutoffs).
+//   - Dependency-closure keyword match against the plan's Approach
+//     section: if a depends_on item closed since plan_approved_at
+//     and its recommendation/assessment shares a keyword with the
+//     plan's Approach, that's a Drift candidate.
+//   - Git churn on touched paths (>= 10 commits since approval on
+//     any plan-touched path inside a scope repo → Drift candidate).
+//
+// A Claude sub-agent phase that would promote/demote heuristic
+// verdicts is the natural next iteration, but is NOT wired in this
+// package — CategoryClaude exists as a stable enum value for that
+// follow-up. CheckOpts has no Engine field today.
 //
 // Verdict is one of Fresh / Drift / Stale. Cache the verdict at
 // `<workspace>/.as/cache/freshness/<id>-<sha256(plan)>-<head>.json`
-// so a same-state re-start is instant.
+// so a same-state re-start is instant. Stale verdicts are NOT
+// cached (so re-prep is always re-evaluated).
 package freshness
 
 import (
