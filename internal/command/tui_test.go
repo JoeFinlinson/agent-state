@@ -493,3 +493,18 @@ func TestTui_RecomputeFacets_NilItemSafe(t *testing.T) {
 			m.facetResults, m.displayedOrder)
 	}
 }
+
+// T-379: the status surface panel renders 4 section lines.
+func TestTui_StatusSurfaceRendersFourSections(t *testing.T) {
+	out, rc := tuiRender(t, TuiOpts{Width: 160})
+	if rc != 0 {
+		t.Fatalf("rc=%d", rc)
+	}
+	for _, want := range []string{
+		"status (window:", "DONE", "IN-FLIGHT", "NEEDS-YOU", "PROPOSED-NEXT",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("status surface missing %q\n%s", want, out)
+		}
+	}
+}
