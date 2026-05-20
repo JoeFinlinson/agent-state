@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -5366,45 +5367,97 @@ func extractRecommendation(output string) string {
 	}
 
 	lines := strings.Split(output, "\n")
-	var recLine string
 
-	for i, line := range lines {
-		lower := strings.ToLower(line)
-		if !strings.Contains(lower, "recommendation") {
-			continue
-		}
+	// I-718: collect ALL header-shape candidate extractions, then
+	// prefer the LAST one whose extracted text begins with a
+	// recognized verdict token. Previous logic broke on the FIRST
+	// "recommendation"-containing line and returned its extraction,
+	// which picked narrative ("the updated recommendation
+	// reflects...") over the trailing verdict header
+	// ("RECOMMENDATION: Accept"). Bug surfaced on three Sprint 2
+	// plan reviews (I-717 twice, T-382 once).
+	//
+	// recHeader matches lines that LOOK like a verdict header:
+	// only markdown-bold (`**`), markdown-heading (`##`), and
+	// whitespace before the literal "recommendation" (case-
+	// insensitive), then a word boundary. Catches both the
+	// inline-separator form (`**RECOMMENDATION**: Accept`,
+	// `RECOMMENDATION — Accept`) and the markdown-heading form
+	// (`## RECOMMENDATION` with the verdict on the next line).
+	// Narrative mentions like "the updated recommendation
+	// reflects..." don't match because they have prose words
+	// before "recommendation".
+	recHeader := regexp.MustCompile(`(?i)^[\s*#]*recommendation\b`)
 
-		// Try to extract from same line after ":" or "—".
-		// ":" first because "RECOMMENDATION: Accept — reason" needs the colon
-		// to capture "Accept", not the em dash which loses it.
+	extractRest := func(i int, line string) string {
+		// Try same-line ":" first, then "—" — colons preserve "Accept"
+		// in "RECOMMENDATION: Accept — reason" where em-dash would
+		// drop it.
 		for _, sep := range []string{":", "—"} {
 			if idx := strings.LastIndex(line, sep); idx >= 0 {
 				rest := strings.TrimSpace(line[idx+len(sep):])
 				rest = strings.ReplaceAll(rest, "**", "")
 				rest = strings.ReplaceAll(rest, "*", "")
 				if rest != "" {
-					recLine = rest
-					break
+					return rest
 				}
 			}
 		}
-
-		// If same line was just a header, grab the next non-empty line
-		if recLine == "" && i+1 < len(lines) {
-			for j := i + 1; j < len(lines) && j <= i+3; j++ {
-				next := strings.TrimSpace(lines[j])
-				next = strings.ReplaceAll(next, "**", "")
-				next = strings.ReplaceAll(next, "*", "")
-				if next != "" && !strings.HasPrefix(next, "#") {
-					recLine = next
-					break
-				}
+		// Header line had no value — grab the next non-empty,
+		// non-heading line (up to 3 ahead).
+		for j := i + 1; j < len(lines) && j <= i+3; j++ {
+			next := strings.TrimSpace(lines[j])
+			next = strings.ReplaceAll(next, "**", "")
+			next = strings.ReplaceAll(next, "*", "")
+			if next != "" && !strings.HasPrefix(next, "#") {
+				return next
 			}
 		}
+		return ""
+	}
 
-		if recLine != "" {
-			break
+	verdictTokens := []string{"accept", "reject", "feedback", "split", "interactive"}
+	hasVerdictToken := func(s string) bool {
+		ls := strings.ToLower(s)
+		// Pick the first whitespace/punctuation-delimited token —
+		// "Stale — keyword fresh was incidental" should NOT match
+		// "fresh" inside the rationale, only the leading "Stale".
+		first := strings.TrimLeft(ls, " \t-—:*")
+		for _, sep := range []string{" ", "\t", "—", "-", ":", ","} {
+			if idx := strings.Index(first, sep); idx >= 0 {
+				first = first[:idx]
+				break
+			}
 		}
+		for _, tok := range verdictTokens {
+			if first == tok {
+				return true
+			}
+		}
+		// Also accept "accept" as a substring of "accept with notes"
+		// to keep the existing "accept with notes" path working when
+		// the leading token is "accept" followed by " with".
+		return false
+	}
+
+	var lastVerdict, lastAny string
+	for i, line := range lines {
+		if !recHeader.MatchString(line) {
+			continue
+		}
+		rest := extractRest(i, line)
+		if rest == "" {
+			continue
+		}
+		lastAny = rest
+		if hasVerdictToken(rest) {
+			lastVerdict = rest
+		}
+	}
+
+	recLine := lastVerdict
+	if recLine == "" {
+		recLine = lastAny
 	}
 
 	if recLine == "" {
