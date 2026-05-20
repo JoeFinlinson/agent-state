@@ -26,9 +26,12 @@ type CheckOpts struct {
 	GitRunner func(root string, args []string) ([]byte, error)
 
 	// RepoRoot maps a scope-repo name to its on-disk path. The
-	// production caller wires this to the worktree layout (each
-	// scope_repo lives at `<worktree>/<repo>`). When nil, all repos
-	// are treated as not-present (git-churn heuristic no-ops).
+	// production caller wires this to the standard agent-workspace
+	// layout (each scope_repo lives at `<dirname(cfg.Root())>/<repo>`).
+	// When nil, all repos are treated as not-present: git-churn
+	// heuristic no-ops AND file-existence heuristic skips
+	// known-prefix paths (I-719). Unrecognized-prefix paths still
+	// fall back to workspace-relative resolution regardless.
 	RepoRoot func(name string) (string, bool)
 
 	// SkipCache disables read+write to the freshness cache. Used
@@ -105,7 +108,12 @@ func Check(cfg *config.Config, s *store.Store, id string, opts CheckOpts) (*Resu
 	approvedAt, _ := parseRFC3339(item.PlanApprovedAt)
 
 	var findings []Finding
-	findings = append(findings, checkFileExistence(planBody, workspaceRoot, statter)...)
+	// I-719: thread repoRoot to file-existence so paths with a
+	// known repo prefix resolve in the sibling repo, not under
+	// workspaceRoot. Without this, plans for `as`-scoped items
+	// fail STALE because `as/internal/foo.go` resolves to
+	// `<workspace>/as/internal/foo.go` which never exists.
+	findings = append(findings, checkFileExistence(planBody, workspaceRoot, repoRoot, statter)...)
 	findings = append(findings, checkAge(approvedAt, now, th)...)
 	findings = append(findings, checkDependencyClosure(loaded, itemDependencies(item), approvedAt, s)...)
 	// Review F6 fix: pass the same planBody used by file-existence

@@ -3,11 +3,51 @@ package command
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/jfinlinson/agent-state/internal/config"
 	"github.com/jfinlinson/agent-state/internal/freshness"
 	"github.com/jfinlinson/agent-state/internal/store"
 )
+
+// defaultRepoRoot resolves a scope-repo name to its conventional
+// on-disk location under the standard agent-workspace layout: each
+// scope repo lives as a SIBLING of the workspace clone, at
+// `<agent-root>/<repo-name>`. The workspace itself is at
+// `<agent-root>/theraprac-workspace`, so `theraprac-workspace`
+// resolves to cfg.Root() directly and every other recognized repo
+// resolves to `filepath.Dir(cfg.Root())/<name>`. Non-standard
+// layouts (e.g., an agent with a stripped-down checkout missing
+// some siblings) get ("", false) for absent repos, which the
+// freshness heuristic treats as fail-open (skip rather than flag
+// missing).
+//
+// statter is injectable so tests can avoid real filesystem probes.
+// In production runFreshnessGate passes os.Stat directly.
+//
+// I-719.
+func defaultRepoRoot(cfg *config.Config, statter func(string) error) func(name string) (string, bool) {
+	if statter == nil {
+		statter = func(path string) error {
+			_, err := os.Stat(path)
+			return err
+		}
+	}
+	return func(name string) (string, bool) {
+		// theraprac-workspace resolves to the workspace itself,
+		// preserving today's workspace-relative behavior for any
+		// docs/* or .plans/* path that happened to be written
+		// with the workspace prefix.
+		if name == "theraprac-workspace" {
+			return cfg.Root(), true
+		}
+		candidate := filepath.Join(filepath.Dir(cfg.Root()), name)
+		if err := statter(candidate); err != nil {
+			return "", false
+		}
+		return candidate, true
+	}
+}
 
 // runFreshnessGate is the command-side bridge between Start and the
 // freshness package. Returns:
@@ -24,7 +64,9 @@ import (
 // I-711 — the public entry point is freshness.Check; this helper
 // glues that into command.StartOpts (specifically --ack-drift).
 func runFreshnessGate(cfg *config.Config, s *store.Store, id string, opts StartOpts) int {
-	result, err := freshness.Check(cfg, s, id, freshness.CheckOpts{})
+	result, err := freshness.Check(cfg, s, id, freshness.CheckOpts{
+		RepoRoot: defaultRepoRoot(cfg, nil),
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: freshness gate errored on %s (%v) — proceeding without re-validation\n", id, err)
 		return 0
