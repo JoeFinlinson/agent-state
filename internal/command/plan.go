@@ -14,6 +14,32 @@ import (
 	"github.com/jfinlinson/agent-state/internal/store"
 )
 
+// loadPlanForValidation loads the per-item plan sidecar and returns
+// (a) the loaded plan (nil if missing), (b) ValidatePlan violations
+// against the loaded plan, and (c) whether the sidecar was found.
+// I-710 — the unified surface used by PlanApprove and PlanCheck.
+// When the sidecar is missing, returns (nil, nil, false): the
+// I-511-era carve-out is preserved so existing callers that
+// approve without a sidecar (legacy items, tests) keep working.
+// Closing this carve-out is tracked separately (see follow-up
+// filed alongside I-710 review).
+func loadPlanForValidation(cfg *config.Config, id string) (*plan.Plan, []quality.Violation, bool) {
+	if cfg == nil {
+		return nil, nil, false
+	}
+	p, err := plan.Load(cfg.PlansDir(), id)
+	if err != nil {
+		fmt.Fprintf(os.Stderr,
+			"plan-approve: could not load .plans/%s.md (%v); proceeding without plan validation. Investigate the sidecar.\n",
+			id, err)
+		return nil, nil, false
+	}
+	if p == nil {
+		return nil, nil, false
+	}
+	return p, quality.ValidatePlan(p), true
+}
+
 // PlanApproveOpts holds flags for `st plan approve`. I-511 added
 // Strict, which refuses approval if any linked plan sidecar contains
 // an un-verifiable acceptance criterion (per plan.ValidateACs).
@@ -106,19 +132,22 @@ func PlanApprove(s *store.Store, cfg *config.Config, id string, opts PlanApprove
 		}
 	}
 
-	// I-710: AC verifiability gate fires unconditionally (lifted out
+	// I-710: plan substance gate fires unconditionally (lifted out
 	// of the `if opts.Strict` branch — analog of the I-589 SBAR flip).
-	// `--strict` is preserved as a no-op alias for backward
-	// compatibility with existing CI invocations.
-	if findings := loadStrictACFindings(cfg, id); len(findings) > 0 {
+	// Runs `quality.ValidatePlan`, which checks (a) Approach is
+	// non-empty and non-scaffold (TODO/TBD/N/A/None), (b) ScopeRepos
+	// is non-empty, and (c) every AC is verifiable per
+	// `plan.ValidateACs`. `--strict` is preserved as a no-op alias
+	// for backward compatibility with existing CI invocations.
+	if _, vios, _ := loadPlanForValidation(cfg, id); quality.HasError(vios) {
 		fmt.Fprintf(os.Stderr,
-			"%s: %d acceptance criterion/criteria not obviously verifiable; refusing approval:\n",
-			id, len(findings))
-		for _, f := range findings {
-			fmt.Fprintf(os.Stderr, "  %s\n", f.String())
+			"%s: plan substance gate failed (%d violation(s)); refusing approval:\n",
+			id, len(vios))
+		for _, v := range vios {
+			fmt.Fprintf(os.Stderr, "  %s\n", v)
 		}
 		fmt.Fprintf(os.Stderr,
-			"Edit .plans/%s.md to make each AC testable (cmd: prefix, named test, or measurable threshold), then re-run `st plan approve %s`.\n",
+			"Edit .plans/%s.md to fix the findings above, then re-run `st plan approve %s`.\n",
 			id, id)
 		return 2
 	}
@@ -283,15 +312,18 @@ func PlanCheck(s *store.Store, cfg *config.Config, id string) int {
 			return 1
 		}
 	}
-	// I-710: re-validate plan-sidecar ACs at the hook surface so a
-	// post-approval edit that knocks an AC back to un-verifiable
-	// closes the plan-before-code gate without requiring an explicit
-	// `st plan reset`. Same posture as the I-589 SBAR re-check above.
-	if findings := loadStrictACFindings(cfg, id); len(findings) > 0 {
-		fmt.Printf("approved but %d acceptance criterion/criteria are no longer verifiable — fix .plans/%s.md or run `st plan reset %s`\n",
-			len(findings), id, id)
-		for _, f := range findings {
-			fmt.Fprintf(os.Stderr, "  %s\n", f.String())
+	// I-710: re-validate plan substance at the hook surface so a
+	// post-approval edit that knocks Approach/ScopeRepos/ACs back to
+	// scaffold or non-verifiable closes the plan-before-code gate
+	// without requiring an explicit `st plan reset`. Same posture as
+	// the I-589 SBAR re-check above. All output to stderr so the
+	// stdout verdict line stays parseable by hook callers.
+	if _, vios, _ := loadPlanForValidation(cfg, id); quality.HasError(vios) {
+		fmt.Fprintf(os.Stderr,
+			"approved but %d plan substance violation(s) — fix .plans/%s.md or run `st plan reset %s`\n",
+			len(vios), id, id)
+		for _, v := range vios {
+			fmt.Fprintf(os.Stderr, "  %s\n", v)
 		}
 		return 1
 	}
@@ -366,19 +398,14 @@ func fallback(s, def string) string {
 	return s
 }
 
-// loadStrictACFindings loads the per-item plan sidecar and returns
-// ValidateACs findings against its acceptance criteria. Distinguishes
-// three cases by stderr signal:
-//   - Missing sidecar: silent — operator may have approved via `st
-//     plan approve` directly without authoring a sidecar, and strict
-//     mode shouldn't gate on absence of data.
-//   - Parse error: emit a stderr warning. Approval proceeds (don't
-//     punish the operator for a corrupt file by changing behavior),
-//     but they see why strict couldn't validate.
-//   - Loaded successfully: return ValidateACs findings.
-//
-// I-511: used by `st plan approve --strict` to refuse approval when
-// the plan content has un-verifiable ACs.
+// loadStrictACFindings is retained as the legacy AC-only validator
+// surface for any callers that need plan.ACFinding directly (e.g.,
+// future tooling that wants the raw finding shape). The unified
+// substance gate used by `PlanApprove`/`PlanCheck` now routes
+// through `loadPlanForValidation` + `quality.ValidatePlan` so
+// Approach + ScopeRepos + ACs are all checked together. Behavior on
+// missing sidecar matches the I-511 carve-out: returns nil, the
+// gate has no data to fire against. I-710.
 func loadStrictACFindings(cfg *config.Config, id string) []plan.ACFinding {
 	if cfg == nil {
 		return nil
@@ -386,16 +413,16 @@ func loadStrictACFindings(cfg *config.Config, id string) []plan.ACFinding {
 	p, err := plan.Load(cfg.PlansDir(), id)
 	if err != nil {
 		// Surface non-IsNotExist errors so a corrupt sidecar doesn't
-		// silently neutralize --strict. plan.Load already returns
+		// silently neutralize the gate. plan.Load already returns
 		// (nil, nil) for IsNotExist, so any non-nil err here is a
 		// real parse / read failure worth logging.
 		fmt.Fprintf(os.Stderr,
-			"plan-approve --strict: could not load .plans/%s.md (%v); proceeding without AC validation. Investigate the sidecar before relying on --strict.\n",
+			"plan-approve: could not load .plans/%s.md (%v); proceeding without AC validation. Investigate the sidecar.\n",
 			id, err)
 		return nil
 	}
 	if p == nil {
-		// Sidecar doesn't exist — strict mode has nothing to gate on.
+		// Sidecar doesn't exist — the gate has nothing to validate.
 		return nil
 	}
 	return plan.ValidateACs(p.ACs)

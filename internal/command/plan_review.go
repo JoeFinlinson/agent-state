@@ -42,7 +42,11 @@ func runPlanReview(s *store.Store, cfg *config.Config, id string, item *model.It
 	}
 	cwd := cfg.Root()
 
-	for iter := 0; iter <= maxPlanReviewAutoFixIterations; iter++ {
+	// Loop bound is strictly less-than so the final iteration that
+	// fails to auto-fix falls out into the post-loop fail-closed
+	// path. The Accept/Reject/catch-all branches return inline;
+	// only the Accept-with-notes branch continues the loop.
+	for iter := 0; iter < maxPlanReviewAutoFixIterations; iter++ {
 		// Build the prompt and execute claude.
 		prompt := buildPlanReviewPrompt(id, item)
 		step := config.RunStepDef{Type: "claude", Prompt: prompt}
@@ -65,14 +69,23 @@ func runPlanReview(s *store.Store, cfg *config.Config, id string, item *model.It
 			return 0
 		}
 
-		// Accept with notes → auto-fix and re-run.
-		if isAcceptWithNotes(rec) && iter < maxPlanReviewAutoFixIterations {
+		// Accept with notes → auto-fix and re-run. Reject the
+		// approval if the auto-fix engine call itself fails (any
+		// non-Passed StepResult), so an opaque LLM/store failure
+		// does not silently waive the gate.
+		if isAcceptWithNotes(rec) {
 			fmt.Fprintf(os.Stderr,
 				"%s: plan review returned 'Accept with notes' — auto-fixing (attempt %d/%d)\n",
 				id, iter+1, maxPlanReviewAutoFixIterations)
 			notes := extractNotesFromReview(sr.FullOutput)
-			var resultRef StepResult
-			runAutoFixFromNotes(s, cfg, id, "", item, "plan review", notes, RunOpts{}, engine, cwd, "", &resultRef)
+			var fixResult StepResult
+			runAutoFixFromNotes(s, cfg, id, "", item, "plan review", notes, RunOpts{}, engine, cwd, "", &fixResult)
+			if !fixResult.Passed && fixResult.Error != "" {
+				fmt.Fprintf(os.Stderr,
+					"%s: plan-review auto-fix failed (%s) — refusing approval. Re-run `st plan approve %s` to retry, or `st plan reset %s` to redraft.\n",
+					id, fixResult.Error, id, id)
+				return 2
+			}
 			// Reload item — auto-fix may have mutated fields.
 			if refreshed, ok := s.Get(id); ok {
 				item = refreshed
@@ -96,11 +109,12 @@ func runPlanReview(s *store.Store, cfg *config.Config, id string, item *model.It
 		return 2
 	}
 
-	// Exhausted auto-fix iterations on Accept-with-notes — treat as
-	// pass with a stderr breadcrumb so the operator knows the
-	// sub-agent stopped converging.
+	// Exhausted auto-fix iterations without converging on a clean
+	// Accept — fail closed. The PR review (post-I-710) called out
+	// that an opaque LLM that never settles must not silently waive
+	// the substance check, matching the file-header invariant.
 	fmt.Fprintf(os.Stderr,
-		"%s: plan review reached the auto-fix iteration cap (%d) — proceeding with last accepted state\n",
-		id, maxPlanReviewAutoFixIterations)
-	return 0
+		"%s: plan review reached the auto-fix iteration cap (%d) without converging on a clean Accept — refusing approval. Run `st plan reset %s` and redraft.\n",
+		id, maxPlanReviewAutoFixIterations, id)
+	return 2
 }
