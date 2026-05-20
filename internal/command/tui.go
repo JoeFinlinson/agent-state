@@ -229,6 +229,14 @@ func doRefresh(m tuiModel) tuiModel {
 		// the composite renders the last-known state until the operator
 		// retargets via --item.
 	}
+	// T-374 F1: clamp the agent cursor so a deregistration during live
+	// mode does not leave the highlight pointing past the end (cursor
+	// would visually disappear until the user nudges it).
+	if n := len(m.sortedAgents()); n == 0 {
+		m.agentCursor = 0
+	} else if m.agentCursor >= n {
+		m.agentCursor = n - 1
+	}
 	return m
 }
 
