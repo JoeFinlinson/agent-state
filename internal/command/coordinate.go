@@ -240,7 +240,10 @@ func superviseItem(s *store.Store, cfg *config.Config, b *coordinator.Boundary,
 		if postItem == nil {
 			postItem = baseItem // store momentarily unreadable; degrade, don't crash
 		}
-		st.BeginAttempt(time.Now(), coordinator.SampleProgress(cfg, postItem).ChangelogLen)
+		// T-380: capture post-spawn cost too, so D2 measures THIS WORKER's
+		// burn (delta from this baseline) instead of item-lifetime rollup.
+		postSnap := coordinator.SampleProgress(cfg, postItem)
+		st.BeginAttempt(time.Now(), postSnap.ChangelogLen, postSnap.AICostUSD)
 		fmt.Printf("coordinate: spawned worker on %s (attempt %d, size-class %s, observe: st watch | st transcript %s)\n",
 			itemID, st.RespawnCount+1, st.SizeClass, itemID)
 

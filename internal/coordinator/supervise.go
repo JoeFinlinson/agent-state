@@ -55,6 +55,15 @@ type WorkerState struct {
 	// attempt (a respawn reproducing the same failure must read as "no
 	// progress THIS attempt"). Set via WorkerState.BeginAttempt (loop.go).
 	attemptStartChangelog int
+
+	// attemptStartCostUSD is the item's rolled-up cost at the moment the
+	// CURRENT attempt was spawned (T-380). D2 measures THIS WORKER's
+	// burn — `current - attemptStartCostUSD` — NOT item-lifetime spend,
+	// which would accumulate across many sessions and falsely
+	// silence/trigger D2 depending on the item's history. Sibling of
+	// attemptStartChangelog (T-363's per-attempt progress baseline);
+	// set via BeginAttempt.
+	attemptStartCostUSD float64
 }
 
 // Predicate is a contract-§7 escalation predicate the detectors raise.
@@ -265,14 +274,16 @@ func parseCostUSD(raw any) float64 {
 	return 0
 }
 
-// DetectStuckByCost implements D2 (T-365): an item burning ≥
-// stuck_multiplier × cost-baseline-for-its-size-class. This is the
-// dollar-denominated successor to the wall-clock DetectStuck proxy —
-// consistent with K1 (per_item budget cap is dollars) and matching the
-// §7-D2 predicate text ("consuming ≥ K2 × median for size-class"). The
-// rollup it reads is I-369's Option C: subagent turns accumulate to the
-// parent's `time_tracking.ai_cost_usd`, surfaced into ProgressSnapshot
-// by SampleProgress.
+// DetectStuckByCost implements D2 (T-365 + T-380): a WORKER burning ≥
+// stuck_multiplier × cost-baseline-for-the-item's-size-class IN THIS
+// ATTEMPT. The first argument is the PER-ATTEMPT cost delta (see
+// WorkerState.attemptStartCostUSD), NOT the item's lifetime rollup —
+// caller (Decide) computes `last.AICostUSD - st.attemptStartCostUSD`
+// before invoking. Dollar-denominated, consistent with K1 (per_item
+// budget cap is dollars) and matching the §7-D2 predicate text
+// ("consuming ≥ K2 × median for size-class"). The underlying cost
+// data is I-369's Option C rollup, surfaced into ProgressSnapshot by
+// SampleProgress.
 //
 // Preconditions enforced by the caller (Decide in loop.go), NOT by this
 // function:

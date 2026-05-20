@@ -113,9 +113,9 @@ func TestDecide(t *testing.T) {
 func TestWorkerStateAttemptLifecycle(t *testing.T) {
 	st := &WorkerState{}
 	t0 := time.Now()
-	st.BeginAttempt(t0, 7)
-	if st.SpawnedAt != t0 || st.attemptStartChangelog != 7 {
-		t.Fatal("BeginAttempt must record spawn time + per-attempt changelog baseline")
+	st.BeginAttempt(t0, 7, 12.5)
+	if st.SpawnedAt != t0 || st.attemptStartChangelog != 7 || st.attemptStartCostUSD != 12.5 {
+		t.Fatal("BeginAttempt must record spawn time + per-attempt changelog AND cost baseline")
 	}
 	st.RecordRespawn("sigA")
 	if st.RespawnCount != 1 || st.LastFailSig != "sigA" {
@@ -125,5 +125,50 @@ func TestWorkerStateAttemptLifecycle(t *testing.T) {
 	if !MadeItemProgress(ProgressSnapshot{ChangelogLen: st.attemptStartChangelog},
 		ProgressSnapshot{ChangelogLen: st.attemptStartChangelog + 1}) {
 		t.Error("changelog past the per-attempt baseline must be progress")
+	}
+}
+
+// T-380: D2 must compare THIS WORKER's spend against the baseline, not
+// the item's lifetime rollup. An item carrying $20 of prior-session
+// spend that grows by only $5 this attempt is NOT stuck — delta is $5,
+// under K2×$10. Same item growing to $60 (delta $40) IS stuck.
+func TestDecide_D2UsesPerAttemptDelta(t *testing.T) {
+	b := &Boundary{RespawnLimit: 3, StuckMultiplier: 3}
+	now := time.Now()
+	mkSt := func(priorCost float64) *WorkerState {
+		st := &WorkerState{SizeClass: 60 * time.Minute, CostBaseline: 10.0}
+		st.BeginAttempt(now, 0, priorCost) // record per-attempt cost baseline
+		return st
+	}
+	// Item already at $20 from prior sessions; this attempt adds only $5.
+	st := mkSt(20.0)
+	d := Decide(st, []ProgressSnapshot{
+		{PIDAlive: true, AICostUSD: 25.0, SampledAt: now.Add(2 * time.Minute)},
+	}, b, false, now.Add(2*time.Minute))
+	if d.Action == ActionEscalate {
+		t.Errorf("delta=$5 < K2×$10=$30 must NOT escalate D2 (item lifetime $25 is irrelevant), got %v %s",
+			d.Action, d.Verdict.Predicate)
+	}
+
+	// Same item; this attempt burned to $60 — delta $40, over the threshold.
+	st = mkSt(20.0)
+	d = Decide(st, []ProgressSnapshot{
+		{PIDAlive: true, AICostUSD: 60.0, SampledAt: now.Add(2 * time.Minute)},
+	}, b, false, now.Add(2*time.Minute))
+	if d.Action != ActionEscalate || d.Verdict.Predicate != PredicateD2 {
+		t.Errorf("delta=$40 ≥ K2×$10=$30 must escalate D2, got %v %s",
+			d.Action, d.Verdict.Predicate)
+	}
+
+	// Defensive: if attemptStartCostUSD somehow exceeds current (substrate
+	// edit, clock skew), delta clamps to 0 — D2 stays silent rather than
+	// firing on a phantom negative.
+	st = mkSt(100.0)
+	d = Decide(st, []ProgressSnapshot{
+		{PIDAlive: true, AICostUSD: 50.0, SampledAt: now.Add(2 * time.Minute)},
+	}, b, false, now.Add(2*time.Minute))
+	if d.Action == ActionEscalate {
+		t.Errorf("negative delta must clamp to 0 (no false D2), got %v %s",
+			d.Action, d.Verdict.Predicate)
 	}
 }
