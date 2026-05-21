@@ -449,9 +449,14 @@ func TestCreateItemReview_AgentModeAmbiguousKeeps(t *testing.T) {
 // TestCreateItemReview_NonAgentNonTTYStillSkips: the original
 // non-TTY skip is preserved for non-agent contexts (genuine
 // pipe-into-st-create from CI runners that don't set CLAUDECODE).
-// SelectMenu is nil AND CLAUDECODE is unset — the review should NOT
-// fire (preserves the I-588 carve-out for piped contexts that would
-// hang on the operator menu).
+// The operative guard in create_review.go is the three-way
+// conjunction `engine.SelectMenu == nil && !term.IsTerminal(stdin)
+// && !isAgent`. All three must hold for the skip to fire:
+// SelectMenu is nil (test wires RunClaude only), stdin is not a
+// TTY (true under `go test`), and isAgent is false (CLAUDECODE
+// cleared below). The review should NOT fire here — preserves the
+// I-588 carve-out for piped contexts that would hang on the
+// operator menu.
 func TestCreateItemReview_NonAgentNonTTYStillSkips(t *testing.T) {
 	// Explicitly clear CLAUDECODE in case the test harness inherits it.
 	t.Setenv("CLAUDECODE", "")

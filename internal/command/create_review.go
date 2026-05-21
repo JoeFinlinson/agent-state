@@ -25,9 +25,20 @@ import (
 // "Accept with notes" auto-fix, same Accept/Reject/Feedback gate menu, same
 // extractRecommendation / extractNotesFromReview helpers.
 //
+// Outcomes:
+//   - Accept (operator menu or agent-mode shortcut) — item kept as-is.
+//   - Accept with notes — sub-agent auto-fixes via `st update`, then re-reviews.
+//   - Reject (operator menu "2" or agent-mode shortcut) — DESTRUCTIVE: item
+//     is closed and moved to `agent-state/archive/` via `archiveAbandonedItem`
+//     with `status: abandoned`. In agent mode this fires without operator
+//     confirmation; in operator mode the operator selected option "2".
+//   - Feedback (operator menu "3" only) — operator types direction, sub-agent
+//     revises in a constrained-feedback loop.
+//   - Ambiguous verdict in agent mode — item kept (no operator to consult; do
+//     not risk a destructive Reject on a non-explicit verdict).
+//
 // Failure is non-fatal: a claude error or missing engine prints a stderr
-// warning and returns. The new item is already on disk and a follow-up
-// `st update <id> sbar` is always available.
+// warning and returns without touching the item.
 func runItemReview(s *store.Store, cfg *config.Config, itemID string, item *model.Item, engine RunEngine) {
 	if item == nil {
 		return
@@ -68,7 +79,14 @@ func runItemReview(s *store.Store, cfg *config.Config, itemID string, item *mode
 	// Operator-TTY behavior (the original skip) is unchanged for
 	// genuine pipe-into-st-create contexts: tests, CI runners, and
 	// in-process harnesses that aren't tagged CLAUDECODE=1 still skip.
-	isAgent := os.Getenv("CLAUDECODE") == "1"
+	// Truthy match instead of `== "1"` so a future Claude Code release
+	// that ships e.g. `CLAUDECODE=2` (or a version string) still routes
+	// agent-spawned creates through the review. The risk of a strict
+	// equality check is silent regression: the agent-mode branch would
+	// stop firing, items would resume shipping with TODO scaffold SBAR,
+	// and the only signal would be I-589's plan-approve gate catching
+	// them hours later. Code-review finding on PR #155.
+	isAgent := os.Getenv("CLAUDECODE") != ""
 	if engine.SelectMenu == nil && !term.IsTerminal(int(os.Stdin.Fd())) && !isAgent {
 		return
 	}
