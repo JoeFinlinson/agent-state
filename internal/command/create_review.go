@@ -3,6 +3,7 @@ package command
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/jfinlinson/agent-state/internal/config"
@@ -50,16 +51,25 @@ func runItemReview(s *store.Store, cfg *config.Config, itemID string, item *mode
 	if os.Getenv("AS_INTERNAL_NO_REVIEW") == "1" {
 		return
 	}
-	// Non-interactive contexts (piped stdin, CI runners, in-process test
-	// harnesses) skip the review because the gate prompts for operator input
-	// (Accept/Reject/Feedback) and an empty stdin would hang the process.
-	// Tests that exercise the review path inject a mock engine + mock
-	// SelectMenu, which short-circuits this check by not going through the
-	// CLI entry point — they call command.Create() directly with a fake
-	// engine, and the fake's SelectMenu replaces the TTY-bound default.
-	// The `term.IsTerminal` guard is applied AFTER the engine.RunClaude
-	// nil check above so test engines with a real SelectMenu still run.
-	if engine.SelectMenu == nil && !term.IsTerminal(int(os.Stdin.Fd())) {
+	// I-758: detect agent context via the CLAUDECODE=1 env var Claude
+	// Code sets in every tool subprocess. Previously this function
+	// silently returned on any non-TTY context (line below), which
+	// meant every agent-spawned `st create` shipped its item with TODO
+	// scaffolds — the I-588 review never fired. Filed after the
+	// 2026-05-21 incident where I-731/I-732/I-733 sat with scaffold
+	// SBAR for 17 hours after creation.
+	//
+	// In agent mode the review runs but the operator-input menu is
+	// short-circuited deterministically by the sub-agent's
+	// recommendation: Accept → keep; Reject → archive; Feedback /
+	// unknown → keep (a no-op rather than indefinite hang). The
+	// auto-Accept-with-notes loop is unchanged.
+	//
+	// Operator-TTY behavior (the original skip) is unchanged for
+	// genuine pipe-into-st-create contexts: tests, CI runners, and
+	// in-process harnesses that aren't tagged CLAUDECODE=1 still skip.
+	isAgent := os.Getenv("CLAUDECODE") == "1"
+	if engine.SelectMenu == nil && !term.IsTerminal(int(os.Stdin.Fd())) && !isAgent {
 		return
 	}
 
@@ -109,18 +119,50 @@ func runItemReview(s *store.Store, cfg *config.Config, itemID string, item *mode
 			continue
 		}
 
-		choice := showReviewGate(ReviewGateInfo{
-			ItemID:         itemID,
-			Title:          item.Title,
-			GateType:       "Item Review",
-			Iteration:      iteration,
-			Recommendation: rec,
-			ReviewDuration: reviewDur,
-		}, []menuOption{
-			{"1", "Accept   — keep the item and proceed"},
-			{"2", "Reject   — archive the item (abandon)"},
-			{"3", "Feedback — type direction, claude revises (constrained)"},
-		}, engine)
+		// I-758: agent context with no SelectMenu wired — convert the
+		// sub-agent's recommendation into a deterministic choice without
+		// prompting (the TTY menu would hang on empty stdin).
+		// Accept-with-notes was already auto-fixed above; remaining
+		// cases are Accept / Reject / Feedback-or-unknown.
+		//
+		// Tests that wire engine.SelectMenu still go through
+		// showReviewGate even when CLAUDECODE=1 is inherited from a
+		// Claude Code parent — the agent-mode shortcut is the
+		// "no operator-input mechanism available" fallback, not a
+		// CLAUDECODE-only override.
+		var choice string
+		if isAgent && engine.SelectMenu == nil {
+			loweredRec := strings.ToLower(rec)
+			switch {
+			case strings.Contains(loweredRec, "reject"):
+				choice = "2"
+				fmt.Fprintf(os.Stderr, "[%s] agent-mode item review: Reject verdict — auto-archiving\n", itemID)
+			case strings.Contains(loweredRec, "accept"):
+				choice = "1"
+				fmt.Fprintf(os.Stderr, "[%s] agent-mode item review: Accept — keeping item\n", itemID)
+			default:
+				// Feedback or unknown recommendation in agent mode: keep
+				// the item rather than risk a destructive Reject on an
+				// ambiguous verdict. The Accept-with-notes auto-fix loop
+				// above already burned its iterations; any further
+				// refinement is an operator-side decision.
+				choice = "1"
+				fmt.Fprintf(os.Stderr, "[%s] agent-mode item review: ambiguous verdict (%q) — keeping item (no operator to consult)\n", itemID, rec)
+			}
+		} else {
+			choice = showReviewGate(ReviewGateInfo{
+				ItemID:         itemID,
+				Title:          item.Title,
+				GateType:       "Item Review",
+				Iteration:      iteration,
+				Recommendation: rec,
+				ReviewDuration: reviewDur,
+			}, []menuOption{
+				{"1", "Accept   — keep the item and proceed"},
+				{"2", "Reject   — archive the item (abandon)"},
+				{"3", "Feedback — type direction, claude revises (constrained)"},
+			}, engine)
+		}
 
 		switch choice {
 		case "^C":
