@@ -743,3 +743,92 @@ func TestWorktreeForItemDisabledOrEmpty(t *testing.T) {
 		t.Errorf("empty id → %q, want empty", got)
 	}
 }
+
+// I-778: AgentRoot prefers .as/agent-workspace.yaml under the invocation
+// site so the correct per-agent root is recoverable even when the
+// discovered c.root resolves to a peer agent's workspace.
+func TestAgentRootFromWorkspaceYaml(t *testing.T) {
+	tmp := t.TempDir()
+	agentRoot := filepath.Join(tmp, "theraprac-agent-b")
+	workspace := filepath.Join(agentRoot, "theraprac-workspace")
+	os.MkdirAll(filepath.Join(agentRoot, ".as"), 0755)
+	os.MkdirAll(workspace, 0755)
+	yaml := "agent_id: agent-b\npath: " + agentRoot + "\n"
+	os.WriteFile(filepath.Join(agentRoot, ".as", "agent-workspace.yaml"), []byte(yaml), 0644)
+
+	cfg := &Config{
+		root:     workspace,
+		startDir: workspace,
+		Worktree: &WorktreeConfig{Enabled: true, BaseDir: "worktrees", ParentDir: ".."},
+	}
+	got := cfg.AgentRoot()
+	if got != agentRoot {
+		t.Errorf("AgentRoot() = %q, want %q", got, agentRoot)
+	}
+}
+
+// I-778 regression: when ST_ROOT leaks a peer agent's workspace path
+// into cfg.root, AgentRoot must still resolve to the correct agent
+// (the one whose .as/agent-workspace.yaml lives at the invocation
+// site).
+func TestAgentRootSTRootLeakRegression(t *testing.T) {
+	tmp := t.TempDir()
+	// Peer agent (the leaked ST_ROOT target) — has a workspace, no marker yaml.
+	peerAgent := filepath.Join(tmp, "theraprac-agent-a")
+	peerWorkspace := filepath.Join(peerAgent, "theraprac-workspace")
+	os.MkdirAll(peerWorkspace, 0755)
+
+	// Real agent — has .as/agent-workspace.yaml pointing at its own root,
+	// and an as/ clone where the invocation originated.
+	realAgent := filepath.Join(tmp, "theraprac-agent-b")
+	realAs := filepath.Join(realAgent, "as")
+	os.MkdirAll(filepath.Join(realAgent, ".as"), 0755)
+	os.MkdirAll(realAs, 0755)
+	yaml := "agent_id: agent-b\npath: " + realAgent + "\n"
+	os.WriteFile(filepath.Join(realAgent, ".as", "agent-workspace.yaml"), []byte(yaml), 0644)
+
+	cfg := &Config{
+		root:     peerWorkspace, // ST_ROOT leak: cfg.root points at the peer
+		startDir: realAs,        // invocation site: real agent's as/ clone
+		Worktree: &WorktreeConfig{Enabled: true, BaseDir: "worktrees", ParentDir: ".."},
+	}
+	got := cfg.AgentRoot()
+	if got != realAgent {
+		t.Errorf("AgentRoot() = %q, want %q (must recover correct agent under ST_ROOT leak)", got, realAgent)
+	}
+}
+
+// I-778: when no .as/agent-workspace.yaml is found anywhere on the
+// walk, fall back to filepath.Dir(c.root) — the pre-I-778 behavior
+// (and the I-407 WorktreeBase default).
+func TestAgentRootFallbackNoWorkspaceYaml(t *testing.T) {
+	tmp := t.TempDir()
+	workspace := filepath.Join(tmp, "theraprac-workspace")
+	os.MkdirAll(workspace, 0755)
+
+	cfg := &Config{
+		root:     workspace,
+		startDir: workspace,
+		Worktree: &WorktreeConfig{Enabled: true, BaseDir: "worktrees", ParentDir: ".."},
+	}
+	got := cfg.AgentRoot()
+	want := tmp
+	if got != want {
+		t.Errorf("AgentRoot() = %q, want %q (fallback to filepath.Dir(c.root))", got, want)
+	}
+}
+
+// I-778: an explicit absolute worktree.parent_dir override is honored
+// (operator escape hatch for non-standard layouts; back-compat with
+// pre-fix behavior).
+func TestAgentRootAbsoluteParentDirOverride(t *testing.T) {
+	cfg := &Config{
+		root:     "/some/agent/theraprac-workspace",
+		startDir: "/some/agent/theraprac-workspace",
+		Worktree: &WorktreeConfig{Enabled: true, BaseDir: "worktrees", ParentDir: "/custom/dev"},
+	}
+	got := cfg.AgentRoot()
+	if got != "/custom/dev" {
+		t.Errorf("AgentRoot() = %q, want %q (absolute ParentDir override)", got, "/custom/dev")
+	}
+}

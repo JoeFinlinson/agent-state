@@ -70,6 +70,13 @@ type Config struct {
 	// Root directory (where .as/ lives, or CWD)
 	root string
 
+	// startDir is the directory Load() was originally called from, before
+	// any discover() walk-up or .st-root / ST_ROOT redirection. AgentRoot()
+	// walks up from here to find a per-agent .as/agent-workspace.yaml so
+	// the correct per-agent root is recoverable even when c.root resolves
+	// to a peer agent's workspace under an ST_ROOT env leak. I-778.
+	startDir string
+
 	// Discovered is true when a .as/config.yaml was found (vs using defaults)
 	Discovered bool
 }
@@ -525,6 +532,88 @@ func (c *Config) WorktreeBase() string {
 	return filepath.Join(agentRoot, c.Worktree.BaseDir)
 }
 
+// AgentRoot returns the per-agent root directory (the dir that holds
+// per-agent worktrees and source clones, e.g. <agents>/theraprac-agent-b).
+// Resolution order:
+//  1. If worktree.parent_dir is set to an absolute path, return it
+//     (operator override; preserves the pre-I-778 behavior for any
+//     deployment that pinned an explicit absolute parent dir).
+//  2. Walk up from c.startDir looking for a .as/agent-workspace.yaml.
+//     The first one found has a `path:` field naming the per-agent
+//     root; return that path. This anchors the helper to the
+//     invocation site, recovering the correct agent even when c.root
+//     was set from an ST_ROOT env var leaking from a peer agent's
+//     session (the I-778 reproducer).
+//  3. Walk up from filepath.Dir(c.root) — handles the case where
+//     startDir was the workspace itself but ST_ROOT had redirected
+//     discovery to a peer's workspace.
+//  4. Fall back to filepath.Dir(c.root) — the I-407 default that
+//     matches WorktreeBase().
+//
+// I-778. Replaces the duplicated `cfg.Root() + wt.ParentDir` pattern
+// at seven call sites in internal/command/.
+func (c *Config) AgentRoot() string {
+	if c.Worktree != nil && c.Worktree.ParentDir != "" && filepath.IsAbs(c.Worktree.ParentDir) {
+		return c.Worktree.ParentDir
+	}
+	if found := walkForAgentRoot(c.startDir); found != "" {
+		return found
+	}
+	if c.root != "" {
+		if found := walkForAgentRoot(filepath.Dir(c.root)); found != "" {
+			return found
+		}
+		return filepath.Dir(c.root)
+	}
+	return ""
+}
+
+// walkForAgentRoot walks up from dir looking for .as/agent-workspace.yaml
+// and returns the `path:` field's value when found. Used by AgentRoot()
+// to anchor the per-agent root to the invocation site rather than the
+// (possibly ST_ROOT-leaked) discovered config root. I-778.
+func walkForAgentRoot(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	dir, _ = filepath.Abs(dir)
+	for {
+		candidate := filepath.Join(dir, ".as", "agent-workspace.yaml")
+		if body, err := os.ReadFile(candidate); err == nil {
+			if path := parseAgentWorkspacePath(body); path != "" {
+				return path
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+// parseAgentWorkspacePath extracts the `path:` field from a flat
+// agent-workspace.yaml body. Mirrors agentps.parseRosterFile — keeps
+// the package free of a YAML dependency. I-778.
+func parseAgentWorkspacePath(body []byte) string {
+	for _, line := range strings.Split(string(body), "\n") {
+		k, v, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		k = strings.TrimSpace(k)
+		if k != "path" {
+			continue
+		}
+		v = strings.TrimSpace(v)
+		v = strings.Trim(v, `"'`)
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 // WorktreeBaseLegacy returns the pre-I-407 worktree location (under the
 // workspace, shared across agents via the I-418 symlink). Used by
 // finish/close as a fallback when an old worktree predates the I-407
@@ -726,6 +815,7 @@ func Defaults() *Config {
 // Search order: walk up from startDir → $ST_ROOT env var → defaults rooted at startDir.
 func Load(startDir string) (*Config, error) {
 	cfg := Defaults()
+	cfg.startDir, _ = filepath.Abs(startDir)
 
 	configPath, found := discover(startDir)
 	if !found {
@@ -755,6 +845,7 @@ func LoadFrom(configPath string) (*Config, error) {
 		return nil, fmt.Errorf("loading %s: %w", configPath, err)
 	}
 	cfg.root = filepath.Dir(filepath.Dir(configPath))
+	cfg.startDir = cfg.root
 	return cfg, nil
 }
 

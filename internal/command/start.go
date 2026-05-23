@@ -549,13 +549,10 @@ func createWorktrees(cfg *config.Config, id, itemType string, opts StartOpts) (s
 	// distinct (workspace is symlinked across agents per I-418).
 	baseDir := cfg.WorktreeBase()
 	workDir := filepath.Join(baseDir, id)
-	parentDir := wt.ParentDir
-	if parentDir == "" {
-		parentDir = cfg.Root()
-	}
-	if !filepath.IsAbs(parentDir) {
-		parentDir = filepath.Join(cfg.Root(), parentDir)
-	}
+	// I-778: AgentRoot() anchors to .as/agent-workspace.yaml under the
+	// invocation site, recovering the correct per-agent root even when
+	// cfg.Root() was discovered via an ST_ROOT env leak from a peer.
+	parentDir := cfg.AgentRoot()
 
 	if err := os.MkdirAll(workDir, 0755); err != nil {
 		return "", fmt.Errorf("creating worktree dir: %w", err)

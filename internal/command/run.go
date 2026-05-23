@@ -2888,11 +2888,9 @@ func cleanupWorktree(cfg *config.Config, itemID string) {
 	s, _ := store.New(cfg)
 	Finish(s, cfg, itemID, FinishOpts{})
 
-	// Pull main on all repos so next item starts from latest
-	parentDir := cfg.Worktree.ParentDir
-	if !filepath.IsAbs(parentDir) {
-		parentDir = filepath.Join(cfg.Root(), parentDir)
-	}
+	// Pull main on all repos so next item starts from latest.
+	// I-778: AgentRoot() resolves per-agent root via .as/agent-workspace.yaml.
+	parentDir := cfg.AgentRoot()
 	for _, repo := range cfg.Worktree.Repos {
 		repoDir := repo
 		if cfg.Worktree.RepoMap != nil {
@@ -3998,10 +3996,11 @@ func resolveGHRepoFromShortName(repoShort string, worktreeDir string, cfg *confi
 			}
 		}
 	}
-	// Try parent dir + repo name (common worktree layout)
+	// Try parent dir + repo name (common worktree layout).
+	// I-778: AgentRoot() resolves per-agent root via .as/agent-workspace.yaml.
 	parentDir := cfg.Root()
-	if cfg.Worktree != nil && cfg.Worktree.ParentDir != "" {
-		parentDir = filepath.Join(cfg.Root(), cfg.Worktree.ParentDir)
+	if cfg.Worktree != nil {
+		parentDir = cfg.AgentRoot()
 	}
 	repoDir := filepath.Join(parentDir, repoShort)
 	if fi, err := os.Stat(repoDir); err == nil && fi.IsDir() {
@@ -4415,13 +4414,8 @@ func ensureHooksPath(cfg *config.Config) {
 		return
 	}
 
-	parentDir := wt.ParentDir
-	if parentDir == "" {
-		parentDir = cfg.Root()
-	}
-	if !filepath.IsAbs(parentDir) {
-		parentDir = filepath.Join(cfg.Root(), parentDir)
-	}
+	// I-778: AgentRoot() resolves per-agent root via .as/agent-workspace.yaml.
+	parentDir := cfg.AgentRoot()
 
 	for _, repoShort := range wt.Repos {
 		repoDir := wt.RepoMap[repoShort]
