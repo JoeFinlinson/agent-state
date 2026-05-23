@@ -6,6 +6,7 @@ package migrate
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -398,7 +399,14 @@ func (b *builder) emitField(field string) {
 	case "priority":
 		b.emitPriority()
 	case "scope_class":
-		b.emitScalarIfPresent("scope_class", b.item.ScopeClass)
+		// I-776: scope_class is a boolean-ish opt-in field — emit only when set.
+		// Unlike epic/sprint where a `null` marker may carry meaning, a stale
+		// `scope_class: null` line on an item whose class was cleared is just
+		// noise and would re-introduce the bypass anti-pattern (an inert
+		// declaration that operators might think still activates the carve-out).
+		if b.item.ScopeClass != "" {
+			b.add("scope_class: " + b.item.ScopeClass)
+		}
 	case "tags":
 		b.emitTags()
 	case "epic":
@@ -579,8 +587,11 @@ func (b *builder) emitTestingEvidence() {
 
 	b.add("")
 
-	// required_suites
-	suiteNames := b.cfg.Testing.RequiredSuiteNames()
+	// required_suites — I-776: emit the item's class-scoped set so reconcile
+	// doesn't write empty api/web placeholders onto a workspace-config item.
+	// Unknown class falls back to no emission (the gate failure will surface
+	// the unknown-class error; nothing useful to canonicalize here).
+	suiteNames := classScopedRequiredSuiteNames(b.cfg, b.item)
 	if len(suiteNames) > 0 {
 		b.add("  required_suites:")
 		maxLen := maxKeyLen(suiteNames)
@@ -934,4 +945,24 @@ func maxKeyLen(keys []string) int {
 		}
 	}
 	return max
+}
+
+// classScopedRequiredSuiteNames returns the required-suite names that apply
+// to a given item — its scope_class's set when declared, else the default.
+// Sorted; empty when the class is unknown (the gate surfaces that as a
+// targeted failure; canonical-emit just skips the block).
+func classScopedRequiredSuiteNames(cfg *config.Config, item *model.Item) []string {
+	if cfg == nil || cfg.Testing == nil {
+		return nil
+	}
+	required, ok := cfg.Testing.RequiredSuitesFor(item.ScopeClass)
+	if !ok {
+		return nil
+	}
+	names := make([]string, 0, len(required))
+	for name := range required {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }

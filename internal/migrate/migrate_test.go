@@ -1232,6 +1232,101 @@ depends_on:
 	}
 }
 
+// I-776: clearing a previously-set scope_class must NOT leave a noisy
+// `scope_class: null` line — the field is opt-in only.
+func TestCanonical_ScopeClassClearedDoesNotEmitNull(t *testing.T) {
+	dir := t.TempDir()
+	content := `id: I-776
+type: issue
+status: active
+created: 2026-05-23T07:00:00-06:00
+last_touched: 2026-05-23T07:00:00-06:00
+
+title: Clear-after-set scope_class
+
+priority: 3
+scope_class: workspace-config
+
+depends_on:
+- []
+`
+	path := writeTestFile(t, dir, "I-776.md", content)
+	item, err := parse.File(path)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	item.ScopeClass = "" // clear the typed field
+
+	canonical := Canonical(item, testConfig())
+	if strings.Contains(canonical, "scope_class: null") {
+		t.Errorf("canonical should NOT emit `scope_class: null` after clear:\n%s", canonical)
+	}
+	if strings.Contains(canonical, "scope_class:") {
+		t.Errorf("canonical should NOT emit any scope_class line after clear:\n%s", canonical)
+	}
+}
+
+// I-776: items with a scope_class get the class's required_suites set in
+// the canonical required_suites: block (not the default api/web).
+func TestCanonical_ScopeClassRequiredSuitesBlock(t *testing.T) {
+	dir := t.TempDir()
+	content := `id: I-776
+type: issue
+status: active
+created: 2026-05-23T07:00:00-06:00
+last_touched: 2026-05-23T07:00:00-06:00
+
+title: t
+
+priority: 3
+scope_class: workspace-config
+
+depends_on:
+- []
+
+testing_evidence:
+  tests_written:
+  - []
+
+  workspace_test: pass abc1234 2026-05-23T07:00:00-06:00
+
+  notes: null
+`
+	path := writeTestFile(t, dir, "I-776.md", content)
+	item, err := parse.File(path)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	cfg := testConfig()
+	cfg.Testing.ScopeClasses = map[string]config.ScopeClassConfig{
+		"workspace-config": {
+			RequiredSuites: map[string]config.SuiteConfig{
+				"workspace_test": {Command: "bash hooks/run-changed-hook-tests.sh"},
+			},
+		},
+	}
+
+	canonical := Canonical(item, cfg)
+	rsIdx := strings.Index(canonical, "required_suites:")
+	if rsIdx < 0 {
+		t.Fatalf("canonical missing required_suites block:\n%s", canonical)
+	}
+	rsEnd := strings.Index(canonical[rsIdx:], "\n\n")
+	if rsEnd < 0 {
+		rsEnd = len(canonical) - rsIdx
+	}
+	block := canonical[rsIdx : rsIdx+rsEnd]
+	if !strings.Contains(block, "workspace_test:") {
+		t.Errorf("required_suites block should list workspace_test, got:\n%s", block)
+	}
+	for _, defaultSuite := range []string{"api_unit", "api_lint", "web_typecheck", "web_unit"} {
+		if strings.Contains(block, defaultSuite+":") {
+			t.Errorf("required_suites block should NOT list default-class suite %s, got:\n%s", defaultSuite, block)
+		}
+	}
+}
+
 // I-776: items without a scope_class must not emit a stray "scope_class:"
 // line — keeps the diff clean for the 99% of items that have never declared
 // a class.

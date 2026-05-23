@@ -156,6 +156,32 @@ type ScopeClassConfig struct {
 	RequiredSuites map[string]SuiteConfig
 }
 
+// RequiredSuitesFor returns the required-suite set that applies to a given
+// item, plus a "class resolved" flag. I-776: every code path that needs to
+// know which suites are required for an item MUST route through this helper
+// so the gate, st test, st uat, st run auto-runner, the queue advisor, and
+// the canonical-emit slot all stay in lock-step on what counts as required.
+//
+//   - scopeClass == ""           → default RequiredSuites, ok=true.
+//   - scopeClass set + found     → class's RequiredSuites, ok=true.
+//   - scopeClass set + not found → nil, ok=false (caller decides: fail fast,
+//                                  or surface "unknown scope_class").
+//
+// A nil receiver returns nil/true (no testing config → nothing required).
+func (t *TestingConfig) RequiredSuitesFor(scopeClass string) (map[string]SuiteConfig, bool) {
+	if t == nil {
+		return nil, true
+	}
+	if scopeClass == "" {
+		return t.RequiredSuites, true
+	}
+	class, ok := t.ScopeClasses[scopeClass]
+	if !ok {
+		return nil, false
+	}
+	return class.RequiredSuites, true
+}
+
 type CoverageThresholds struct {
 	Lines     float64
 	Branches  float64
@@ -1198,16 +1224,48 @@ func applyValue(cfg *Config, levels [4]string, key, val string) {
 				}
 			}
 		case "scope_classes":
-			// I-776: flat shape — testing → scope_classes → <class> → <suite>: <cmd>.
-			// At this point, levels[2] is the class name and `key`/`val` are
-			// the suite name and its command. The class-name section header
-			// (val == "") is a no-op since we lazily create the map below.
+			// I-776: flat shape only — testing → scope_classes → <class> → <suite>: <cmd>.
+			// Three failure modes have to be detected explicitly because the
+			// shared line parser would otherwise mis-shape them into a phantom
+			// class or phantom suite:
+			//
+			// 1. Missing class header: `scope_classes:\n  workspace_test: cmd`
+			//    levels[2] gets set to the suite key on this iteration, so the
+			//    `className == ""` defense doesn't fire on its own. We reject
+			//    by requiring at least 4 populated levels[].
+			//
+			// 2. Nested command form: `<class>:\n  <suite>:\n    command: cmd`
+			//    The deepest line is at indent 8 which the parser clamps to
+			//    level=3, overwriting levels[3]="<suite>" with "command".
+			//    Reject the literal key "command" (and the other nested fields
+			//    SuiteConfig supports) so the operator gets a loud error
+			//    instead of a phantom suite named "command".
+			//
+			// 3. Section header lines (val == "") are no-ops — the lazy
+			//    map-create below handles class registration on the first
+			//    leaf line.
 			if val == "" {
 				return
 			}
 			className := levels[2]
-			if className == "" {
-				// Defensive: a kv at level<3 under scope_classes is malformed.
+			// Detect form (1): if levels[2] is empty, this is a leaf with no
+			// class header above it. Also reject if levels[2] is the same as
+			// the key — that's the same-iteration mis-assignment shape, e.g.
+			// `scope_classes:\n  workspace_test: cmd` where levels[2]="workspace_test"
+			// because the parser just wrote it.
+			if className == "" || className == key {
+				fmt.Fprintf(os.Stderr,
+					"warning: malformed scope_classes entry %q at indent under scope_classes — every suite must be nested under a class name (testing.scope_classes.<class>.<suite>: <cmd>); dropping\n",
+					key)
+				return
+			}
+			// Detect form (2): nested suite shape would surface SuiteConfig
+			// field names (command/artifacts) as the leaf key. Reject loudly
+			// — only the flat shape is supported in v1.
+			if key == "command" || key == "artifacts" {
+				fmt.Fprintf(os.Stderr,
+					"warning: scope_classes does not support the nested suite form (%q under %q.%q); use the flat shape (<class>.<suite>: <cmd>) — dropping\n",
+					key, className, levels[3])
 				return
 			}
 			class, ok := cfg.Testing.ScopeClasses[className]
@@ -1252,6 +1310,16 @@ func applyValue(cfg *Config, levels [4]string, key, val string) {
 				(*step).WatchCI = val == "true"
 			}
 		}
+
+	case "scope_classes":
+		// I-776: scope_classes must live UNDER testing:. A bare top-level
+		// `scope_classes:` block is a common YAML mistake when adding a new
+		// section — warn loudly instead of silently dropping it, otherwise
+		// items declaring scope_class get "unknown scope_class" with no
+		// diagnostic distinguishing 'malformed config' from 'typo on item'.
+		fmt.Fprintf(os.Stderr,
+			"warning: scope_classes:%q at top level — scope_classes must live under testing: (testing.scope_classes.<class>.<suite>); dropping\n",
+			key)
 
 	case "evidence":
 		if cfg.Evidence == nil {

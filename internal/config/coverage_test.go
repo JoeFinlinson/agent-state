@@ -250,6 +250,122 @@ func TestScopeClassesEmptyWhenNotConfigured(t *testing.T) {
 	}
 }
 
+// I-776: nested suite form (`<suite>: { command: <cmd> }`) is unsupported —
+// the parser must reject it loudly rather than silently registering a phantom
+// suite literally named 'command'.
+func TestScopeClassesNestedFormRejected(t *testing.T) {
+	root := t.TempDir()
+	asDir := filepath.Join(root, ".as")
+	os.MkdirAll(asDir, 0755)
+	configContent := `testing:
+  scope_classes:
+    workspace-config:
+      workspace_test:
+        command: bash run.sh
+`
+	os.WriteFile(filepath.Join(asDir, "config.yaml"), []byte(configContent), 0644)
+
+	cfg, err := Load(root)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	class, ok := cfg.Testing.ScopeClasses["workspace-config"]
+	// The flat-form section header creates the class; the nested
+	// `command:` line should NOT register a suite literally named "command".
+	if ok {
+		if _, bad := class.RequiredSuites["command"]; bad {
+			t.Error("nested `command:` form should be rejected — got a phantom suite named 'command'")
+		}
+	}
+}
+
+// I-776: missing class-name header (`scope_classes:\n  workspace_test: cmd`)
+// would otherwise create a phantom class named after the suite. The defensive
+// className == "" check doesn't fire on its own because levels[2] is set on
+// the same iteration, so the parser explicitly rejects the "levels[2]==key"
+// same-iteration shape.
+func TestScopeClassesMissingClassHeaderRejected(t *testing.T) {
+	root := t.TempDir()
+	asDir := filepath.Join(root, ".as")
+	os.MkdirAll(asDir, 0755)
+	configContent := `testing:
+  scope_classes:
+    workspace_test: bash run.sh
+`
+	os.WriteFile(filepath.Join(asDir, "config.yaml"), []byte(configContent), 0644)
+
+	cfg, err := Load(root)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, bad := cfg.Testing.ScopeClasses["workspace_test"]; bad {
+		t.Error("missing class-name header should be rejected — got a phantom class 'workspace_test'")
+	}
+	if len(cfg.Testing.ScopeClasses) != 0 {
+		t.Errorf("ScopeClasses should be empty on malformed config, got: %v", cfg.Testing.ScopeClasses)
+	}
+}
+
+// I-776: top-level `scope_classes:` (outside `testing:`) is rejected so a
+// common YAML typo doesn't silently strip the carve-out.
+func TestScopeClassesTopLevelRejected(t *testing.T) {
+	root := t.TempDir()
+	asDir := filepath.Join(root, ".as")
+	os.MkdirAll(asDir, 0755)
+	configContent := `scope_classes:
+  workspace-config:
+    workspace_test: bash run.sh
+`
+	os.WriteFile(filepath.Join(asDir, "config.yaml"), []byte(configContent), 0644)
+
+	cfg, err := Load(root)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Testing != nil && len(cfg.Testing.ScopeClasses) > 0 {
+		t.Errorf("top-level scope_classes should be silently dropped (with stderr warning), got: %v", cfg.Testing.ScopeClasses)
+	}
+}
+
+// I-776: RequiredSuitesFor central helper — every reader of "which suites
+// apply to this item" must route through here.
+func TestRequiredSuitesFor(t *testing.T) {
+	cfg := &TestingConfig{
+		RequiredSuites: map[string]SuiteConfig{"api_unit": {Command: "a"}},
+		ScopeClasses: map[string]ScopeClassConfig{
+			"workspace-config": {RequiredSuites: map[string]SuiteConfig{"workspace_test": {Command: "w"}}},
+		},
+	}
+
+	// Default class (no scope_class declared)
+	got, ok := cfg.RequiredSuitesFor("")
+	if !ok || got["api_unit"].Command != "a" {
+		t.Errorf("default class: got=%v ok=%v", got, ok)
+	}
+
+	// Known class
+	got, ok = cfg.RequiredSuitesFor("workspace-config")
+	if !ok || got["workspace_test"].Command != "w" {
+		t.Errorf("known class: got=%v ok=%v", got, ok)
+	}
+	if _, badAPI := got["api_unit"]; badAPI {
+		t.Error("class set must NOT include default-class suites")
+	}
+
+	// Unknown class
+	got, ok = cfg.RequiredSuitesFor("bogus")
+	if ok {
+		t.Errorf("unknown class should return ok=false, got=%v", got)
+	}
+
+	// Nil receiver
+	var nilCfg *TestingConfig
+	got, ok = nilCfg.RequiredSuitesFor("anything")
+	if !ok || got != nil {
+		t.Errorf("nil receiver: got=%v ok=%v, want nil/true", got, ok)
+	}
+}
+
 func TestConfigDeliverySection(t *testing.T) {
 	root := t.TempDir()
 	asDir := filepath.Join(root, ".as")

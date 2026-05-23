@@ -471,6 +471,95 @@ func TestTestingComplete_NoScopeClassUsesGlobalRequired(t *testing.T) {
 	}
 }
 
+// I-776: declared-but-empty class is a config error, not a free pass.
+func TestTestingComplete_ScopeClassEmptyClassFailsLoud(t *testing.T) {
+	cfg := testConfig()
+	cfg.Testing = &config.TestingConfig{
+		ScopeClasses: map[string]config.ScopeClassConfig{
+			"workspace-config": {RequiredSuites: map[string]config.SuiteConfig{}},
+		},
+	}
+	cfg.Gates = map[string][]config.GateConfig{"close": {{Type: "testing_complete"}}}
+
+	item := testItem("I-776", "active")
+	item.ScopeClass = "workspace-config"
+	allItems := map[string]*model.Item{"I-776": item}
+
+	results := EvaluateGates(item, "close", cfg, allItems)
+	if GatesPassed(results) {
+		t.Fatal("empty class.RequiredSuites should fail the gate, not silently pass")
+	}
+	f := FirstFailure(results)
+	if !strings.Contains(f.Message, "no required suites declared") {
+		t.Errorf("failure should name the empty-class problem, got: %s", f.Message)
+	}
+}
+
+// I-776: scope-class items skip the ScopeSuites loop entirely — the class
+// IS the complete required-set definition. A scope suite incidentally marked
+// 'required' (e.g., by st pr) on a class item must NOT block the gate.
+func TestTestingComplete_ScopeClassSkipsScopeSuites(t *testing.T) {
+	cfg := testConfig()
+	cfg.Testing = &config.TestingConfig{
+		ScopeClasses: map[string]config.ScopeClassConfig{
+			"workspace-config": {
+				RequiredSuites: map[string]config.SuiteConfig{
+					"workspace_test": {Command: "x"},
+				},
+			},
+		},
+		ScopeSuites: map[string]config.ScopeSuiteConfig{
+			"web_e2e": {Command: "y"},
+		},
+	}
+	cfg.Gates = map[string][]config.GateConfig{"close": {{Type: "testing_complete"}}}
+
+	item := testItem("I-776", "active")
+	item.ScopeClass = "workspace-config"
+	item.TestingEvidence = map[string]interface{}{
+		"workspace_test": "pass abc1234 2026-05-23T08:00:00-06:00",
+		"web_e2e":        "required", // would normally fail the gate
+	}
+	allItems := map[string]*model.Item{"I-776": item}
+
+	results := EvaluateGates(item, "close", cfg, allItems)
+	if !GatesPassed(results) {
+		f := FirstFailure(results)
+		t.Errorf("class items should bypass ScopeSuites loop; gate failed: %s", f.Message)
+	}
+}
+
+// I-776: when the default class has multiple missing required suites,
+// the failure message must name them deterministically (sorted) — Go's
+// map iteration order is randomized per process and would otherwise
+// produce flaky UX and flaky test assertions.
+func TestTestingComplete_DeterministicMissingSuiteMessage(t *testing.T) {
+	cfg := testConfig()
+	cfg.Testing = &config.TestingConfig{
+		RequiredSuites: map[string]config.SuiteConfig{
+			"zeta_suite":  {Command: "z"},
+			"alpha_suite": {Command: "a"},
+			"middle":      {Command: "m"},
+		},
+	}
+	cfg.Gates = map[string][]config.GateConfig{"close": {{Type: "testing_complete"}}}
+
+	item := testItem("T-001", "active")
+	// No evidence — all three suites are missing.
+	allItems := map[string]*model.Item{"T-001": item}
+
+	// Run the gate multiple times; the same suite name must surface every
+	// time (the sorted-first one — "alpha_suite").
+	const N = 25
+	for i := 0; i < N; i++ {
+		results := EvaluateGates(item, "close", cfg, allItems)
+		f := FirstFailure(results)
+		if !strings.Contains(f.Message, "alpha_suite") {
+			t.Fatalf("iteration %d: expected alpha_suite (first sorted) in message, got: %s", i, f.Message)
+		}
+	}
+}
+
 func TestGateAgentAssignedPass(t *testing.T) {
 	cfg := testConfig()
 	cfg.Gates = map[string][]config.GateConfig{
