@@ -1260,12 +1260,21 @@ func TestTestRunCacheContendedWithoutRuntimeWarns(t *testing.T) {
 	origStderr := os.Stderr
 	r, w, _ := os.Pipe()
 	os.Stderr = w
-	defer func() { os.Stderr = origStderr }()
 	done := make(chan struct{})
 	go func() {
 		io.Copy(stderrBuf, r)
 		close(done)
 	}()
+	// Round-2 review: leak-safe even on t.Fatalf. Close the writer so the
+	// io.Copy goroutine sees EOF, wait for it to finish, then close the
+	// reader and restore stderr. Cleanup runs LIFO; defining it before the
+	// inline cleanup means t.Fatalf paths still drain everything.
+	t.Cleanup(func() {
+		_ = w.Close()
+		<-done
+		_ = r.Close()
+		os.Stderr = origStderr
+	})
 
 	opts := TestRecordOpts{
 		Run: true,
@@ -1280,7 +1289,8 @@ func TestTestRunCacheContendedWithoutRuntimeWarns(t *testing.T) {
 	}
 
 	code := TestRecord(s, cfg, "T-003", "api_lint", opts)
-	w.Close()
+	// Force the stderr drain BEFORE assertions so stderrBuf is populated.
+	_ = w.Close()
 	<-done
 	os.Stderr = origStderr
 
@@ -1300,10 +1310,14 @@ func TestTestRunCacheContendedWithoutRuntimeWarns(t *testing.T) {
 // looksLikeCacheLockError must NOT fire on `concurrent map writes`
 // (a Go runtime panic surfacing a real race) or on free-form output that
 // merely contains the substrings 'cache' and 'locked' on the same line.
+// Round-2 additions: word-boundary on `lock` so "lock-free" / "lock semantics"
+// don't match; explicit coverage for the "cannot acquire" intransitive form.
 func TestLooksLikeCacheLockErrorRegexTightened(t *testing.T) {
 	for _, want := range []string{
 		"saving cache: failed to acquire file lock",
 		"unable to acquire file lock on /tmp/x",
+		"cannot acquire file lock",
+		"cannot acquire lock",
 		"directory \"/Users/x/.cache/golangci-lint\" is being used by another process",
 		"cache directory is locked",
 	} {
@@ -1316,10 +1330,79 @@ func TestLooksLikeCacheLockErrorRegexTightened(t *testing.T) {
 		"cache_test.go:42: TestLockedConsistency failed",
 		"foo.go:10: declared and not used: x",
 		"some unrelated cache config dump locked-file.yml",
+		// Word-boundary cases (round 2 review):
+		"benchmark: unable to acquire lock-free queue slot",
+		"docstring: failed to acquire lock-step semantics for batch",
+		"cannot acquire lockable resource handle",
 	} {
 		if looksLikeCacheLockError([]byte(notWant)) {
 			t.Errorf("regex should NOT match: %q", notWant)
 		}
+	}
+}
+
+// cachePathsForRuntime rollback must NOT wipe a pre-existing populated
+// golangci-lint cache when the goCache MkdirAll fails. Round-2 review
+// flagged a real regression where a warm 100s-of-MB cache could be nuked
+// by a transient disk error.
+func TestCachePathsForRuntimeRollbackPreservesWarmCache(t *testing.T) {
+	root := t.TempDir()
+	agentID := "agent-b"
+	glPath := filepath.Join(root, ".as", "cache", "golangci-lint", agentID)
+
+	// Pre-populate the golangci-lint cache: simulate a warm prior run.
+	if err := os.MkdirAll(glPath, 0o755); err != nil {
+		t.Fatalf("setup MkdirAll: %v", err)
+	}
+	warmFile := filepath.Join(glPath, "warm-marker.bin")
+	if err := os.WriteFile(warmFile, []byte("warm cache contents"), 0o644); err != nil {
+		t.Fatalf("setup WriteFile: %v", err)
+	}
+
+	// Force goCache MkdirAll to fail by planting a FILE at the path it
+	// would create (not a directory). os.MkdirAll fails with "not a
+	// directory" because the intermediate path component is a file.
+	goCacheParent := filepath.Join(root, ".as", "cache", "go-build")
+	if err := os.MkdirAll(goCacheParent, 0o755); err != nil {
+		t.Fatalf("setup goCache parent: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(goCacheParent, agentID), []byte("blocker"), 0o644); err != nil {
+		t.Fatalf("setup blocker: %v", err)
+	}
+
+	_, _, err := cachePathsForRuntime(root, agentID)
+	if err == nil {
+		t.Fatalf("expected MkdirAll(goCache) failure, got nil")
+	}
+	// The warm cache marker MUST survive — rollback should not have fired.
+	if _, statErr := os.Stat(warmFile); statErr != nil {
+		t.Errorf("rollback wiped pre-existing warm cache: %v (this is the round-2 review regression)", statErr)
+	}
+}
+
+// Complement: when WE created golangciLintCache fresh and goCache fails,
+// the rollback SHOULD remove what we just made (no leftover empty dirs).
+func TestCachePathsForRuntimeRollbackRemovesFreshCreate(t *testing.T) {
+	root := t.TempDir()
+	agentID := "agent-b"
+	glPath := filepath.Join(root, ".as", "cache", "golangci-lint", agentID)
+
+	// Plant the goCache blocker without pre-creating golangciLintCache.
+	goCacheParent := filepath.Join(root, ".as", "cache", "go-build")
+	if err := os.MkdirAll(goCacheParent, 0o755); err != nil {
+		t.Fatalf("setup goCache parent: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(goCacheParent, agentID), []byte("blocker"), 0o644); err != nil {
+		t.Fatalf("setup blocker: %v", err)
+	}
+
+	_, _, err := cachePathsForRuntime(root, agentID)
+	if err == nil {
+		t.Fatalf("expected MkdirAll(goCache) failure, got nil")
+	}
+	// Fresh-created golangciLintCache should be gone.
+	if _, statErr := os.Stat(glPath); statErr == nil {
+		t.Errorf("fresh-created golangciLintCache survived rollback at %s", glPath)
 	}
 }
 
