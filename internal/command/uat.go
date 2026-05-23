@@ -200,7 +200,14 @@ func checkTestSuites(item *model.Item, cfg *config.Config) []checkResult {
 			Detail: detail,
 		})
 	}
-	// Check triggered scope suites
+	// Check triggered scope suites — I-776: only default-class items
+	// observe scope-suite policy, mirroring the gate's behavior in
+	// evalTestingComplete. Class items have a closed required-set
+	// definition; stale `required` markers on class items must not
+	// resurface as UAT failures the gate ignores.
+	if item.ScopeClass != "" {
+		return results
+	}
 	for name := range cfg.Testing.ScopeSuites {
 		val := ""
 		if v, ok := item.TestingEvidence[name]; ok {
@@ -365,21 +372,28 @@ func evaluateCriterion(criterion string, item *model.Item, cfg *config.Config, r
 				return checkResult{Label: criterion, Mode: "auto", Passed: passed, Detail: val}
 			}
 		}
-		for name := range cfg.Testing.ScopeSuites {
-			if strings.Contains(lower, strings.ReplaceAll(name, "_", " ")) || strings.Contains(lower, name) {
-				val := ""
-				if v, ok := item.TestingEvidence[name]; ok {
-					if s, ok := v.(string); ok {
-						val = s
+		// I-776: only default-class items consult ScopeSuites. Class items
+		// have a closed required-set definition — an AC mentioning a default
+		// scope-suite name on a class item must fall through to the
+		// manifest/manual evaluation branches instead of resolving against
+		// evidence the gate doesn't read.
+		if item.ScopeClass == "" {
+			for name := range cfg.Testing.ScopeSuites {
+				if strings.Contains(lower, strings.ReplaceAll(name, "_", " ")) || strings.Contains(lower, name) {
+					val := ""
+					if v, ok := item.TestingEvidence[name]; ok {
+						if s, ok := v.(string); ok {
+							val = s
+						}
 					}
+					// I-540: a prose AC mentioning a scope suite marked
+					// `skip: <reason>` must render as ⊘ skipped, not ✗ fail.
+					if strings.HasPrefix(val, "skip:") {
+						return checkResult{Label: criterion, Mode: "auto", Passed: true, Skipped: true, Detail: val}
+					}
+					passed := strings.HasPrefix(val, "pass")
+					return checkResult{Label: criterion, Mode: "auto", Passed: passed, Detail: val}
 				}
-				// I-540: a prose AC mentioning a scope suite marked
-				// `skip: <reason>` must render as ⊘ skipped, not ✗ fail.
-				if strings.HasPrefix(val, "skip:") {
-					return checkResult{Label: criterion, Mode: "auto", Passed: true, Skipped: true, Detail: val}
-				}
-				passed := strings.HasPrefix(val, "pass")
-				return checkResult{Label: criterion, Mode: "auto", Passed: passed, Detail: val}
 			}
 		}
 	}

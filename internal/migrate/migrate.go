@@ -604,8 +604,17 @@ func (b *builder) emitTestingEvidence() {
 
 	b.add("")
 
-	// scope_suites
-	scopeNames := b.cfg.Testing.ScopeSuiteNames()
+	// scope_suites — I-776: class items have a closed required-set
+	// definition and don't observe scope-suite policy at the gate, so
+	// reconcile must not bake default scope-suite placeholders into
+	// their files. Without this guard, a workspace-config item would
+	// always carry stale `api_integration: null`, `web_e2e: null` rows
+	// that could later be flipped to `required` and re-create the
+	// diverged-evidence shape the class carve-out retires.
+	var scopeNames []string
+	if b.item.ScopeClass == "" {
+		scopeNames = b.cfg.Testing.ScopeSuiteNames()
+	}
 	if len(scopeNames) > 0 {
 		b.add("  scope_suites:")
 		maxLen := maxKeyLen(scopeNames)

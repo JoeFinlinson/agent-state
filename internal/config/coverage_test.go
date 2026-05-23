@@ -252,7 +252,9 @@ func TestScopeClassesEmptyWhenNotConfigured(t *testing.T) {
 
 // I-776: nested suite form (`<suite>: { command: <cmd> }`) is unsupported —
 // the parser must reject it loudly rather than silently registering a phantom
-// suite literally named 'command'.
+// suite literally named 'command'. Register the class first via a real
+// flat-form suite line so the `key == "command"` reject branch is exercised
+// rather than short-circuited by the class never being created.
 func TestScopeClassesNestedFormRejected(t *testing.T) {
 	root := t.TempDir()
 	asDir := filepath.Join(root, ".as")
@@ -260,8 +262,9 @@ func TestScopeClassesNestedFormRejected(t *testing.T) {
 	configContent := `testing:
   scope_classes:
     workspace-config:
-      workspace_test:
-        command: bash run.sh
+      real_suite: bash real.sh
+      nested_suite:
+        command: bash nested.sh
 `
 	os.WriteFile(filepath.Join(asDir, "config.yaml"), []byte(configContent), 0644)
 
@@ -270,12 +273,51 @@ func TestScopeClassesNestedFormRejected(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	class, ok := cfg.Testing.ScopeClasses["workspace-config"]
-	// The flat-form section header creates the class; the nested
-	// `command:` line should NOT register a suite literally named "command".
-	if ok {
-		if _, bad := class.RequiredSuites["command"]; bad {
-			t.Error("nested `command:` form should be rejected — got a phantom suite named 'command'")
-		}
+	if !ok {
+		t.Fatal("flat-form real_suite should have registered the class — fixture is broken")
+	}
+	// The real flat-form suite parsed normally.
+	if class.RequiredSuites["real_suite"].Command != "bash real.sh" {
+		t.Errorf("real_suite did not parse — got %q", class.RequiredSuites["real_suite"].Command)
+	}
+	// The nested-form `command:` line at indent 8 (level 4, clamped to 3) would
+	// otherwise register a phantom suite literally named "command" — verify it
+	// did NOT.
+	if _, bad := class.RequiredSuites["command"]; bad {
+		t.Error("nested `command:` form should be rejected — got a phantom suite named 'command'")
+	}
+	// Same check for the `artifacts` reject variant.
+	if _, bad := class.RequiredSuites["artifacts"]; bad {
+		t.Error("nested `artifacts:` form should also be rejected")
+	}
+}
+
+// I-776: same check for the `artifacts:` nested-form rejection, with the
+// class pre-registered.
+func TestScopeClassesNestedArtifactsRejected(t *testing.T) {
+	root := t.TempDir()
+	asDir := filepath.Join(root, ".as")
+	os.MkdirAll(asDir, 0755)
+	configContent := `testing:
+  scope_classes:
+    workspace-config:
+      real_suite: bash real.sh
+      nested:
+        artifacts:
+          - reports/**
+`
+	os.WriteFile(filepath.Join(asDir, "config.yaml"), []byte(configContent), 0644)
+
+	cfg, err := Load(root)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	class, ok := cfg.Testing.ScopeClasses["workspace-config"]
+	if !ok {
+		t.Fatal("class should have been registered via real_suite")
+	}
+	if _, bad := class.RequiredSuites["artifacts"]; bad {
+		t.Error("nested `artifacts:` form should be rejected")
 	}
 }
 
