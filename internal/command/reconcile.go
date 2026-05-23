@@ -530,13 +530,13 @@ func toolAvailable(name string) bool {
 }
 
 func branchExistsOnRemote(cfg *config.Config, branch string) bool {
-	// Check all configured repo directories
+	// Check all configured repo directories.
+	// I-778: RepoParent() resolves per-agent repo parent via
+	// .as/agent-workspace.yaml and also fixes the missing
+	// filepath.IsAbs(ParentDir) handling here.
 	root := cfg.Root()
 	if cfg.Worktree != nil && cfg.Worktree.Enabled {
-		root = cfg.Worktree.ParentDir
-		if root == "" {
-			root = cfg.Root()
-		}
+		root = cfg.RepoParent()
 	}
 
 	repos := []string{"."}

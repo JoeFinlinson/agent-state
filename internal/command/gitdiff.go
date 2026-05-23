@@ -21,18 +21,21 @@ type fileEntry struct {
 }
 
 // resolveRepoDir returns the directory for a repo, respecting worktree.parent_dir config.
+// I-778: parent resolution routed through cfg.RepoParent() so an ST_ROOT-leaked
+// cfg.Root() can't redirect this to a peer agent's clone, while preserving the
+// pre-PR "no worktree.parent_dir → bare repo (CWD-relative)" semantic.
 func resolveRepoDir(cfg *config.Config, repo string) string {
-	if cfg.Worktree != nil && cfg.Worktree.ParentDir != "" {
-		parentDir := cfg.Worktree.ParentDir
-		if !filepath.IsAbs(parentDir) {
-			parentDir = filepath.Join(cfg.Root(), parentDir)
-		}
-		if mapped, ok := cfg.Worktree.RepoMap[repo]; ok {
-			return filepath.Join(parentDir, mapped)
-		}
-		return filepath.Join(parentDir, repo)
+	if cfg.Worktree == nil || cfg.Worktree.ParentDir == "" {
+		return repo
 	}
-	return repo
+	parentDir := cfg.RepoParent()
+	if parentDir == "" {
+		return repo
+	}
+	if mapped, ok := cfg.Worktree.RepoMap[repo]; ok {
+		return filepath.Join(parentDir, mapped)
+	}
+	return filepath.Join(parentDir, repo)
 }
 
 // resolveRepoDirForItem checks for a worktree first, falls back to main repo.
