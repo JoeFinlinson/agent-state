@@ -1163,6 +1163,196 @@ func TestTestRunSummaryRecordsCacheRootsAndRetry(t *testing.T) {
 	}
 }
 
+// I-802 code-review follow-ups:
+
+// Retry succeeds → evidence string carries " retried" tag so `st show`
+// surfaces cache flakes without an S3 round-trip.
+func TestTestRunRetriedEvidenceStringTagged(t *testing.T) {
+	s, cfg := setupPRTestEnv(t)
+	agentsRoot := filepath.Join(t.TempDir(), "theraprac-agents")
+	t.Setenv("THERAPRAC_AGENTS_ROOT", agentsRoot)
+	cfg.Testing.RequiredSuites["api_lint"] = config.SuiteConfig{Command: "cd ../theraprac-api && make lint"}
+
+	calls := 0
+	opts := TestRecordOpts{
+		Run:   true,
+		Agent: "b",
+		GitHeadSHA: func(dir string) (string, error) {
+			return "abc1234567890", nil
+		},
+		RunCmd: func(command string) ([]byte, int, error) {
+			calls++
+			if calls == 1 {
+				return []byte("is being used by another process\n"), 3, nil
+			}
+			return []byte("ok\n"), 0, nil
+		},
+		Backend: &evidence.LocalBackend{Dir: t.TempDir()},
+	}
+
+	code := TestRecord(s, cfg, "T-003", "api_lint", opts)
+	if code != 0 {
+		t.Fatalf("returned %d, want 0", code)
+	}
+	item, _ := s.Get("T-003")
+	ev, _ := getNestedField(item, "testing_evidence", "api_lint")
+	if !strings.HasPrefix(ev, "pass retried ") {
+		t.Errorf("evidence = %q, want prefix \"pass retried \" so st show surfaces the flake", ev)
+	}
+}
+
+// Retry must concatenate first-attempt + delimiter + second-attempt into
+// the uploaded log.txt so the cache-lock signature stays diagnostically
+// available even after a successful retry. Otherwise summary.retried=true
+// is unverifiable from evidence.
+func TestTestRunRetryConcatenatesAttempts(t *testing.T) {
+	s, cfg := setupPRTestEnv(t)
+	agentsRoot := filepath.Join(t.TempDir(), "theraprac-agents")
+	t.Setenv("THERAPRAC_AGENTS_ROOT", agentsRoot)
+	cfg.Testing.RequiredSuites["api_lint"] = config.SuiteConfig{Command: "cd ../theraprac-api && make lint"}
+
+	evDir := t.TempDir()
+	calls := 0
+	opts := TestRecordOpts{
+		Run:   true,
+		Agent: "b",
+		GitHeadSHA: func(dir string) (string, error) {
+			return "abc1234567890", nil
+		},
+		RunCmd: func(command string) ([]byte, int, error) {
+			calls++
+			if calls == 1 {
+				return []byte("FIRST-RUN-LOCK: is being used by another process\n"), 3, nil
+			}
+			return []byte("SECOND-RUN-CLEAN: ok\n"), 0, nil
+		},
+		Backend: &evidence.LocalBackend{Dir: evDir},
+	}
+
+	code := TestRecord(s, cfg, "T-003", "api_lint", opts)
+	if code != 0 {
+		t.Fatalf("returned %d, want 0", code)
+	}
+	log := readBackTestLog(t, opts.Backend, "T-003", "api_lint")
+	for _, want := range []string{
+		"FIRST-RUN-LOCK",
+		"--- I-802 retry boundary",
+		"SECOND-RUN-CLEAN",
+	} {
+		if !strings.Contains(log, want) {
+			t.Errorf("uploaded log missing %q — retry evidence trail incomplete\n--- log ---\n%s\n", want, log)
+		}
+	}
+}
+
+// Cache-contended suite with no resolved runtime must emit a loud warning
+// (not silently run against the shared cache) and must not inject empty
+// cache env vars into the command.
+func TestTestRunCacheContendedWithoutRuntimeWarns(t *testing.T) {
+	s, cfg := setupPRTestEnv(t)
+	// No --agent / suite command has no cd ../theraprac-* →
+	// resolveTestAgentRuntime returns ok=false even though api_lint is
+	// cache-contended.
+	cfg.Testing.RequiredSuites["api_lint"] = config.SuiteConfig{Command: "echo lint-self-contained"}
+
+	var gotCmd string
+	stderrBuf := new(bytes.Buffer)
+	origStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+	defer func() { os.Stderr = origStderr }()
+	done := make(chan struct{})
+	go func() {
+		io.Copy(stderrBuf, r)
+		close(done)
+	}()
+
+	opts := TestRecordOpts{
+		Run: true,
+		GitHeadSHA: func(dir string) (string, error) {
+			return "abc1234567890", nil
+		},
+		RunCmd: func(command string) ([]byte, int, error) {
+			gotCmd = command
+			return []byte("ok\n"), 0, nil
+		},
+		Backend: &evidence.LocalBackend{Dir: t.TempDir()},
+	}
+
+	code := TestRecord(s, cfg, "T-003", "api_lint", opts)
+	w.Close()
+	<-done
+	os.Stderr = origStderr
+
+	if code != 0 {
+		t.Fatalf("returned %d, want 0", code)
+	}
+	if !strings.Contains(stderrBuf.String(), "I-802 warning") {
+		t.Errorf("expected I-802 warning on stderr when cache-contended suite runs without runtime; got:\n%s", stderrBuf.String())
+	}
+	for _, unwanted := range []string{"GOLANGCI_LINT_CACHE=", "GOCACHE="} {
+		if strings.Contains(gotCmd, unwanted) {
+			t.Errorf("command unexpectedly injected %s without resolved runtime:\n%s", unwanted, gotCmd)
+		}
+	}
+}
+
+// looksLikeCacheLockError must NOT fire on `concurrent map writes`
+// (a Go runtime panic surfacing a real race) or on free-form output that
+// merely contains the substrings 'cache' and 'locked' on the same line.
+func TestLooksLikeCacheLockErrorRegexTightened(t *testing.T) {
+	for _, want := range []string{
+		"saving cache: failed to acquire file lock",
+		"unable to acquire file lock on /tmp/x",
+		"directory \"/Users/x/.cache/golangci-lint\" is being used by another process",
+		"cache directory is locked",
+	} {
+		if !looksLikeCacheLockError([]byte(want)) {
+			t.Errorf("expected true for documented signature: %q", want)
+		}
+	}
+	for _, notWant := range []string{
+		"fatal error: concurrent map writes\n",
+		"cache_test.go:42: TestLockedConsistency failed",
+		"foo.go:10: declared and not used: x",
+		"some unrelated cache config dump locked-file.yml",
+	} {
+		if looksLikeCacheLockError([]byte(notWant)) {
+			t.Errorf("regex should NOT match: %q", notWant)
+		}
+	}
+}
+
+// readBackTestLog fetches the uploaded log.txt.gz, decompresses, returns
+// it as string. Used by retry-concatenation test.
+func readBackTestLog(t *testing.T, backend evidence.Backend, id, suite string) string {
+	t.Helper()
+	keys, err := backend.List(id + "/" + suite + "/")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, k := range keys {
+		if !strings.HasSuffix(k, "log.txt.gz") {
+			continue
+		}
+		var buf bytes.Buffer
+		if err := backend.Download(k, &buf); err != nil {
+			t.Fatalf("Download: %v", err)
+		}
+		gz, err := gzipNewReader(buf.Bytes())
+		if err != nil {
+			t.Fatalf("gzip reader: %v", err)
+		}
+		raw, err := io.ReadAll(gz)
+		if err != nil {
+			t.Fatalf("read log: %v", err)
+		}
+		return string(raw)
+	}
+	t.Fatalf("no log.txt.gz found under %s/%s/", id, suite)
+	return ""
+}
+
 // readBackTestSummary fetches the uploaded summary.json.gz for an item+suite
 // and decodes it. Walks all uploaded keys (timestamped) and returns the
 // first summary it finds — tests in this package upload exactly once.

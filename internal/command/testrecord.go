@@ -212,20 +212,37 @@ func testRunMode(s *store.Store, cfg *config.Config, id, suite, suiteCmd, sha st
 		resolvedRuntime = runtime
 		runtimeResolved = true
 		cmd = rewriteSuiteForAgentWorkspace(runtime, cmd)
-		cmd = injectAgentRuntimeEnvForSuite(runtime, suite, cfg.Root(), cmd)
-		fmt.Printf("Running %s on %s: %s\n", suite, runtime.AgentID, cmd)
+	}
+	// I-802: compute cache paths ONCE (not twice — env injection + summary)
+	// and treat any failure as loud, never silent. Silent fall-through to the
+	// shared cache is exactly the regression I-802 is supposed to fix.
+	var golangciLintCache, goCache string
+	if isCacheContendedSuite(suite) {
+		switch {
+		case !runtimeResolved:
+			fmt.Fprintf(os.Stderr,
+				"I-802 warning: suite %q is cache-contended but no agent runtime resolved; "+
+					"running against the shared golangci-lint/Go cache (lock contention possible). "+
+					"Re-run with --agent <id> or from an agent workspace to enable per-agent caches.\n",
+				suite)
+		default:
+			gl, gc, err := cachePathsForRuntime(cfg.Root(), resolvedRuntime.AgentID)
+			if err != nil {
+				fmt.Fprintf(os.Stderr,
+					"I-802 warning: failed to create per-agent caches for %q on %s: %v\n"+
+						"  running against the shared cache; lock contention possible.\n",
+					suite, resolvedRuntime.AgentID, err)
+			} else {
+				golangciLintCache = gl
+				goCache = gc
+			}
+		}
+	}
+	if runtimeResolved {
+		cmd = injectAgentRuntimeEnv(resolvedRuntime, golangciLintCache, goCache, cmd)
+		fmt.Printf("Running %s on %s: %s\n", suite, resolvedRuntime.AgentID, cmd)
 	} else {
 		fmt.Printf("Running %s: %s\n", suite, cmd)
-	}
-	// I-802: capture the cache paths we just injected so testSummary can
-	// record them. Recomputing (vs. parsing them back out of cmd) keeps
-	// the summary populated even if the env-injection ordering changes.
-	var golangciLintCache, goCache string
-	if runtimeResolved && isCacheContendedSuite(suite) {
-		if gl, gc, err := cachePathsForRuntime(cfg.Root(), resolvedRuntime.AgentID); err == nil {
-			golangciLintCache = gl
-			goCache = gc
-		}
 	}
 	start := time.Now()
 
@@ -237,7 +254,8 @@ func testRunMode(s *store.Store, cfg *config.Config, id, suite, suiteCmd, sha st
 		}
 		return runCmdInDirStreaming(cfg.Root(), cmd)
 	}
-	output, exitCode, runErr, retried := runWithLockAwareRetry(suite, opts.RunCmd != nil, runOnce)
+	result := runWithLockAwareRetry(suite, opts.RunCmd != nil, runOnce)
+	output, exitCode, runErr, retried := result.Output, result.ExitCode, result.RunErr, result.Retried
 	duration := time.Since(start)
 
 	if runErr != nil && exitCode == 0 {
@@ -293,9 +311,18 @@ func testRunMode(s *store.Store, cfg *config.Config, id, suite, suiteCmd, sha st
 		evidence.GzipUpload(backend, keyPrefix+"/summary.json", summaryJSON)
 	}
 
+	// I-802: surface retried= in the human-readable evidence string so
+	// `st show` reports cache-flakes without requiring an S3 round-trip to
+	// summary.json.gz. Keep the prefix ("pass" / "fail") stable since
+	// downstream tooling matches on it.
+	retryTag := ""
+	if retried {
+		retryTag = " retried"
+	}
+
 	// If test failed, record failure and stop
 	if exitCode != 0 {
-		ev := fmt.Sprintf("fail %s %s evidence:%s", sha, now.Format(time.RFC3339), logURI)
+		ev := fmt.Sprintf("fail%s %s %s evidence:%s", retryTag, sha, now.Format(time.RFC3339), logURI)
 		_ = s.Mutate(id, func(it *model.Item) error {
 			it.SetNested("testing_evidence", suite, ev)
 			it.Doc.SetField("last_touched", now.Format(time.RFC3339))
@@ -326,8 +353,8 @@ func testRunMode(s *store.Store, cfg *config.Config, id, suite, suiteCmd, sha st
 		}
 	}
 
-	// Record pass
-	ev := fmt.Sprintf("pass %s %s evidence:%s", sha, now.Format(time.RFC3339), logURI)
+	// Record pass (with I-802 retry tag when applicable)
+	ev := fmt.Sprintf("pass%s %s %s evidence:%s", retryTag, sha, now.Format(time.RFC3339), logURI)
 	if err := s.Mutate(id, func(it *model.Item) error {
 		it.SetNested("testing_evidence", suite, ev)
 		it.Doc.SetField("last_touched", now.Format(time.RFC3339))
@@ -839,36 +866,31 @@ func rewriteSuiteForAgentWorkspace(runtime testAgentRuntime, suiteCmd string) st
 	return suiteCmd
 }
 
-func injectAgentRuntimeEnv(runtime testAgentRuntime, suiteCmd string) string {
-	return injectAgentRuntimeEnvForSuite(runtime, "", "", suiteCmd)
-}
-
-// injectAgentRuntimeEnvForSuite is the suite-aware variant that adds
-// per-agent cache env vars (GOLANGCI_LINT_CACHE, GOCACHE) when the suite
-// is on the cache-contended allow-list (I-802). suite=="" or root=="" skips
-// the cache injection — preserves the older injectAgentRuntimeEnv contract
-// for callers that have no suite context.
-func injectAgentRuntimeEnvForSuite(runtime testAgentRuntime, suite, root, suiteCmd string) string {
+// injectAgentRuntimeEnv prefixes suiteCmd with the agent runtime env vars
+// (ports, identity, compose project) plus the optional per-agent cache
+// vars from I-802. Empty cache paths skip the cache vars — callers compute
+// paths upstream so the decision is centralized in testRunMode and never
+// silent.
+func injectAgentRuntimeEnv(runtime testAgentRuntime, golangciLintCache, goCache, suiteCmd string) string {
 	env := map[string]string{
 		"AS_AGENT_ID":          runtime.AgentID,
-		"ST_AGENT_ID":          runtime.AgentID,
-		"THERAPRAC_AGENT_ID":   runtime.AgentID,
-		"COMPOSE_PROJECT_NAME": runtime.ComposeProject,
-		"THERAPRAC_WEB_PORT":   fmt.Sprintf("%d", runtime.Ports.Web),
-		"THERAPRAC_API_PORT":   fmt.Sprintf("%d", runtime.Ports.API),
-		"THERAPRAC_DB_PORT":    fmt.Sprintf("%d", runtime.Ports.DB),
-		"MAILPIT_PORT":         fmt.Sprintf("%d", runtime.Ports.Mailpit),
-		"STRIPE_WEBHOOK_PORT":  fmt.Sprintf("%d", runtime.Ports.Stripe),
-		"API_BASE_URL":         fmt.Sprintf("http://localhost:%d", runtime.Ports.API),
-		"NEXT_PUBLIC_API_URL":  fmt.Sprintf("http://localhost:%d", runtime.Ports.API),
-		"PLAYWRIGHT_BASE_URL":  fmt.Sprintf("http://localhost:%d", runtime.Ports.Web),
+		"ST_AGENT_ID":           runtime.AgentID,
+		"THERAPRAC_AGENT_ID":    runtime.AgentID,
+		"COMPOSE_PROJECT_NAME":  runtime.ComposeProject,
+		"THERAPRAC_WEB_PORT":    fmt.Sprintf("%d", runtime.Ports.Web),
+		"THERAPRAC_API_PORT":    fmt.Sprintf("%d", runtime.Ports.API),
+		"THERAPRAC_DB_PORT":     fmt.Sprintf("%d", runtime.Ports.DB),
+		"MAILPIT_PORT":          fmt.Sprintf("%d", runtime.Ports.Mailpit),
+		"STRIPE_WEBHOOK_PORT":   fmt.Sprintf("%d", runtime.Ports.Stripe),
+		"API_BASE_URL":          fmt.Sprintf("http://localhost:%d", runtime.Ports.API),
+		"NEXT_PUBLIC_API_URL":   fmt.Sprintf("http://localhost:%d", runtime.Ports.API),
+		"PLAYWRIGHT_BASE_URL":   fmt.Sprintf("http://localhost:%d", runtime.Ports.Web),
 	}
-	if suite != "" && root != "" && isCacheContendedSuite(suite) {
-		gl, gc, err := cachePathsForRuntime(root, runtime.AgentID)
-		if err == nil {
-			env["GOLANGCI_LINT_CACHE"] = gl
-			env["GOCACHE"] = gc
-		}
+	if golangciLintCache != "" {
+		env["GOLANGCI_LINT_CACHE"] = golangciLintCache
+	}
+	if goCache != "" {
+		env["GOCACHE"] = goCache
 	}
 	keys := make([]string, 0, len(env))
 	for key := range env {
@@ -902,6 +924,13 @@ func isCacheContendedSuite(suite string) bool {
 // cache directories under <workspace-root>/.as/cache/, creating them lazily.
 // Each agent's clone has its own workspace, so the resulting paths are
 // structurally isolated from peer agents — no shared flock, no contention.
+// On second-MkdirAll failure the first directory is removed so callers see
+// an all-or-nothing outcome.
+//
+// Note (gitignore): callers are expected to ensure <root>/.as/cache/ is
+// gitignored at the workspace level. The companion workspace-side change
+// adding `.as/cache/` to .gitignore lands separately to avoid mixing repos
+// in this PR.
 func cachePathsForRuntime(root, agentID string) (golangciLintCache, goCache string, err error) {
 	if root == "" || agentID == "" {
 		return "", "", fmt.Errorf("cachePathsForRuntime: root and agentID required")
@@ -912,44 +941,91 @@ func cachePathsForRuntime(root, agentID string) (golangciLintCache, goCache stri
 		return "", "", err
 	}
 	if err := os.MkdirAll(goCache, 0o755); err != nil {
+		// Roll back the first MkdirAll so partial state doesn't survive.
+		_ = os.RemoveAll(golangciLintCache)
 		return "", "", err
 	}
 	return golangciLintCache, goCache, nil
 }
 
-// cacheLockErrorPattern matches the three documented golangci-lint /
-// Go build-cache contention signatures (case-insensitive). Anchored on
-// fragments that are stable across versions and not produced by genuine
-// lint failures (so a real "x declared and not used" never triggers a
-// retry).
-var cacheLockErrorPattern = regexp.MustCompile(`(?i)(directory .* is being used by another process|cache .*(is )?locked|concurrent map writes)`)
+// cacheLockErrorPattern is built from specific phrases golangci-lint and
+// the Go file-lock helper actually emit on contention — no greedy `.*`,
+// no Go runtime panic strings (a race in the linter is a bug to surface,
+// not a transient to retry around).
+//
+// Sources (manually verified against upstream stderr):
+//   - "is being used by another process" — Windows-style EBUSY surfaced
+//     by Go's lockedfile when another process holds the cache flock
+//     (golang/go/src/cmd/go/internal/lockedfile).
+//   - "failed to acquire file lock" / "unable to acquire file lock" —
+//     golangci-lint v1's cache layer (internal/cache/default.go).
+//   - "cache directory is locked" — older golangci-lint variant.
+//
+// Extend by appending a tested phrase, never by widening with `.*`.
+var cacheLockErrorPattern = regexp.MustCompile(
+	`(?i)(is being used by another process` +
+		`|(failed|unable|cannot) to acquire (file )?lock` +
+		`|cache directory is locked)`,
+)
 
-// looksLikeCacheLockError reports whether the suite output matches a
-// cache-contention signature documented in I-802. False positives here
-// only cost one bonus retry; false negatives leave the original behavior
-// in place.
+// looksLikeCacheLockError reports whether the suite output matches one of
+// the documented cache-contention phrases (see cacheLockErrorPattern).
+// False positives only cost one bonus retry; false negatives leave the
+// original behavior in place.
 func looksLikeCacheLockError(output []byte) bool {
 	return cacheLockErrorPattern.Match(output)
 }
 
+// lockAwareRetryResult bundles the four return values of
+// runWithLockAwareRetry so call sites don't depend on positional ordering
+// and a future addition (e.g. RetryReason) can land without silently
+// misaligning a destructure.
+type lockAwareRetryResult struct {
+	Output   []byte // first attempt + delimiter + second attempt when Retried
+	ExitCode int
+	RunErr   error
+	Retried  bool
+}
+
 // runWithLockAwareRetry runs the suite once. If it failed AND the suite
 // is cache-contended AND the output matches a lock-shaped signature, it
-// sleeps a jittered 5–15s and runs once more. Returns the final result
-// plus a bool that's true iff the second attempt fired (recorded into
-// testSummary.Retried). Sleep is skipped when runFn was injected (i.e.
-// test mode via TestRecordOpts.RunCmd) so unit tests don't add wall time.
-func runWithLockAwareRetry(suite string, injected bool, runFn func() ([]byte, int, error)) ([]byte, int, error, bool) {
+// sleeps a jittered 5–15s and runs once more. The returned Output
+// concatenates BOTH attempts (separated by a clearly-labeled boundary) so
+// evidence preserves the cache-lock signature that motivated the retry —
+// without that, retried=true is unverifiable months later. Sleep is
+// skipped when runFn was injected (test mode) so unit tests don't add
+// wall time.
+//
+// Cancellability note: the time.Sleep here is uninterruptible — Ctrl-C
+// during the jitter window won't fire until after the second attempt
+// returns. Plumbing a context.Context through TestRecordOpts is a
+// scope-adjacent change tracked separately.
+func runWithLockAwareRetry(suite string, injected bool, runFn func() ([]byte, int, error)) lockAwareRetryResult {
 	output, exitCode, runErr := runFn()
 	if exitCode == 0 || !isCacheContendedSuite(suite) || !looksLikeCacheLockError(output) {
-		return output, exitCode, runErr, false
+		return lockAwareRetryResult{Output: output, ExitCode: exitCode, RunErr: runErr, Retried: false}
+	}
+	// Loudly surface a first-attempt exec-layer error before deciding to
+	// retry — otherwise an "exit 0 but failed to start" condition could be
+	// masked by a coincidentally-clean retry.
+	if runErr != nil {
+		fmt.Fprintf(os.Stderr,
+			"I-802: %s first attempt returned runErr=%v alongside lock-shaped output; retrying anyway\n",
+			suite, runErr)
 	}
 	if !injected {
 		jitter := time.Duration(5000+rand.Intn(10001)) * time.Millisecond
 		fmt.Fprintf(os.Stderr, "I-802: %s hit cache-lock signature; retrying after %s\n", suite, jitter)
 		time.Sleep(jitter)
 	}
-	output, exitCode, runErr = runFn()
-	return output, exitCode, runErr, true
+	output2, exitCode2, runErr2 := runFn()
+	// Concatenate so evidence shows BOTH attempts. Delimiter is fixed so
+	// downstream tooling can grep for it.
+	var combined bytes.Buffer
+	combined.Write(output)
+	combined.WriteString("\n--- I-802 retry boundary (above: first attempt, lock-shaped; below: retry) ---\n")
+	combined.Write(output2)
+	return lockAwareRetryResult{Output: combined.Bytes(), ExitCode: exitCode2, RunErr: runErr2, Retried: true}
 }
 
 func shellQuote(s string) string {
