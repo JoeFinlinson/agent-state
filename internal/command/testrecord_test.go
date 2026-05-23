@@ -2,6 +2,7 @@ package command
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +16,10 @@ import (
 	"github.com/jfinlinson/agent-state/internal/manifest"
 	"github.com/jfinlinson/agent-state/internal/model"
 )
+
+func gzipNewReader(b []byte) (io.Reader, error) {
+	return gzip.NewReader(bytes.NewReader(b))
+}
 
 func testRecordOpts() TestRecordOpts {
 	return TestRecordOpts{
@@ -966,6 +971,231 @@ func TestTestRunPreflight_SuccessProceedsWithCleanup(t *testing.T) {
 	if fake.deleteCalls != 1 {
 		t.Errorf("delete calls = %d, want 1 (the preflight probe cleanup)", fake.deleteCalls)
 	}
+}
+
+// I-802 — per-agent golangci-lint / Go build caches + lock-aware retry.
+// Each test exercises a distinct failure mode of the original "shared
+// ~/Library/Caches/golangci-lint flock" behavior; together they pin the
+// allow-list classifier, the env injection, the regex match, the bounded
+// retry, and the summary fields against regression.
+
+func TestTestRunInjectsPerAgentCacheForApiLint(t *testing.T) {
+	s, cfg := setupPRTestEnv(t)
+	agentsRoot := filepath.Join(t.TempDir(), "theraprac-agents")
+	t.Setenv("THERAPRAC_AGENTS_ROOT", agentsRoot)
+	cfg.Testing.RequiredSuites["api_lint"] = config.SuiteConfig{Command: "cd ../theraprac-api && make lint"}
+
+	var gotCmd string
+	opts := TestRecordOpts{
+		Run:   true,
+		Agent: "b",
+		GitHeadSHA: func(dir string) (string, error) {
+			return "abc1234567890", nil
+		},
+		RunCmd: func(command string) ([]byte, int, error) {
+			gotCmd = command
+			return []byte("PASS\n"), 0, nil
+		},
+		Backend: &evidence.LocalBackend{Dir: t.TempDir()},
+	}
+
+	code := TestRecord(s, cfg, "T-003", "api_lint", opts)
+	if code != 0 {
+		t.Fatalf("returned %d, want 0", code)
+	}
+	wantGL := filepath.Join(cfg.Root(), ".as", "cache", "golangci-lint", "agent-b")
+	wantGC := filepath.Join(cfg.Root(), ".as", "cache", "go-build", "agent-b")
+	for _, want := range []string{
+		"GOLANGCI_LINT_CACHE='" + wantGL + "'",
+		"GOCACHE='" + wantGC + "'",
+	} {
+		if !strings.Contains(gotCmd, want) {
+			t.Errorf("api_lint command missing %q:\n%s", want, gotCmd)
+		}
+	}
+	for _, dir := range []string{wantGL, wantGC} {
+		if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+			t.Errorf("cache dir not created: %s (err=%v)", dir, err)
+		}
+	}
+}
+
+func TestTestRunSkipsPerAgentCacheForNonContendedSuite(t *testing.T) {
+	s, cfg := setupPRTestEnv(t)
+	agentsRoot := filepath.Join(t.TempDir(), "theraprac-agents")
+	t.Setenv("THERAPRAC_AGENTS_ROOT", agentsRoot)
+	cfg.Testing.RequiredSuites["api_unit"] = config.SuiteConfig{Command: "cd ../theraprac-api && make test-unit"}
+
+	var gotCmd string
+	opts := TestRecordOpts{
+		Run:   true,
+		Agent: "b",
+		GitHeadSHA: func(dir string) (string, error) {
+			return "abc1234567890", nil
+		},
+		RunCmd: func(command string) ([]byte, int, error) {
+			gotCmd = command
+			return []byte("PASS\n"), 0, nil
+		},
+		Backend: &evidence.LocalBackend{Dir: t.TempDir()},
+	}
+
+	code := TestRecord(s, cfg, "T-003", "api_unit", opts)
+	if code != 0 {
+		t.Fatalf("returned %d, want 0", code)
+	}
+	for _, leak := range []string{"GOLANGCI_LINT_CACHE=", "GOCACHE="} {
+		if strings.Contains(gotCmd, leak) {
+			t.Errorf("non-contended suite must not inject %s:\n%s", leak, gotCmd)
+		}
+	}
+}
+
+func TestTestRunRetriesOnCacheLockError(t *testing.T) {
+	s, cfg := setupPRTestEnv(t)
+	agentsRoot := filepath.Join(t.TempDir(), "theraprac-agents")
+	t.Setenv("THERAPRAC_AGENTS_ROOT", agentsRoot)
+	cfg.Testing.RequiredSuites["api_lint"] = config.SuiteConfig{Command: "cd ../theraprac-api && make lint"}
+
+	calls := 0
+	evDir := t.TempDir()
+	opts := TestRecordOpts{
+		Run:   true,
+		Agent: "b",
+		GitHeadSHA: func(dir string) (string, error) {
+			return "abc1234567890", nil
+		},
+		RunCmd: func(command string) ([]byte, int, error) {
+			calls++
+			if calls == 1 {
+				return []byte("ERRO Running error: directory /Users/.../golangci-lint is being used by another process\n"), 3, nil
+			}
+			return []byte("ok\n"), 0, nil
+		},
+		Backend: &evidence.LocalBackend{Dir: evDir},
+	}
+
+	code := TestRecord(s, cfg, "T-003", "api_lint", opts)
+	if code != 0 {
+		t.Fatalf("returned %d, want 0 (retry should have succeeded)", code)
+	}
+	if calls != 2 {
+		t.Errorf("RunCmd called %d times, want 2 (1 fail + 1 retry)", calls)
+	}
+	item, _ := s.Get("T-003")
+	ev, _ := getNestedField(item, "testing_evidence", "api_lint")
+	if !strings.HasPrefix(ev, "pass") {
+		t.Errorf("evidence = %q, want pass prefix after retry", ev)
+	}
+	gotSummary := readBackTestSummary(t, opts.Backend, "T-003", "api_lint")
+	if !gotSummary.Retried {
+		t.Errorf("summary.retried = false, want true after a retry fired")
+	}
+}
+
+func TestTestRunDoesNotRetryOnRealLintFailure(t *testing.T) {
+	s, cfg := setupPRTestEnv(t)
+	agentsRoot := filepath.Join(t.TempDir(), "theraprac-agents")
+	t.Setenv("THERAPRAC_AGENTS_ROOT", agentsRoot)
+	cfg.Testing.RequiredSuites["api_lint"] = config.SuiteConfig{Command: "cd ../theraprac-api && make lint"}
+
+	calls := 0
+	opts := TestRecordOpts{
+		Run:   true,
+		Agent: "b",
+		GitHeadSHA: func(dir string) (string, error) {
+			return "abc1234567890", nil
+		},
+		RunCmd: func(command string) ([]byte, int, error) {
+			calls++
+			return []byte("foo.go:10: declared and not used: x\n"), 1, nil
+		},
+		Backend: &evidence.LocalBackend{Dir: t.TempDir()},
+	}
+
+	code := TestRecord(s, cfg, "T-003", "api_lint", opts)
+	if code != 1 {
+		t.Fatalf("returned %d, want 1 (real lint failure must not be retried away)", code)
+	}
+	if calls != 1 {
+		t.Errorf("RunCmd called %d times, want 1 (no retry on genuine failure)", calls)
+	}
+	item, _ := s.Get("T-003")
+	ev, _ := getNestedField(item, "testing_evidence", "api_lint")
+	if !strings.HasPrefix(ev, "fail") {
+		t.Errorf("evidence = %q, want fail prefix", ev)
+	}
+}
+
+func TestTestRunSummaryRecordsCacheRootsAndRetry(t *testing.T) {
+	s, cfg := setupPRTestEnv(t)
+	agentsRoot := filepath.Join(t.TempDir(), "theraprac-agents")
+	t.Setenv("THERAPRAC_AGENTS_ROOT", agentsRoot)
+	cfg.Testing.RequiredSuites["api_lint"] = config.SuiteConfig{Command: "cd ../theraprac-api && make lint"}
+
+	opts := TestRecordOpts{
+		Run:   true,
+		Agent: "b",
+		GitHeadSHA: func(dir string) (string, error) {
+			return "abc1234567890", nil
+		},
+		RunCmd: func(command string) ([]byte, int, error) {
+			return []byte("PASS\n"), 0, nil
+		},
+		Backend: &evidence.LocalBackend{Dir: t.TempDir()},
+	}
+
+	code := TestRecord(s, cfg, "T-003", "api_lint", opts)
+	if code != 0 {
+		t.Fatalf("returned %d, want 0", code)
+	}
+	got := readBackTestSummary(t, opts.Backend, "T-003", "api_lint")
+	wantGL := filepath.Join(cfg.Root(), ".as", "cache", "golangci-lint", "agent-b")
+	wantGC := filepath.Join(cfg.Root(), ".as", "cache", "go-build", "agent-b")
+	if got.GolangciLintCache != wantGL {
+		t.Errorf("summary.golangci_lint_cache = %q, want %q", got.GolangciLintCache, wantGL)
+	}
+	if got.GoCache != wantGC {
+		t.Errorf("summary.go_cache = %q, want %q", got.GoCache, wantGC)
+	}
+	if got.Retried {
+		t.Errorf("summary.retried = true on clean run, want false")
+	}
+}
+
+// readBackTestSummary fetches the uploaded summary.json.gz for an item+suite
+// and decodes it. Walks all uploaded keys (timestamped) and returns the
+// first summary it finds — tests in this package upload exactly once.
+func readBackTestSummary(t *testing.T, backend evidence.Backend, id, suite string) testSummary {
+	t.Helper()
+	keys, err := backend.List(id + "/" + suite + "/")
+	if err != nil {
+		t.Fatalf("List(%s/%s/): %v", id, suite, err)
+	}
+	for _, k := range keys {
+		if !strings.HasSuffix(k, "summary.json.gz") {
+			continue
+		}
+		var buf bytes.Buffer
+		if err := backend.Download(k, &buf); err != nil {
+			t.Fatalf("Download(%s): %v", k, err)
+		}
+		gz, err := gzipNewReader(buf.Bytes())
+		if err != nil {
+			t.Fatalf("gzip reader on %s: %v", k, err)
+		}
+		raw, err := io.ReadAll(gz)
+		if err != nil {
+			t.Fatalf("read summary %s: %v", k, err)
+		}
+		var got testSummary
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("unmarshal summary %s: %v", k, err)
+		}
+		return got
+	}
+	t.Fatalf("no summary.json.gz found under %s/%s/ (keys: %v)", id, suite, keys)
+	return testSummary{}
 }
 
 var _ io.Reader = (*bytes.Reader)(nil) // keep io import live

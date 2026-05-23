@@ -7,9 +7,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -46,6 +48,12 @@ type testSummary struct {
 	ExitCode   int    `json:"exit_code"`
 	DurationMs int64  `json:"duration_ms"`
 	RecordedAt string `json:"recorded_at"`
+	// I-802: cache roots used for cache-contended suites and whether a
+	// lock-aware retry fired. Omitempty keeps non-contended-suite summaries
+	// unchanged from pre-I-802 evidence.
+	GolangciLintCache string `json:"golangci_lint_cache,omitempty"`
+	GoCache           string `json:"go_cache,omitempty"`
+	Retried           bool   `json:"retried,omitempty"`
 }
 
 // TestRecord records or executes a test suite for an item.
@@ -195,28 +203,41 @@ func testRunMode(s *store.Store, cfg *config.Config, id, suite, suiteCmd, sha st
 	// Both rewrites match the same `cd ../repo` patterns; whichever fires
 	// first wins, and the other becomes a no-op for that cd.
 	cmd = rewriteSuiteForWorktree(cfg, id, cmd)
+	var resolvedRuntime testAgentRuntime
+	var runtimeResolved bool
 	if runtime, ok, err := resolveTestAgentRuntime(cfg, opts, cmd); err != nil {
 		fmt.Fprintf(os.Stderr, "test runtime: %v\n", err)
 		return 1
 	} else if ok {
+		resolvedRuntime = runtime
+		runtimeResolved = true
 		cmd = rewriteSuiteForAgentWorkspace(runtime, cmd)
-		cmd = injectAgentRuntimeEnv(runtime, cmd)
+		cmd = injectAgentRuntimeEnvForSuite(runtime, suite, cfg.Root(), cmd)
 		fmt.Printf("Running %s on %s: %s\n", suite, runtime.AgentID, cmd)
 	} else {
 		fmt.Printf("Running %s: %s\n", suite, cmd)
+	}
+	// I-802: capture the cache paths we just injected so testSummary can
+	// record them. Recomputing (vs. parsing them back out of cmd) keeps
+	// the summary populated even if the env-injection ordering changes.
+	var golangciLintCache, goCache string
+	if runtimeResolved && isCacheContendedSuite(suite) {
+		if gl, gc, err := cachePathsForRuntime(cfg.Root(), resolvedRuntime.AgentID); err == nil {
+			golangciLintCache = gl
+			goCache = gc
+		}
 	}
 	start := time.Now()
 
 	// Execute suite command. Stream output to stderr so the user (and
 	// activity tracker) sees progress.
-	var output []byte
-	var exitCode int
-	var runErr error
-	if opts.RunCmd != nil {
-		output, exitCode, runErr = opts.RunCmd(cmd)
-	} else {
-		output, exitCode, runErr = runCmdInDirStreaming(cfg.Root(), cmd)
+	runOnce := func() ([]byte, int, error) {
+		if opts.RunCmd != nil {
+			return opts.RunCmd(cmd)
+		}
+		return runCmdInDirStreaming(cfg.Root(), cmd)
 	}
+	output, exitCode, runErr, retried := runWithLockAwareRetry(suite, opts.RunCmd != nil, runOnce)
 	duration := time.Since(start)
 
 	if runErr != nil && exitCode == 0 {
@@ -233,12 +254,15 @@ func testRunMode(s *store.Store, cfg *config.Config, id, suite, suiteCmd, sha st
 
 	// Build summary
 	summary := testSummary{
-		Status:     status,
-		Suite:      suite,
-		SHA:        sha,
-		ExitCode:   exitCode,
-		DurationMs: duration.Milliseconds(),
-		RecordedAt: now.Format(time.RFC3339),
+		Status:            status,
+		Suite:             suite,
+		SHA:               sha,
+		ExitCode:          exitCode,
+		DurationMs:        duration.Milliseconds(),
+		RecordedAt:        now.Format(time.RFC3339),
+		GolangciLintCache: golangciLintCache,
+		GoCache:           goCache,
+		Retried:           retried,
 	}
 
 	// Upload evidence (best-effort — don't fail the test recording if upload fails)
@@ -816,6 +840,15 @@ func rewriteSuiteForAgentWorkspace(runtime testAgentRuntime, suiteCmd string) st
 }
 
 func injectAgentRuntimeEnv(runtime testAgentRuntime, suiteCmd string) string {
+	return injectAgentRuntimeEnvForSuite(runtime, "", "", suiteCmd)
+}
+
+// injectAgentRuntimeEnvForSuite is the suite-aware variant that adds
+// per-agent cache env vars (GOLANGCI_LINT_CACHE, GOCACHE) when the suite
+// is on the cache-contended allow-list (I-802). suite=="" or root=="" skips
+// the cache injection — preserves the older injectAgentRuntimeEnv contract
+// for callers that have no suite context.
+func injectAgentRuntimeEnvForSuite(runtime testAgentRuntime, suite, root, suiteCmd string) string {
 	env := map[string]string{
 		"AS_AGENT_ID":          runtime.AgentID,
 		"ST_AGENT_ID":          runtime.AgentID,
@@ -830,6 +863,13 @@ func injectAgentRuntimeEnv(runtime testAgentRuntime, suiteCmd string) string {
 		"NEXT_PUBLIC_API_URL":  fmt.Sprintf("http://localhost:%d", runtime.Ports.API),
 		"PLAYWRIGHT_BASE_URL":  fmt.Sprintf("http://localhost:%d", runtime.Ports.Web),
 	}
+	if suite != "" && root != "" && isCacheContendedSuite(suite) {
+		gl, gc, err := cachePathsForRuntime(root, runtime.AgentID)
+		if err == nil {
+			env["GOLANGCI_LINT_CACHE"] = gl
+			env["GOCACHE"] = gc
+		}
+	}
 	keys := make([]string, 0, len(env))
 	for key := range env {
 		keys = append(keys, key)
@@ -842,6 +882,74 @@ func injectAgentRuntimeEnv(runtime testAgentRuntime, suiteCmd string) string {
 	}
 	b.WriteString(suiteCmd)
 	return b.String()
+}
+
+// isCacheContendedSuite returns true for suites whose underlying tool
+// takes a process-wide flock on a shared cache directory and therefore
+// serializes (or fails) when multiple agents run concurrently. Start
+// narrow with api_lint (golangci-lint's analysis cache); extend only
+// when contention is observed elsewhere — keeps blast radius scoped to
+// the suite we know is hurting (I-802).
+func isCacheContendedSuite(suite string) bool {
+	switch suite {
+	case "api_lint":
+		return true
+	}
+	return false
+}
+
+// cachePathsForRuntime returns the per-agent golangci-lint and Go build
+// cache directories under <workspace-root>/.as/cache/, creating them lazily.
+// Each agent's clone has its own workspace, so the resulting paths are
+// structurally isolated from peer agents — no shared flock, no contention.
+func cachePathsForRuntime(root, agentID string) (golangciLintCache, goCache string, err error) {
+	if root == "" || agentID == "" {
+		return "", "", fmt.Errorf("cachePathsForRuntime: root and agentID required")
+	}
+	golangciLintCache = filepath.Join(root, ".as", "cache", "golangci-lint", agentID)
+	goCache = filepath.Join(root, ".as", "cache", "go-build", agentID)
+	if err := os.MkdirAll(golangciLintCache, 0o755); err != nil {
+		return "", "", err
+	}
+	if err := os.MkdirAll(goCache, 0o755); err != nil {
+		return "", "", err
+	}
+	return golangciLintCache, goCache, nil
+}
+
+// cacheLockErrorPattern matches the three documented golangci-lint /
+// Go build-cache contention signatures (case-insensitive). Anchored on
+// fragments that are stable across versions and not produced by genuine
+// lint failures (so a real "x declared and not used" never triggers a
+// retry).
+var cacheLockErrorPattern = regexp.MustCompile(`(?i)(directory .* is being used by another process|cache .*(is )?locked|concurrent map writes)`)
+
+// looksLikeCacheLockError reports whether the suite output matches a
+// cache-contention signature documented in I-802. False positives here
+// only cost one bonus retry; false negatives leave the original behavior
+// in place.
+func looksLikeCacheLockError(output []byte) bool {
+	return cacheLockErrorPattern.Match(output)
+}
+
+// runWithLockAwareRetry runs the suite once. If it failed AND the suite
+// is cache-contended AND the output matches a lock-shaped signature, it
+// sleeps a jittered 5–15s and runs once more. Returns the final result
+// plus a bool that's true iff the second attempt fired (recorded into
+// testSummary.Retried). Sleep is skipped when runFn was injected (i.e.
+// test mode via TestRecordOpts.RunCmd) so unit tests don't add wall time.
+func runWithLockAwareRetry(suite string, injected bool, runFn func() ([]byte, int, error)) ([]byte, int, error, bool) {
+	output, exitCode, runErr := runFn()
+	if exitCode == 0 || !isCacheContendedSuite(suite) || !looksLikeCacheLockError(output) {
+		return output, exitCode, runErr, false
+	}
+	if !injected {
+		jitter := time.Duration(5000+rand.Intn(10001)) * time.Millisecond
+		fmt.Fprintf(os.Stderr, "I-802: %s hit cache-lock signature; retrying after %s\n", suite, jitter)
+		time.Sleep(jitter)
+	}
+	output, exitCode, runErr = runFn()
+	return output, exitCode, runErr, true
 }
 
 func shellQuote(s string) string {
