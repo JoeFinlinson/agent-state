@@ -456,7 +456,7 @@ func checkMainBranchGate(root string) error {
 	for _, p := range offenders {
 		fmt.Fprintf(&b, "  - %s\n", p)
 	}
-	fmt.Fprintf(&b, "\nComputed state prefix: %q\n", itemsPrefix)
+	fmt.Fprintf(&b, "Computed state prefix: %q\n", itemsPrefix)
 	b.WriteString("\nBranch is main — this would bypass PR review.\n")
 	b.WriteString("Recovery: open a feature branch (git checkout -b fix/<id>-<slug>), commit these files there, push, and open a PR.\n")
 	b.WriteString("Operator override (one-off bypass): ST_SYNC_ALLOW_MAIN=1\n")
