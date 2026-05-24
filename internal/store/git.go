@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -201,41 +202,84 @@ func restoreLockedItems(snapshots map[string][]byte) {
 // The working tree's index is never touched; rebase conflicts cannot
 // arise.
 
+// ErrI807MainBranchGate is the sentinel for the I-807 gate refusal so
+// upstream callers can detect it programmatically via errors.Is rather
+// than by string matching on the human-readable message.
+var ErrI807MainBranchGate = errors.New("I-807: main-branch dirty-non-state gate")
+
+// isManagedStatePath returns true when the toplevel-relative path lives
+// inside the agent-state allowlist: the configured items prefix (e.g.
+// `agent-state/`) or `.as/`. The lock file (`<itemsPrefix>.st-git.lock`)
+// is also allowlisted defense-in-depth (it should also be `??`, which
+// the caller filters earlier).
+func isManagedStatePath(path, itemsPrefix string) bool {
+	if strings.HasPrefix(path, ".as/") {
+		return true
+	}
+	if itemsPrefix != "" && strings.HasPrefix(path, itemsPrefix) {
+		return true
+	}
+	return false
+}
+
 // checkMainBranchGate is the I-807 defense-in-depth gate. It fails closed
-// when the workspace HEAD is the default branch (`main`) AND the dirty
-// working tree contains any tracked-modified file outside the agent-state
-// allowlist (`agent-state/`, `.as/`). Prevents the silent-branch-flip +
-// auto-push pattern observed in commit 9edc8732b, where a workspace whose
-// HEAD was silently flipped from a feature branch back to `main` would
-// have its non-agent-state edits (e.g. claude-config/, docs/) auto-committed
-// and pushed to origin/main with no PR or review.
+// when the workspace HEAD is the literal branch `main` (or is a detached
+// HEAD pointing at the same SHA as `refs/remotes/origin/main`) AND any
+// tracked / staged / committed-but-unpushed mutation outside the
+// agent-state allowlist (`<itemsPrefix>`, `.as/`) is about to be pushed
+// to origin/main. Prevents the silent-branch-flip + auto-push pattern
+// observed in commit 9edc8732b.
+//
+// Hardcoded to `main`: the rest of git.go (pushWithRetry, verifyPushLanded,
+// replayCommitOnFetchedMain) also hardcodes `main`. If the repo's default
+// branch is ever renamed, all of these need to update together.
 //
 // Fail-opens (returns nil) when:
-//   - branch detection itself fails (detached HEAD, fresh clone, errors) —
-//     we only gate when we KNOW we're on main, avoiding over-blocking
-//   - branch is not `main`
-//   - ST_SYNC_ALLOW_MAIN=1 is set in the env (operator override, mirrors
-//     I-759 / I-765 override shape; emits an audit-stderr line)
+//   - branch detection itself fails (fresh clone with unborn HEAD, errors)
+//   - branch is not `main` AND detached HEAD does not resolve to origin/main
+//   - flat-layout fixture (itemsPrefix == "") — no items-vs-non-items
+//     distinction to enforce; the gate only protects nested layouts
+//   - ST_SYNC_ALLOW_MAIN=1 is set AND the gate would otherwise have fired
+//     (audit-stderr emitted with the offender list so the bypass is named)
+//
+// Inspects: (a) `git status --porcelain` for tracked-modified / staged
+// changes in the working tree, AND (b) `git log origin/main..HEAD
+// --name-only` for non-state paths in already-committed-locally-but-
+// unpushed commits (the "stranded local commit" path that working-tree
+// inspection alone misses).
 //
 // Skips `??` (pure-untracked) porcelain entries to preserve I-442's
-// peer-WIP protection — `git add -u` won't auto-stage them, so flagging
-// them would over-block on peer agents leaving untracked files in
-// agent-state/issues/ mid-`st create`.
+// peer-WIP protection. Restricts rename / copy detection to entries whose
+// XY status code begins with `R` or `C` (not a path-text substring search)
+// to avoid mangling filenames that happen to contain ` -> `. Gates BOTH
+// the old AND new path of a rename so a rename FROM non-state INTO
+// agent-state still flags the (deletion-side) non-state mutation.
 //
 // Pairs structurally with I-765 (broader gate, all branches, same code
 // path — additive).
 func checkMainBranchGate(root string) error {
-	if os.Getenv("ST_SYNC_ALLOW_MAIN") == "1" {
-		fmt.Fprintln(os.Stderr, "[I-807] ST_SYNC_ALLOW_MAIN=1 — bypassing main-branch dirty-non-state gate")
-		return nil
-	}
+	overrideSet := os.Getenv("ST_SYNC_ALLOW_MAIN") == "1"
 
 	branchOut, err := gitOutput(root, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {
 		return nil // fail-open: don't gate when we can't tell which branch
 	}
 	branch := strings.TrimSpace(branchOut)
-	if branch != "main" {
+	onMain := branch == "main"
+	if !onMain {
+		// Detached HEAD reports `HEAD` from --abbrev-ref. If the detached
+		// commit is the same as origin/main, treat it as on-main for the
+		// purpose of push protection (pushWithRetry can still target
+		// refs/heads/main via push.default / a permissive refspec).
+		if branch == "HEAD" {
+			headSHA, herr := gitOutput(root, "rev-parse", "HEAD")
+			originSHA, oerr := gitOutput(root, "rev-parse", "refs/remotes/origin/main")
+			if herr == nil && oerr == nil && strings.TrimSpace(headSHA) == strings.TrimSpace(originSHA) {
+				onMain = true
+			}
+		}
+	}
+	if !onMain {
 		return nil
 	}
 
@@ -248,25 +292,16 @@ func checkMainBranchGate(root string) error {
 	}
 	toplevel := strings.TrimSpace(toplevelOut)
 
-	// Compute the items-root prefix relative to the git toplevel. In
-	// production this is `agent-state/`; in flat-layout test fixtures
-	// (items live directly at the git root) the rel is `.` and the
-	// prefix collapses to empty — which makes every path allowlisted,
-	// so the gate fails-open on flat layouts. This is intentional:
-	// flat layouts don't have a non-state surface to gate.
-	//
-	// Resolve symlinks on both sides BEFORE computing Rel: macOS routes
-	// /var → /private/var, and `git rev-parse --show-toplevel` returns
-	// the canonical (post-symlink) form while t.TempDir() / the cfg.root
-	// keep the symlink form. Without EvalSymlinks the Rel result is
-	// `../../private/var/...` and the gate would mis-classify legitimate
-	// agent-state files as non-state.
-	canonRoot, err := filepath.EvalSymlinks(root)
-	if err != nil {
+	// Compute the items-root prefix relative to the git toplevel.
+	// Resolve symlinks on BOTH sides atomically: macOS routes /var →
+	// /private/var. If only one EvalSymlinks succeeds, Rel mixes the
+	// canonical and raw forms and emits a `../../private/var/...`
+	// traversal that mis-classifies every path as non-state. Use the
+	// raw forms on either side's failure (or fail-open).
+	canonRoot, errRoot := filepath.EvalSymlinks(root)
+	canonToplevel, errTop := filepath.EvalSymlinks(toplevel)
+	if errRoot != nil || errTop != nil {
 		canonRoot = root
-	}
-	canonToplevel, err := filepath.EvalSymlinks(toplevel)
-	if err != nil {
 		canonToplevel = toplevel
 	}
 	itemsRel, err := filepath.Rel(canonToplevel, canonRoot)
@@ -278,41 +313,82 @@ func checkMainBranchGate(root string) error {
 		itemsPrefix = filepath.ToSlash(itemsRel) + "/"
 	}
 
-	statusOut, err := gitOutput(toplevel, "status", "--porcelain")
+	// Flat layout has no items-vs-non-items distinction to enforce.
+	// Surface this once per process so an operator inheriting flat
+	// config doesn't silently assume the gate is active.
+	if itemsPrefix == "" {
+		flatLayoutAuditOnce()
+		return nil
+	}
+
+	// Status porcelain with -z (NUL-terminated, raw bytes, no quoting).
+	// Default porcelain v1 quotes any path containing a space or non-
+	// ASCII byte — the surrounding `"..."` defeats HasPrefix allowlist
+	// checks. -z is the canonical fix. Rename / copy entries arrive as
+	// two NUL-terminated tokens: `<XY> <new-path>\0<old-path>\0`.
+	statusOut, err := gitOutput(toplevel, "status", "--porcelain", "-z")
 	if err != nil {
 		return nil // fail-open
 	}
 
 	var offenders []string
-	for _, line := range strings.Split(statusOut, "\n") {
-		if len(line) < 4 {
+	tokens := strings.Split(statusOut, "\x00")
+	for i := 0; i < len(tokens); i++ {
+		tok := tokens[i]
+		if len(tok) < 4 {
 			continue
 		}
-		code := line[:2]
-		path := line[3:]
-		// Skip pure-untracked entries: `git add -u` won't stage them,
-		// and flagging would regress I-442's peer-WIP protection.
+		code := tok[:2]
+		path := tok[3:]
+		// Skip pure-untracked (`git add -u` won't stage them; flagging
+		// would regress I-442's peer-WIP protection).
 		if code == "??" {
 			continue
 		}
-		// Defense-in-depth: skip the lock file we ourselves hold.
-		if path == ".st-git.lock" {
+		// Rename / copy: -z format puts the OLD path in the next token
+		// (no XY prefix). XY[0] is the truth-of-rename, NOT a path-text
+		// substring search (which would mangle filenames containing
+		// literal ` -> `).
+		if code[0] == 'R' || code[0] == 'C' {
+			newPath := path
+			oldPath := ""
+			if i+1 < len(tokens) {
+				oldPath = tokens[i+1]
+				i++ // consume the old-path token
+			}
+			if !isManagedStatePath(newPath, itemsPrefix) {
+				offenders = append(offenders, newPath+" (rename target)")
+			}
+			if oldPath != "" && !isManagedStatePath(oldPath, itemsPrefix) {
+				offenders = append(offenders, oldPath+" (rename source)")
+			}
 			continue
 		}
-		// Rename entries appear as `R  old -> new`; gate only the new name.
-		if strings.Contains(path, " -> ") {
-			parts := strings.SplitN(path, " -> ", 2)
-			path = parts[len(parts)-1]
-		}
-		// Flat layout (itemsPrefix == "") → every path is items-rooted →
-		// nothing is "non-state" → no offenders.
-		if itemsPrefix == "" {
-			continue
-		}
-		if strings.HasPrefix(path, itemsPrefix) || strings.HasPrefix(path, ".as/") {
+		if isManagedStatePath(path, itemsPrefix) {
 			continue
 		}
 		offenders = append(offenders, path)
+	}
+
+	// Also scan for non-state files in locally-committed-but-unpushed
+	// commits. The working-tree inspection above misses commits that
+	// were created before this gate landed (or by a parallel session)
+	// and that pushWithRetry would otherwise batch-push to origin/main.
+	// Use -z + NUL parsing so the same quoting concern doesn't bite.
+	logOut, logErr := gitOutput(toplevel, "log", "-z", "--name-only", "--pretty=format:", "refs/remotes/origin/main..HEAD")
+	if logErr == nil {
+		seen := make(map[string]bool)
+		for _, p := range strings.Split(logOut, "\x00") {
+			p = strings.TrimSpace(p)
+			if p == "" || seen[p] {
+				continue
+			}
+			if isManagedStatePath(p, itemsPrefix) {
+				continue
+			}
+			seen[p] = true
+			offenders = append(offenders, p+" (already committed locally)")
+		}
 	}
 
 	if len(offenders) == 0 {
@@ -327,7 +403,27 @@ func checkMainBranchGate(root string) error {
 	b.WriteString("\nBranch is main — this would bypass PR review.\n")
 	b.WriteString("Recovery: open a feature branch (git checkout -b fix/<id>-<slug>), commit these files there, push, and open a PR.\n")
 	b.WriteString("Operator override (one-off bypass): ST_SYNC_ALLOW_MAIN=1\n")
-	return errors.New(b.String())
+	wrapped := fmt.Errorf("%w\n%s", ErrI807MainBranchGate, b.String())
+
+	if overrideSet {
+		fmt.Fprintf(os.Stderr, "[I-807] ST_SYNC_ALLOW_MAIN=1 — bypassing gate, would have refused:\n")
+		for _, p := range offenders {
+			fmt.Fprintf(os.Stderr, "  - %s\n", p)
+		}
+		return nil
+	}
+	return wrapped
+}
+
+// flatLayoutAuditedOnce ensures the flat-layout audit-stderr fires at
+// most once per process so the operator sees the gate-inactive notice
+// without spamming every GitSync call.
+var flatLayoutAuditedOnce sync.Once
+
+func flatLayoutAuditOnce() {
+	flatLayoutAuditedOnce.Do(func() {
+		fmt.Fprintln(os.Stderr, "[I-807] flat-layout workspace — main-branch gate is inactive (items root == git toplevel; no non-state surface to enforce)")
+	})
 }
 
 func (s *Store) GitSync(message string, newPaths ...string) error {

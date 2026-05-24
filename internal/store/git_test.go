@@ -1,6 +1,8 @@
 package store
 
 import (
+	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1122,5 +1124,362 @@ func TestGitSync_AllowsPushOnMain_WhenOnlyUntrackedNonState(t *testing.T) {
 	out, _ := statusCmd.Output()
 	if !strings.HasPrefix(string(out), "??") {
 		t.Errorf("untracked file should remain untracked after GitSync; status output: %q", string(out))
+	}
+}
+
+// ---- I-807 review-driven additions (PR #163 review round 1) ----
+
+// I-807 review #1: quoted-path mis-classification. Without
+// `core.quotePath=false`, porcelain emits filenames containing spaces
+// or non-ASCII as `"path with space.md"` (leading double-quote). The
+// gate's HasPrefix allowlist check would then fail on legitimate
+// state files and refuse the sync. Pinned with `-c core.quotePath=false`.
+func TestGitSync_AllowsPushOnMain_StateFileWithSpaceInName(t *testing.T) {
+	workspace, asDir := setupI807Workspace(t, false)
+
+	// Drop a tracked state file with a space in its name BEFORE
+	// initGitRepo's commit so it's committed in the initial commit.
+	// (initGitRepo runs `git add -A` then `git commit` — but
+	// initGitRepo already ran in setupI807Workspace. So commit it
+	// in a follow-up commit.)
+	spacedPath := filepath.Join(workspace, "agent-state", "tasks", "T-002 with space.md")
+	os.WriteFile(spacedPath, []byte(`id: T-002
+type: task
+status: queued
+created: 2026-03-25T10:00:00-06:00
+last_touched: 2026-03-25T10:00:00-06:00
+
+title: With space
+
+depends_on:
+- []
+`), 0644)
+	gitRun(t, workspace, "add", "agent-state/tasks/T-002 with space.md")
+	gitRun(t, workspace, "commit", "-m", "add spaced item")
+
+	// Now modify it — should appear in porcelain as a tracked-modified
+	// entry. Without quotePath=false the path arrives wrapped in `"`.
+	os.WriteFile(spacedPath, []byte(`id: T-002
+type: task
+status: active
+created: 2026-03-25T10:00:00-06:00
+last_touched: 2026-03-25T10:00:00-06:00
+
+title: With space
+
+depends_on:
+- []
+`), 0644)
+
+	s := loadI807Store(t, asDir)
+	item, _ := s.Get("T-001")
+	item.Doc.SetField("status", "active")
+	s.write(item)
+
+	if err := s.GitSync("agent-b: update T-001 (spaced peer file present)"); err != nil {
+		t.Fatalf("GitSync must not flag a state file with a space in its name: %v", err)
+	}
+}
+
+// I-807 review #1: rename FROM non-state INTO state must flag the
+// non-state source. The both-names-gated semantics ensure the deletion
+// side of a rename is surfaced.
+func TestGitSync_RefusesPushOnMain_RenameFromNonStateIntoState(t *testing.T) {
+	workspace, asDir := setupI807Workspace(t, true)
+
+	// Ensure the rename target dir exists (setupI807Workspace creates
+	// tasks/issues/archive but not .plans/).
+	os.MkdirAll(filepath.Join(workspace, "agent-state", ".plans"), 0755)
+
+	// Stage a rename from claude-config/hooks/foo.sh (committed in
+	// setupI807Workspace via preCommitNonState=true) into agent-state/.
+	gitRun(t, workspace, "mv",
+		"claude-config/hooks/foo.sh",
+		"agent-state/.plans/T-999-rehome.sh")
+
+	s := loadI807Store(t, asDir)
+	item, _ := s.Get("T-001")
+	item.Doc.SetField("status", "active")
+	s.write(item)
+
+	err := s.GitSync("agent-b: update T-001 (rename across boundary)")
+	if err == nil {
+		t.Fatalf("expected refusal; rename from non-state should flag the source")
+	}
+	if !strings.Contains(err.Error(), "claude-config/hooks/foo.sh") {
+		t.Errorf("error must name the non-state rename source; got: %q", err.Error())
+	}
+}
+
+// I-807 review #1: a path containing literal ` -> ` should NOT trigger
+// rename parsing — the XY status code is the source of truth for renames.
+func TestGitSync_AllowsPushOnMain_FilenameWithArrowSubstring(t *testing.T) {
+	workspace, asDir := setupI807Workspace(t, false)
+
+	// Tracked state file whose name contains the literal ` -> `.
+	arrowPath := filepath.Join(workspace, "agent-state", "tasks", "T-003 -> followup.md")
+	os.WriteFile(arrowPath, []byte(`id: T-003
+type: task
+status: queued
+created: 2026-03-25T10:00:00-06:00
+last_touched: 2026-03-25T10:00:00-06:00
+
+title: Arrow name
+
+depends_on:
+- []
+`), 0644)
+	gitRun(t, workspace, "add", "agent-state/tasks/T-003 -> followup.md")
+	gitRun(t, workspace, "commit", "-m", "add arrow item")
+
+	// Modify (NOT rename) — porcelain emits ` M "agent-state/tasks/T-003 -> followup.md"`.
+	// XY code is ` M`, not `R`, so the rename branch must NOT fire.
+	os.WriteFile(arrowPath, []byte(`id: T-003
+type: task
+status: active
+created: 2026-03-25T10:00:00-06:00
+last_touched: 2026-03-25T10:00:00-06:00
+
+title: Arrow name
+
+depends_on:
+- []
+`), 0644)
+
+	s := loadI807Store(t, asDir)
+	item, _ := s.Get("T-001")
+	item.Doc.SetField("status", "active")
+	s.write(item)
+
+	if err := s.GitSync("agent-b: update T-001 (arrow filename present)"); err != nil {
+		t.Fatalf("modified file with arrow substring in name must not trigger rename split: %v", err)
+	}
+}
+
+// I-807 review #1: staged-add of a non-state file is the most direct
+// 9edc8732b reproduction — explicit coverage.
+func TestGitSync_RefusesPushOnMain_StagedAddNonState(t *testing.T) {
+	workspace, asDir := setupI807Workspace(t, false)
+
+	// Create + stage a new non-state file (XY = `A ` in porcelain).
+	newPath := filepath.Join(workspace, "claude-config", "hooks", "newhook.sh")
+	os.MkdirAll(filepath.Dir(newPath), 0755)
+	os.WriteFile(newPath, []byte("#!/bin/sh\necho new\n"), 0755)
+	gitRun(t, workspace, "add", "claude-config/hooks/newhook.sh")
+
+	s := loadI807Store(t, asDir)
+	item, _ := s.Get("T-001")
+	item.Doc.SetField("status", "active")
+	s.write(item)
+
+	err := s.GitSync("agent-b: update T-001 (staged add present)")
+	if err == nil {
+		t.Fatalf("expected refusal on staged-add of non-state file")
+	}
+	if !strings.Contains(err.Error(), "claude-config/hooks/newhook.sh") {
+		t.Errorf("error must name the staged-added file; got: %q", err.Error())
+	}
+}
+
+// I-807 review #1: a stranded local commit (committed locally, not yet
+// pushed) that touches a non-state file must also be flagged — working-
+// tree porcelain alone misses it because the commit is already made.
+func TestGitSync_RefusesPushOnMain_StrandedLocalNonStateCommit(t *testing.T) {
+	workspace, asDir := setupI807Workspace(t, true)
+
+	// Wire up a synthetic origin so refs/remotes/origin/main has a
+	// commit BEHIND HEAD — the gate's `origin/main..HEAD` log scan
+	// will then surface the stranded commit's non-state files.
+	upstream := t.TempDir()
+	gitRun(t, upstream, "init", "--bare")
+	gitRun(t, workspace, "remote", "add", "origin", upstream)
+	gitRun(t, workspace, "push", "-u", "origin", "main")
+
+	// Commit a non-state change to local main (not pushed yet).
+	os.WriteFile(filepath.Join(workspace, "claude-config", "hooks", "foo.sh"),
+		[]byte("#!/bin/sh\necho stranded\n"), 0755)
+	gitRun(t, workspace, "add", "claude-config/hooks/foo.sh")
+	gitRun(t, workspace, "commit", "-m", "stranded non-state")
+
+	// Working tree is now CLEAN (no porcelain entries) but the unpushed
+	// commit carries a non-state file change.
+	s := loadI807Store(t, asDir)
+	item, _ := s.Get("T-001")
+	item.Doc.SetField("status", "active")
+	s.write(item)
+
+	err := s.GitSync("agent-b: update T-001 (stranded commit ahead)")
+	if err == nil {
+		t.Fatalf("expected refusal: stranded local non-state commit should be flagged")
+	}
+	if !strings.Contains(err.Error(), "claude-config/hooks/foo.sh") {
+		t.Errorf("error must name the stranded-committed file; got: %q", err.Error())
+	}
+}
+
+// I-807 review #1: the override emits an audit-stderr line ONLY when
+// the gate would have fired, AND the line names the offender list.
+func TestGitSync_OverrideAuditNamesOffenders(t *testing.T) {
+	workspace, asDir := setupI807Workspace(t, true)
+	os.WriteFile(filepath.Join(workspace, "claude-config", "hooks", "foo.sh"),
+		[]byte("#!/bin/sh\necho dirty\n"), 0755)
+
+	t.Setenv("ST_SYNC_ALLOW_MAIN", "1")
+
+	// Capture stderr via a pipe.
+	origStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	s := loadI807Store(t, asDir)
+	item, _ := s.Get("T-001")
+	item.Doc.SetField("status", "active")
+	s.write(item)
+	err := s.GitSync("agent-b: update T-001 (override with offender)")
+
+	w.Close()
+	os.Stderr = origStderr
+	captured, _ := io.ReadAll(r)
+	msg := string(captured)
+
+	if err != nil {
+		t.Fatalf("override should bypass the gate: %v", err)
+	}
+	if !strings.Contains(msg, "ST_SYNC_ALLOW_MAIN=1") {
+		t.Errorf("audit stderr must announce the bypass; got: %q", msg)
+	}
+	if !strings.Contains(msg, "claude-config/hooks/foo.sh") {
+		t.Errorf("audit stderr must name the offender that was greenlit; got: %q", msg)
+	}
+}
+
+// I-807 review #1: the override emits NO audit line when the gate
+// would not have fired (no offenders OR not on main). Prevents noise
+// on every GitSync when the operator leaves the override exported.
+func TestGitSync_OverrideSilentWhenGateWouldNotFire(t *testing.T) {
+	_, asDir := setupI807Workspace(t, false)
+	t.Setenv("ST_SYNC_ALLOW_MAIN", "1")
+
+	origStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	s := loadI807Store(t, asDir)
+	item, _ := s.Get("T-001")
+	item.Doc.SetField("status", "active")
+	s.write(item)
+	err := s.GitSync("agent-b: update T-001 (override on clean tree)")
+
+	w.Close()
+	os.Stderr = origStderr
+	captured, _ := io.ReadAll(r)
+	msg := string(captured)
+
+	if err != nil {
+		t.Fatalf("clean-tree sync should succeed: %v", err)
+	}
+	if strings.Contains(msg, "ST_SYNC_ALLOW_MAIN=1") {
+		t.Errorf("audit stderr must NOT fire when gate would not have refused; got: %q", msg)
+	}
+}
+
+// I-807 review #1: the refusal returns an error wrapping
+// ErrI807MainBranchGate so callers can use errors.Is instead of
+// string matching the message.
+func TestGitSync_RefusalErrorIsSentinel(t *testing.T) {
+	workspace, asDir := setupI807Workspace(t, true)
+	os.WriteFile(filepath.Join(workspace, "claude-config", "hooks", "foo.sh"),
+		[]byte("#!/bin/sh\necho sentinel\n"), 0755)
+
+	s := loadI807Store(t, asDir)
+	item, _ := s.Get("T-001")
+	item.Doc.SetField("status", "active")
+	s.write(item)
+
+	err := s.GitSync("agent-b: update T-001 (sentinel check)")
+	if err == nil {
+		t.Fatalf("expected refusal")
+	}
+	if !errors.Is(err, ErrI807MainBranchGate) {
+		t.Errorf("error must wrap ErrI807MainBranchGate; got: %v", err)
+	}
+}
+
+// I-807 review #1: detached HEAD pointing at origin/main's SHA is
+// functionally equivalent to being on main for push purposes — gate
+// should still fire when the working tree has non-state dirt.
+func TestGitSync_RefusesPushOnDetachedHEADAtOriginMain(t *testing.T) {
+	workspace, asDir := setupI807Workspace(t, true)
+
+	// Wire up a fake origin/main pointing at the same SHA HEAD is on.
+	upstream := t.TempDir()
+	gitRun(t, upstream, "init", "--bare")
+	gitRun(t, workspace, "remote", "add", "origin", upstream)
+	gitRun(t, workspace, "push", "-u", "origin", "main")
+
+	// Detach HEAD onto the same commit.
+	gitRun(t, workspace, "checkout", "--detach", "HEAD")
+
+	os.WriteFile(filepath.Join(workspace, "claude-config", "hooks", "foo.sh"),
+		[]byte("#!/bin/sh\necho detached\n"), 0755)
+
+	s := loadI807Store(t, asDir)
+	item, _ := s.Get("T-001")
+	item.Doc.SetField("status", "active")
+	s.write(item)
+
+	err := s.GitSync("agent-b: update T-001 (detached HEAD at origin/main)")
+	if err == nil {
+		t.Fatalf("expected refusal: detached HEAD at origin/main is push-equivalent to main")
+	}
+	if !errors.Is(err, ErrI807MainBranchGate) {
+		t.Errorf("error must wrap ErrI807MainBranchGate; got: %v", err)
+	}
+}
+
+// I-807 review #1: detached HEAD AWAY from origin/main fails open.
+func TestGitSync_AllowsPushOnDetachedHEADAwayFromOriginMain(t *testing.T) {
+	workspace, asDir := setupI807Workspace(t, true)
+
+	// Wire up upstream so origin/main exists.
+	upstream := t.TempDir()
+	gitRun(t, upstream, "init", "--bare")
+	gitRun(t, workspace, "remote", "add", "origin", upstream)
+	gitRun(t, workspace, "push", "-u", "origin", "main")
+
+	// Make a divergent commit, then detach HEAD on it (different SHA
+	// than origin/main).
+	os.WriteFile(filepath.Join(workspace, "claude-config", "hooks", "foo.sh"),
+		[]byte("#!/bin/sh\necho divergent\n"), 0755)
+	gitRun(t, workspace, "add", "claude-config/hooks/foo.sh")
+	gitRun(t, workspace, "commit", "-m", "divergent")
+	gitRun(t, workspace, "checkout", "--detach", "HEAD")
+
+	// New non-state edit on the detached HEAD.
+	os.WriteFile(filepath.Join(workspace, "claude-config", "hooks", "foo.sh"),
+		[]byte("#!/bin/sh\necho detached-edit\n"), 0755)
+
+	s := loadI807Store(t, asDir)
+	item, _ := s.Get("T-001")
+	item.Doc.SetField("status", "active")
+	s.write(item)
+
+	if err := s.GitSync("agent-b: update T-001 (detached HEAD away from main)"); err != nil {
+		t.Fatalf("detached HEAD that is NOT on origin/main should fail-open: %v", err)
+	}
+}
+
+// gitRun is a test helper that runs `git <args>` in dir and t.Fatals
+// on failure with the combined output for diagnostics.
+func gitRun(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_DATE=2026-03-25T10:00:00-06:00",
+		"GIT_COMMITTER_DATE=2026-03-25T10:00:00-06:00",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
 }
