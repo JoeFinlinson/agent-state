@@ -86,10 +86,17 @@ func PlanApprove(s *store.Store, cfg *config.Config, id string, opts PlanApprove
 	}
 
 	if item.PlanApproved {
+		// I-832: idempotent re-run — a retry after a silent autoSync failure
+		// must not exit 1 ("already approved"), which would close the agent
+		// into an infinite retry loop. Emit a no-op notice, call autoSync
+		// defensively (gives a stuck-uncommitted approval a second chance to
+		// land in git), and return 0. Audit fields are deliberately NOT
+		// re-written — the original approver/timestamp belong to the first call.
 		fmt.Fprintf(os.Stderr,
-			"%s plan is already approved (by %s at %s) — run `st plan reset %s` first if it needs re-validation\n",
-			id, fallback(item.PlanApprovedBy, "?"), fallback(item.PlanApprovedAt, "?"), id)
-		return 1
+			"%s plan is already approved (by %s at %s) — no-op (idempotent re-run)\n",
+			id, fallback(item.PlanApprovedBy, "?"), fallback(item.PlanApprovedAt, "?"))
+		autoSync(s, fmt.Sprintf("st plan approve: %s (idempotent re-run)", id))
+		return 0
 	}
 
 	// I-589: SBAR substance is hard-blocked by default on every
