@@ -1160,7 +1160,9 @@ func TestGitSync_AllowsPushOnMain_WithNonStateOverride(t *testing.T) {
 }
 
 func TestGitSync_AllowsPushOnFeatureBranch_WhenOnlyStateDirty(t *testing.T) {
-	_, asDir := setupI807Workspace(t, false)
+	workspace, asDir := setupI807Workspace(t, false)
+
+	gitRun(t, workspace, "checkout", "-b", "fix/I-765-state-only-test")
 
 	// No non-state dirty files; only the agent-state item mutation below.
 	s := loadI807Store(t, asDir)

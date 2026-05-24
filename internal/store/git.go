@@ -267,9 +267,10 @@ func isManagedStatePath(path, itemsPrefix string) bool {
 //     detached-HEAD-at-origin/main fallback also can't resolve
 //   - flat-layout fixture (itemsPrefix == "") — no items-vs-non-items
 //     distinction to enforce; the gate only protects nested layouts
-//   - ST_SYNC_ALLOW_NON_STATE=1 is set (any branch) OR ST_SYNC_ALLOW_MAIN=1
-//     is set (accepted on any branch for back-compat); audit-stderr is
-//     emitted with the offender list so the bypass is named
+//   - ST_SYNC_ALLOW_NON_STATE=1 is set (any branch); OR
+//     ST_SYNC_ALLOW_MAIN=1 is set AND branch is main (main-only scope,
+//     back-compat with I-807 docs — use ST_SYNC_ALLOW_NON_STATE on
+//     feature branches); audit-stderr is emitted so the bypass is named
 //
 // Note on unborn HEAD: a freshly-init'd repo with HEAD symbolic to
 // refs/heads/main but no commits yet WILL trip the gate (symbolic-ref
@@ -435,22 +436,31 @@ func checkNonStateGate(root string) error {
 	}
 
 	// Also scan for non-state files in locally-committed-but-unpushed
-	// commits. The working-tree inspection above misses commits that
-	// were created before this gate landed (or by a parallel session)
+	// commits on main. The working-tree inspection above misses commits
+	// that were created before this gate landed (or by a parallel session)
 	// and that pushWithRetry would otherwise batch-push to origin/main.
 	// Use -z + NUL parsing so the same quoting concern doesn't bite.
-	logOut, logErr := gateGitOutput(toplevel, "log", "-z", "--name-only", "--pretty=format:", "refs/remotes/origin/main..HEAD")
-	if logErr == nil {
-		for _, p := range strings.Split(logOut, "\x00") {
-			p = strings.TrimSpace(p)
-			if p == "" || seen[p] {
-				continue
+	//
+	// Restriction to onMain: pushWithRetry always pushes
+	// refs/heads/main:refs/heads/main regardless of which branch is
+	// checked out (I-501). Feature branch commits never reach origin/main
+	// via st sync, so scanning refs/remotes/origin/main..HEAD on a feature
+	// branch would falsely flag the entire feature branch commit log —
+	// including intentional non-state commits that are part of the PR.
+	if onMain {
+		logOut, logErr := gateGitOutput(toplevel, "log", "-z", "--name-only", "--pretty=format:", "refs/remotes/origin/main..HEAD")
+		if logErr == nil {
+			for _, p := range strings.Split(logOut, "\x00") {
+				p = strings.TrimSpace(p)
+				if p == "" || seen[p] {
+					continue
+				}
+				if isManagedStatePath(p, itemsPrefix) {
+					continue
+				}
+				seen[p] = true
+				offenders = append(offenders, p+" (already committed locally)")
 			}
-			if isManagedStatePath(p, itemsPrefix) {
-				continue
-			}
-			seen[p] = true
-			offenders = append(offenders, p+" (already committed locally)")
 		}
 	}
 
