@@ -18,6 +18,11 @@ func GoalConsistencyCheck(s *store.Store, cfg *config.Config) int {
 func goalConsistencyCheckTo(w io.Writer, s *store.Store, cfg *config.Config) int {
 	goals := s.List(store.TypeFilter("goal"))
 
+	// Collect non-terminal items once; archived items are excluded because
+	// they may still carry a stale goals: field but are not meaningful
+	// membership — scanning them produces false drift reports.
+	nonTerminal := s.List(store.NonTerminalFilter(cfg))
+
 	driftFound := false
 
 	for _, goal := range goals {
@@ -33,9 +38,9 @@ func goalConsistencyCheckTo(w io.Writer, s *store.Store, cfg *config.Config) int
 			}
 		}
 
-		// Build goalsIDs: all items from s.All() where item.Goals contains this goalID.
+		// Build goalsIDs: non-terminal items whose item.Goals contains this goalID.
 		goalsSet := make(map[string]bool)
-		for _, item := range s.All() {
+		for _, item := range nonTerminal {
 			for _, gid := range item.Goals {
 				if gid == goal.ID {
 					goalsSet[item.ID] = true

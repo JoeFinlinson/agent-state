@@ -110,7 +110,7 @@ func ItemGoalsRemove(s *store.Store, cfg *config.Config, itemID string, goalIDs 
 		_ = changelog.Append(cfg, itemID, changelog.Entry{
 			Op:       "goals_remove",
 			Field:    "goals",
-			NewValue: goalID,
+			OldValue: goalID,
 			Agent:    cfg.Identity().ID,
 		})
 		fmt.Printf("Removed %s from %s goals\n", goalID, itemID)

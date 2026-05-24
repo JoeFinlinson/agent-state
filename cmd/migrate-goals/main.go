@@ -304,15 +304,27 @@ func readTagsFromLines(lines []string) []string {
 }
 
 // readGoalsFromLines parses the goals: field from already-split lines.
+// Handles both block form (goals:\n- G-001) and inline form (goals: [G-001, G-004]).
 func readGoalsFromLines(lines []string) []string {
 	var goals []string
 	inGoals := false
 	for _, ln := range lines {
 		ln = strings.TrimRight(ln, "\r")
 		if strings.HasPrefix(ln, "goals:") {
-			inGoals = true
 			rest := strings.TrimSpace(ln[len("goals:"):])
-			if rest != "" && rest != "[]" {
+			if rest == "" || rest == "[]" {
+				// Block list form — collect following `- ` lines.
+				inGoals = true
+			} else {
+				// Inline bracket form: goals: [G-001, G-004]
+				// Parse the comma-separated content between [ and ].
+				inner := strings.Trim(rest, "[]")
+				for _, g := range strings.Split(inner, ",") {
+					g = strings.TrimSpace(g)
+					if g != "" {
+						goals = append(goals, g)
+					}
+				}
 				inGoals = false
 			}
 			continue
