@@ -501,7 +501,7 @@ func TestCloseAbandonedWithReasonV2(t *testing.T) {
 	s, cfg := setupTestEnv(t)
 	os.MkdirAll(cfg.ChangelogDir(), 0755)
 
-	code := Close(s, cfg, "T-001", "abandoned", CloseOpts{Reason: "no longer needed"})
+	code := Close(s, cfg, "T-001", "abandoned", CloseOpts{Reason: "superseded"})
 	if code != 0 {
 		t.Errorf("abandoned with reason exit %d", code)
 	}

@@ -24,6 +24,8 @@ func runInProcess(t *testing.T, cwd string, args ...string) (string, int) {
 	// Set env vars
 	os.Setenv("AS_AGENT_ID", "test-agent")
 	os.Setenv("AS_SESSION_ID", "test-session")
+	os.Setenv("AS_INTERNAL_NO_REVIEW", "1")
+	defer os.Unsetenv("AS_INTERNAL_NO_REVIEW")
 
 	app := newApp(cwd)
 	app.SetArgs(args)

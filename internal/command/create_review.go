@@ -213,15 +213,11 @@ func runItemReview(s *store.Store, cfg *config.Config, itemID string, item *mode
 // fires, we want the abandonment to be visible in the changelog with the
 // recommendation as the reason so a later audit can reconstruct why the
 // item disappeared.
-func archiveAbandonedItem(s *store.Store, cfg *config.Config, itemID, recommendation string) {
-	reason := recommendation
-	if reason == "" {
-		reason = "I-588 item review: archived as non-item"
-	}
+func archiveAbandonedItem(s *store.Store, cfg *config.Config, itemID, _ string) {
 	// Force=true: tier-1 test gates don't apply to a brand-new item being
 	// abandoned at creation time, so we don't want the gate enforcement
 	// path to refuse the close.
-	code := Close(s, cfg, itemID, "abandoned", CloseOpts{Reason: reason, Force: true})
+	code := Close(s, cfg, itemID, "abandoned", CloseOpts{Reason: "unactionable", Force: true})
 	if code != 0 {
 		fmt.Fprintf(os.Stderr, "warning: archive of %s after review-reject returned %d — item remains in place\n", itemID, code)
 	}
