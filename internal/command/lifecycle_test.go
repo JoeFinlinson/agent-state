@@ -285,7 +285,7 @@ func TestLifecycleAbandon(t *testing.T) {
 	Start(s, cfg, "T-005", StartOpts{})
 
 	// Abandon with reason
-	code := Close(s, cfg, "T-005", "abandoned", CloseOpts{Reason: "no longer needed"})
+	code := Close(s, cfg, "T-005", "abandoned", CloseOpts{Reason: "out-of-strategy"})
 	if code != 0 {
 		t.Fatalf("Close abandoned returned %d", code)
 	}
@@ -297,9 +297,16 @@ func TestLifecycleAbandon(t *testing.T) {
 
 	// Verify changelog records the reason
 	entries, _ := changelog.Read(cfg, "T-005")
+	var foundClose bool
 	for _, e := range entries {
-		if e.Op == "close" && e.Reason != "no longer needed" {
-			t.Errorf("close changelog reason = %q", e.Reason)
+		if e.Op == "close" {
+			if e.Reason != "out-of-strategy" {
+				t.Errorf("close changelog reason = %q, want out-of-strategy", e.Reason)
+			}
+			foundClose = true
 		}
+	}
+	if !foundClose {
+		t.Error("no close changelog entry found")
 	}
 }

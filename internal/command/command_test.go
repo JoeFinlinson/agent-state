@@ -493,7 +493,7 @@ func TestCloseAbandonedRequiresReason(t *testing.T) {
 
 func TestCloseAbandonedWithReason(t *testing.T) {
 	s, cfg := setupTestEnv(t)
-	code := Close(s, cfg, "T-003", "abandoned", CloseOpts{Reason: "no longer needed"})
+	code := Close(s, cfg, "T-003", "abandoned", CloseOpts{Reason: "out-of-strategy"})
 	if code != 0 {
 		t.Errorf("Close abandoned with reason returned %d, want 0", code)
 	}
@@ -899,7 +899,7 @@ func TestCloseWontfixRequiresReason(t *testing.T) {
 func TestCloseWontfixWithReason(t *testing.T) {
 	s, cfg := setupTestEnv(t)
 	Start(s, cfg, "I-001", StartOpts{})
-	code := Close(s, cfg, "I-001", "abandoned", CloseOpts{Reason: "not a real bug"})
+	code := Close(s, cfg, "I-001", "abandoned", CloseOpts{Reason: "unactionable"})
 	if code != 0 {
 		t.Errorf("Close wontfix with reason returned %d, want 0", code)
 	}
