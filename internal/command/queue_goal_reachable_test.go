@@ -314,8 +314,8 @@ func TestQueueAutoApprove_EmptyQueueIsNoOp(t *testing.T) {
 	if rc != 0 {
 		t.Fatalf("QueueAutoApprove rc=%d, want 0", rc)
 	}
-	if !strings.Contains(out, "nothing to auto-approve") {
-		t.Errorf("expected no-op message, got %q", out)
+	if !strings.Contains(out, "Queue is empty") {
+		t.Errorf("expected empty-queue message, got %q", out)
 	}
 }
 

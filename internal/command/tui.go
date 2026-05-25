@@ -233,12 +233,7 @@ func doRefresh(m tuiModel) tuiModel {
 		m.s = fresh
 	}
 	m.agents, _ = agent.ListRegistrations(m.cfg)
-	m.pending = 0
-	for _, e := range LoadQueue(m.cfg) {
-		if !e.Approved {
-			m.pending++
-		}
-	}
+	m.pending = PendingApprovalCount(m.s, m.cfg)
 	m.claimed = buildClaimedIndex(m.s)
 	if m.item != nil {
 		if fresh, ok := m.s.Get(m.item.ID); ok {
@@ -528,14 +523,8 @@ func tuiTo(w io.Writer, s *store.Store, cfg *config.Config, opts TuiOpts) int {
 		return rc
 	}
 	regs, _ := agent.ListRegistrations(cfg)
-	pending := 0
-	for _, e := range LoadQueue(cfg) {
-		if !e.Approved {
-			pending++
-		}
-	}
 	m := tuiModel{
-		s: s, cfg: cfg, item: it, agents: regs, pending: pending,
+		s: s, cfg: cfg, item: it, agents: regs, pending: PendingApprovalCount(s, cfg),
 		claimed: buildClaimedIndex(s), width: opts.Width,
 		focusAxis: initialFocusAxis(regs),
 	}
@@ -575,14 +564,8 @@ func tuiLive(s *store.Store, cfg *config.Config, opts TuiOpts) int {
 	}()
 
 	regs, _ := agent.ListRegistrations(cfg)
-	pending := 0
-	for _, e := range LoadQueue(cfg) {
-		if !e.Approved {
-			pending++
-		}
-	}
 	m := tuiModel{
-		s: s, cfg: cfg, item: it, agents: regs, pending: pending,
+		s: s, cfg: cfg, item: it, agents: regs, pending: PendingApprovalCount(s, cfg),
 		claimed: buildClaimedIndex(s), width: opts.Width, refreshCh: refreshCh,
 		focusAxis: initialFocusAxis(regs),
 	}

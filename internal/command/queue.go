@@ -537,7 +537,7 @@ func removeFromQueueSilently(cfg *config.Config, id string) (bool, error) {
 func QueueAutoApprove(s *store.Store, cfg *config.Config) int {
 	entries := LoadQueue(cfg)
 	if len(entries) == 0 {
-		fmt.Println("No pending goal-reachable items — nothing to auto-approve")
+		fmt.Println("Queue is empty — nothing to auto-approve")
 		return 0
 	}
 
