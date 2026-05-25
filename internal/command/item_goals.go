@@ -29,6 +29,10 @@ func ItemGoalsAdd(s *store.Store, cfg *config.Config, itemID string, goalIDs []s
 			fmt.Fprintf(os.Stderr, "goals add: %s is not a goal (type=%s)\n", goalID, goal.Type)
 			return 1
 		}
+		if goalID == itemID {
+			fmt.Fprintf(os.Stderr, "goals add: %s cannot be added to its own goals list\n", goalID)
+			return 1
+		}
 		for _, existing := range item.Goals {
 			if existing == goalID {
 				fmt.Fprintf(os.Stderr, "goals add: %s already in goals of %s\n", goalID, itemID)
@@ -45,7 +49,11 @@ func ItemGoalsAdd(s *store.Store, cfg *config.Config, itemID string, goalIDs []s
 	if err := s.Mutate(itemID, func(it *model.Item) error {
 		it.Goals = append(it.Goals, goalIDs...)
 		if it.Doc != nil {
-			it.Doc.ReplaceList("goals", it.Goals)
+			formatted := make([]string, len(it.Goals))
+			for i, g := range it.Goals {
+				formatted[i] = "- " + g
+			}
+			it.Doc.ReplaceList("goals", formatted)
 		}
 		return nil
 	}); err != nil {
@@ -98,7 +106,11 @@ func ItemGoalsRemove(s *store.Store, cfg *config.Config, itemID string, goalIDs 
 			it.Goals = removeStringFromSlice(it.Goals, goalID)
 		}
 		if it.Doc != nil {
-			it.Doc.ReplaceList("goals", it.Goals)
+			formatted := make([]string, len(it.Goals))
+			for i, g := range it.Goals {
+				formatted[i] = "- " + g
+			}
+			it.Doc.ReplaceList("goals", formatted)
 		}
 		return nil
 	}); err != nil {
