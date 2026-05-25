@@ -80,7 +80,12 @@ type QueueApproveOpts struct {
 // awaiting operator approval (Approved=false). Returns false when the
 // item is not on the queue at all — the I-490 gate only fires for
 // pending entries, so items never queued can still be `st start`-ed.
-func IsQueuePending(cfg *config.Config, id string) bool {
+// Goal-reachable items short-circuit to false (T-412): operator intent
+// is already encoded by goal seeding, so the per-item gate is redundant.
+func IsQueuePending(s *store.Store, cfg *config.Config, id string) bool {
+	if IsGoalReachable(s, cfg, id) {
+		return false
+	}
 	for _, e := range LoadQueue(cfg) {
 		if e.ID == id {
 			return !e.Approved
@@ -92,15 +97,34 @@ func IsQueuePending(cfg *config.Config, id string) bool {
 // PendingApprovalCount returns how many queue entries are waiting on
 // operator approval. Surfaced by `st prime` / `st status` so the
 // session-start banner highlights pending items the operator needs to
-// approve before agents can pick them up (I-490).
-func PendingApprovalCount(cfg *config.Config) int {
+// approve before agents can pick them up (I-490). Goal-reachable items
+// are excluded (T-412) — their approval is implicit in goal seeding.
+func PendingApprovalCount(s *store.Store, cfg *config.Config) int {
 	n := 0
 	for _, e := range LoadQueue(cfg) {
-		if !e.Approved {
+		if !e.Approved && !IsGoalReachable(s, cfg, e.ID) {
 			n++
 		}
 	}
 	return n
+}
+
+// IsGoalReachable reports whether id appears in any active goal's must_do
+// map. When true, the item's operator-intent is already structurally
+// encoded — the per-item queue approval gate is redundant (T-412).
+func IsGoalReachable(s *store.Store, cfg *config.Config, id string) bool {
+	if s == nil || id == "" {
+		return false
+	}
+	for _, g := range s.List(store.TypeFilter("goal")) {
+		if g.Status != "active" {
+			continue
+		}
+		if _, ok := findInMustDo(g.MustDo, id); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // autoSync commits + pushes any working-tree changes left by a state-mutating
@@ -140,6 +164,9 @@ func QueueAdd(s *store.Store, cfg *config.Config, id string, opts QueueOpts) int
 	if agentID != "" {
 		addedBy = agentID
 		approved = false
+	}
+	if !approved && IsGoalReachable(s, cfg, id) {
+		approved = true
 	}
 
 	entries = append(entries, QueueEntry{
@@ -380,7 +407,7 @@ func upsertQueueSprintEntry(cfg *config.Config, s *store.Store, r *registry.Regi
 		AddedAt:  time.Now().Format(time.RFC3339),
 		AddedBy:  addedBy,
 		Reason:   fmt.Sprintf("sprint:%s", sprintID),
-		Approved: false,
+		Approved: IsGoalReachable(s, cfg, id),
 		Source:   QueueSourceSprint,
 	}
 
@@ -502,6 +529,38 @@ func removeFromQueueSilently(cfg *config.Config, id string) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// QueueAutoApprove bulk-approves every pending queue entry whose ID is
+// goal-reachable (T-412). Clears the existing approval backlog in one
+// shot without requiring per-item `st queue approve` calls.
+func QueueAutoApprove(s *store.Store, cfg *config.Config) int {
+	entries := LoadQueue(cfg)
+	if len(entries) == 0 {
+		fmt.Println("Queue is empty — nothing to auto-approve")
+		return 0
+	}
+
+	var flipped []string
+	for i, e := range entries {
+		if !e.Approved && IsGoalReachable(s, cfg, e.ID) {
+			entries[i].Approved = true
+			flipped = append(flipped, e.ID)
+		}
+	}
+
+	if len(flipped) == 0 {
+		fmt.Println("No pending goal-reachable items — nothing to auto-approve")
+		return 0
+	}
+
+	if err := SaveQueue(cfg, entries); err != nil {
+		fmt.Fprintf(os.Stderr, "saving queue: %v\n", err)
+		return 1
+	}
+	fmt.Printf("Auto-approved %d item(s): %s\n", len(flipped), strings.Join(flipped, ", "))
+	autoSync(s, fmt.Sprintf("st queue auto-approve: %d item(s)", len(flipped)))
+	return 0
 }
 
 // QueuePrune drops every queue entry whose underlying item has a terminal

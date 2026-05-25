@@ -80,6 +80,7 @@ func SprintAdd(s *store.Store, cfg *config.Config, sprintID string, itemIDs []st
 	// high-priority epics' items land ahead of lower-priority ones by
 	// default.
 	queued := 0
+	pending := 0
 	for _, id := range itemIDs {
 		added, err := upsertQueueSprintEntry(cfg, s, r, id, sprintID)
 		if err != nil {
@@ -88,11 +89,16 @@ func SprintAdd(s *store.Store, cfg *config.Config, sprintID string, itemIDs []st
 		}
 		if added {
 			queued++
+			if !IsGoalReachable(s, cfg, id) {
+				pending++
+			}
 		}
 	}
 
-	if queued > 0 {
-		fmt.Printf("Added %d item(s) to sprint %s (queued %d as pending)\n", len(itemIDs), sprintID, queued)
+	if pending > 0 {
+		fmt.Printf("Added %d item(s) to sprint %s (queued %d as pending)\n", len(itemIDs), sprintID, pending)
+	} else if queued > 0 {
+		fmt.Printf("Added %d item(s) to sprint %s (queued %d, all auto-approved)\n", len(itemIDs), sprintID, queued)
 	} else {
 		fmt.Printf("Added %d item(s) to sprint %s\n", len(itemIDs), sprintID)
 	}

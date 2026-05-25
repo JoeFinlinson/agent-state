@@ -2413,6 +2413,14 @@ rates. I-180.`,
 			exitCode = command.QueuePrune(appStore, appCfg)
 		},
 	})
+	queueCmd.AddCommand(&cobra.Command{
+		Use:   "auto-approve",
+		Short: "Bulk-approve all pending queue entries that are goal-reachable (T-412)",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			exitCode = command.QueueAutoApprove(appStore, appCfg)
+		},
+	})
 	root.AddCommand(queueCmd)
 
 	// I-178: plan-approval primitives. The `plan-before-code-guard.sh`

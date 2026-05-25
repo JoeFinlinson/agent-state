@@ -41,6 +41,23 @@ func TestRecommendBriefFlagWired(t *testing.T) {
 	}
 }
 
+// TestQueueAutoApproveCommandWired verifies `st queue auto-approve` is
+// registered as a subcommand of `st queue` (T-412).
+func TestQueueAutoApproveCommandWired(t *testing.T) {
+	app := newApp(t.TempDir())
+	for _, cmd := range app.Commands() {
+		if cmd.Name() == "queue" {
+			for _, sub := range cmd.Commands() {
+				if sub.Name() == "auto-approve" {
+					return
+				}
+			}
+			t.Fatal("st queue auto-approve subcommand must be registered under st queue")
+		}
+	}
+	t.Fatal("st queue command must be registered on the root cobra command")
+}
+
 // I-504 (review fix): the cobra dispatch decision is a pure helper
 // — exercise it directly so the routing invariant is covered
 // without spinning up a full cobra root. This file lives in package

@@ -152,7 +152,7 @@ func Start(s *store.Store, cfg *config.Config, id string, opts StartOpts) int {
 	forceBypassedPending := false
 	forceBypassedSprint := false
 	autoApprovedByClassifier := false
-	if IsQueuePending(cfg, id) {
+	if IsQueuePending(s, cfg, id) {
 		switch {
 		case binaryAutonomyEnabled() && classifierGreen(item):
 			// T-346: binary autonomy — when the classifier verdict on

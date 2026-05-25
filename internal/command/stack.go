@@ -65,7 +65,7 @@ func StackPush(s *store.Store, cfg *config.Config, id string, opts StackPushOpts
 	// I-490: stack push honors the queue approval gate by default. The
 	// --from-pending flag lets the operator interrupt-mode an item
 	// that hasn't yet graduated through the queue.
-	if !opts.FromPending && IsQueuePending(cfg, id) {
+	if !opts.FromPending && IsQueuePending(s, cfg, id) {
 		fmt.Fprintf(os.Stderr,
 			"%s is pending operator approval — run `st queue approve %s` first (or `st push %s --from-pending` to push without approving)\n",
 			id, id, id)
