@@ -2343,14 +2343,16 @@ rates. I-180.`,
 	queueCmd.Commands()[0].Flags().String("reason", "", "why this item is in the queue")
 	queueShowCmd := &cobra.Command{
 		Use:     "show",
-		Short:   "Display the ordered work queue",
+		Short:   "[DEPRECATED for work ordering — use st next] Goal-weighted priority list (st recommend alias); --raw for queue internals",
 		Aliases: []string{"ls"},
 		Run: func(cmd *cobra.Command, args []string) {
 			all, _ := cmd.Flags().GetBool("all")
-			exitCode = command.QueueShow(appStore, appCfg, command.QueueShowOpts{AgentAll: all})
+			raw, _ := cmd.Flags().GetBool("raw")
+			exitCode = command.QueueShow(appStore, appCfg, command.QueueShowOpts{AgentAll: all, Raw: raw})
 		},
 	}
 	queueShowCmd.Flags().Bool("all", false, "show global queue without agent-scoped visual treatment")
+	queueShowCmd.Flags().Bool("raw", false, "show raw positional queue internals (for add/rm/approve inspection, not work ordering)")
 	queueCmd.AddCommand(queueShowCmd)
 	queueNextCmd := &cobra.Command{
 		Use:   "next",
