@@ -439,7 +439,7 @@ func SizeClassBaseline(item *model.Item) time.Duration {
 // T-369 (this session) ≈ $8-12 typical, T-352 = $43 (the runaway K1
 // would now catch). The defaults below would catch a T-352-class
 // runaway WELL before the $40 cap, which is the whole point.
-func SizeClassCostBaseline(item *model.Item) float64 {
+func heuristicCostBaseline(item *model.Item) float64 {
 	pri := 2
 	if item.Priority != nil {
 		pri = *item.Priority
@@ -456,6 +456,21 @@ func SizeClassCostBaseline(item *model.Item) float64 {
 		}
 		return 10.0
 	}
+}
+
+// SizeClassCostBaseline returns the expected per-attempt cost for item, used
+// as the D2 stuck-multiplier baseline. It consults the empirically-derived
+// per-bin median first (populated by LoadEmpiricalBaselines from the archive),
+// falling back to heuristicCostBaseline when:
+//   - LoadEmpiricalBaselines has not yet run, or
+//   - the bin had fewer than 5 samples (N<5 guard), or
+//   - the computed median would breach the K1-headroom invariant
+//     (median × K2 ≥ K1 — D2 would never fire before the hard budget cap).
+func SizeClassCostBaseline(item *model.Item) float64 {
+	if v, ok := empiricalBaselines[CostBinKey(item)]; ok && v > 0 {
+		return v
+	}
+	return heuristicCostBaseline(item)
 }
 
 // --- tiny formatting helpers (reason strings only) ---
