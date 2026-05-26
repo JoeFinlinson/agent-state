@@ -82,6 +82,9 @@ func Coordinate(s *store.Store, cfg *config.Config, opts CoordinateOpts) int {
 	dd := coordinator.NewDeduper()
 	ex := &cmdEscalator{cfg: cfg, boundary: b}
 
+	// Populate empirical cost baselines from the archive once at startup (T-383).
+	coordinator.LoadEmpiricalBaselines(s.List(store.StatusFilter("done")), b)
+
 	processed := 0
 	for opts.MaxItems == 0 || processed < maxItems {
 		item, why := selectNext(s, cfg)
@@ -97,9 +100,15 @@ func Coordinate(s *store.Store, cfg *config.Config, opts CoordinateOpts) int {
 				b.RespawnLimit, b.PerItemUSD, b.PerObjectiveUSD, b.StuckMultiplier, b.ParallelismCap, b.DedupeWindowMin)
 			fmt.Printf("picked:      %s — %s\n", item.ID, item.Title)
 			fmt.Printf("why:         %s\n", why)
-			fmt.Printf("size-class:  %s wall-clock · $%g cost (D2 cost-based; stuck at ≥ %g×)\n",
+			key := coordinator.CostBinKey(item)
+			n := coordinator.EmpiricalSamplesForBin(key)
+			costSrc := "heuristic"
+			if n > 0 {
+				costSrc = fmt.Sprintf("empirical N=%d", n)
+			}
+			fmt.Printf("size-class:  %s wall-clock · $%g cost [%s] (D2 cost-based; stuck at ≥ %g×)\n",
 				coordinator.SizeClassBaseline(item),
-				coordinator.SizeClassCostBaseline(item), b.StuckMultiplier)
+				coordinator.SizeClassCostBaseline(item), costSrc, b.StuckMultiplier)
 			fmt.Println("next:        st spawn " + item.ID + spawnBudgetSuffix(opts.BudgetOverride))
 			return 0
 		}

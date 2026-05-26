@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jfinlinson/agent-state/internal/coordinator"
 	"github.com/jfinlinson/agent-state/internal/model"
 )
 
@@ -130,6 +131,33 @@ func TestCoordinateDryRunNoEligibleItem(t *testing.T) {
 	}
 	if !strings.Contains(out, "no eligible item") {
 		t.Errorf("must surface WHY nothing ran, got %q", out)
+	}
+}
+
+// TestCoordinateDryRun_ReflectsEmpiricalBaselines verifies that the DryRun
+// size-class line names the cost source ("heuristic" when no done items are
+// loaded, as is the case with the standard test environment).
+func TestCoordinateDryRun_ReflectsEmpiricalBaselines(t *testing.T) {
+	s, cfg := setupTestEnv(t)
+	writeBoundary(t, cfg.Root())
+	coordinator.ResetEmpiricalForTest()
+	t.Cleanup(coordinator.ResetEmpiricalForTest)
+	t.Setenv("AS_AGENT_ID", "")
+	QueueAdd(s, cfg, "T-001", QueueOpts{})
+
+	var rc int
+	out := captureStdout(t, func() {
+		rc = Coordinate(s, cfg, CoordinateOpts{DryRun: true})
+	})
+	if rc != 0 {
+		t.Fatalf("dry-run rc=%d, want 0\n%s", rc, out)
+	}
+	// With no done items the cost source must be "heuristic".
+	if !strings.Contains(out, "heuristic") {
+		t.Errorf("no done items → want 'heuristic' in size-class line, got:\n%s", out)
+	}
+	if strings.Contains(out, "empirical") {
+		t.Errorf("no done items → must not say 'empirical', got:\n%s", out)
 	}
 }
 
