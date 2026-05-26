@@ -379,10 +379,13 @@ func SetGoalFocus(cfg *config.Config, agentID, goalID string) error {
 		return fmt.Errorf("agent.SetGoalFocus: load %s: %w", agentID, err)
 	}
 	if reg == nil {
+		// Use Getppid(), not Getpid(): the st CLI exits immediately, so
+		// its own PID would be dead-on-arrival and Sweep would delete the
+		// stub. The parent (the long-lived agent session) stays alive.
 		reg = &Registration{
 			AgentID: agentID,
 			Root:    agentID,
-			PID:     os.Getpid(),
+			PID:     os.Getppid(),
 			Started: time.Now().Format(time.RFC3339),
 		}
 	}
@@ -423,9 +426,9 @@ func GetGoalFocus(cfg *config.Config, agentID string) string {
 }
 
 // ClearGoalFocusForAllAgents clears goal_focus on every registration that
-// matches goalID. Returns the agent ids cleared and any error that stopped
-// the sweep early (errors on individual files are logged to stderr and the
-// sweep continues). Safe to call when no registrations exist.
+// matches goalID. Returns the agent ids successfully cleared. Only the
+// ListRegistrations error is returned; per-file write failures are logged
+// to stderr and the sweep continues. Safe to call when no registrations exist.
 func ClearGoalFocusForAllAgents(cfg *config.Config, goalID string) ([]string, error) {
 	regs, err := ListRegistrations(cfg)
 	if err != nil {

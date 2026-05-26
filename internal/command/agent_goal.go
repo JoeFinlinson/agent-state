@@ -74,6 +74,10 @@ func AgentGoalShow(s *store.Store, cfg *config.Config) int {
 
 func agentGoalShowTo(w io.Writer, s *store.Store, cfg *config.Config) int {
 	agentID := cfg.Identity().ID
+	if agentID == "" {
+		fmt.Fprintln(w, "agent goal show: no agent identity resolved (set AS_AGENT_ID or run from an agent workspace)")
+		return 1
+	}
 	focus := agent.GetGoalFocus(cfg, agentID)
 	if focus == "" {
 		fmt.Fprintln(w, "goal focus: (none)")
