@@ -67,11 +67,23 @@ func TestPlanReviewBypassFlag(t *testing.T) {
 		t.Fatalf("seeding sidecar: %v", err)
 	}
 
-	var called int
+	// Plan-review sub-agent calls are the ones to guard. stampModelRec makes
+	// a separate Haiku call (model-rec) — that is expected and allowed.
+	var planReviewCalled int
 	engine := RunEngine{
 		RunClaude: func(cwd string, args []string, env []string) ([]byte, int, error) {
-			called++
-			t.Fatalf("RunClaude must not be invoked when BypassReview=true")
+			for _, a := range args {
+				if strings.Contains(a, "haiku") {
+					// Haiku call from stampModelRec — return valid model-rec JSON.
+					body, _ := json.Marshal(ClaudeResult{
+						Type: "result", Subtype: "success",
+						Result: `{"tier":"sonnet","reason":"test"}`,
+					})
+					return body, 0, nil
+				}
+			}
+			// Non-Haiku call = plan-review sub-agent — must NOT fire with BypassReview.
+			planReviewCalled++
 			return nil, 0, nil
 		},
 	}
@@ -85,8 +97,8 @@ func TestPlanReviewBypassFlag(t *testing.T) {
 		}
 	})
 
-	if called != 0 {
-		t.Errorf("RunClaude was called %d time(s); expected 0", called)
+	if planReviewCalled != 0 {
+		t.Errorf("plan-review RunClaude was called %d time(s); expected 0 with BypassReview=true", planReviewCalled)
 	}
 	item, _ := s.Get("T-001")
 	if !item.PlanApproved {
@@ -112,13 +124,13 @@ func TestPlanReviewDefaultCapTenMinutes(t *testing.T) {
 	}
 
 	var (
-		mu          sync.Mutex
-		capturedEnv []string
+		mu           sync.Mutex
+		capturedEnvs [][]string // collect all invocations; model-rec (haiku) adds a second call
 	)
 	engine := RunEngine{
 		RunClaude: func(cwd string, args []string, env []string) ([]byte, int, error) {
 			mu.Lock()
-			capturedEnv = append([]string{}, env...)
+			capturedEnvs = append(capturedEnvs, append([]string{}, env...))
 			mu.Unlock()
 			// Accept verdict so PlanApprove can proceed past the
 			// review without test scaffolding for auto-fix loops.
@@ -136,15 +148,22 @@ func TestPlanReviewDefaultCapTenMinutes(t *testing.T) {
 		}
 	})
 
+	// The plan-review call must carry the wall-timeout env var. At least one
+	// invocation (there may be a second Haiku model-rec call) must have it.
 	want := "AS_CLAUDE_WALL_TIMEOUT=10m0s"
 	found := false
-	for _, e := range capturedEnv {
-		if strings.Contains(e, want) {
-			found = true
+	for _, envSnapshot := range capturedEnvs {
+		for _, e := range envSnapshot {
+			if strings.Contains(e, want) {
+				found = true
+				break
+			}
+		}
+		if found {
 			break
 		}
 	}
 	if !found {
-		t.Errorf("expected env to contain %q; got %v", want, capturedEnv)
+		t.Errorf("expected at least one RunClaude invocation with env containing %q; invocations: %v", want, capturedEnvs)
 	}
 }

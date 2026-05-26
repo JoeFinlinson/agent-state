@@ -244,6 +244,11 @@ func PlanApprove(s *store.Store, cfg *config.Config, id string, opts PlanApprove
 		return 1
 	}
 
+	// Pre-warm model recommendation so `st start` model check resolves instantly.
+	if opts.Engine != nil {
+		stampModelRec(s, cfg, id, *opts.Engine)
+	}
+
 	_ = changelog.Append(cfg, id, changelog.Entry{
 		Op:       "plan_approve",
 		NewValue: approver,

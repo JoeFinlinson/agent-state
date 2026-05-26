@@ -44,6 +44,7 @@ const (
 	defaultReason      = "default policy for standard work"
 	fallbackReason     = "rec service unavailable — defaulting to sonnet"
 	overrideReason     = "operator override via model_tier field"
+	prepRecReason      = "prep-generated recommendation (model_tier_rec)"
 	noItemReason       = "no active item — defaulting to sonnet"
 	recommenderModel   = "claude-haiku-4-5"
 	recommenderTimeout = 30 // seconds; haiku one-shot is fast
@@ -87,6 +88,14 @@ func decideTier(s *store.Store, cfg *config.Config, opts ModelRecOpts) ModelRecR
 		// shouldn't silently lock you to an arbitrary tier.
 	}
 
+	// Pre-warmed recommendation stamped by `st plan prep/approve` — skip API
+	// call. Use `st update <id> model_tier_rec` or re-prep to refresh.
+	if rec := readItemTierRec(item); rec != "" {
+		if _, valid := validTiers[rec]; valid {
+			return ModelRecResult{Tier: rec, Reason: prepRecReason}
+		}
+	}
+
 	// Cache: (item-id, item-file-mtime) → result. mtime invalidates the cache
 	// whenever the item changes (sbar update, tag add, scope_class set, etc.).
 	cachePath := cachePathFor(cfg, opts)
@@ -122,6 +131,42 @@ func readItemTierOverride(item *model.Item) string {
 		return ""
 	}
 	return strings.ToLower(strings.TrimSpace(val))
+}
+
+// readItemTierRec returns the value of the `model_tier_rec` field — the
+// auto-generated recommendation stamped by `st plan prep/approve`.
+func readItemTierRec(item *model.Item) string {
+	if item.Doc == nil {
+		return ""
+	}
+	val, ok := item.Doc.GetField("model_tier_rec")
+	if !ok {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(val))
+}
+
+// stampModelRec calls the recommender for id and writes the result as
+// model_tier_rec on the item so `st start` model checks resolve without
+// a Haiku API call. Called from plan prep/approve paths. Non-blocking —
+// any error is silently dropped so plan approval itself is never blocked.
+func stampModelRec(s *store.Store, cfg *config.Config, id string, engine RunEngine) {
+	var buf strings.Builder
+	ModelRec(s, cfg, ModelRecOpts{ItemID: id, Engine: engine}, &buf)
+	line := strings.TrimSpace(buf.String())
+	parts := strings.SplitN(line, "|", 2)
+	if len(parts) != 2 {
+		return
+	}
+	tier := strings.TrimPrefix(parts[0], "tier:")
+	if _, valid := validTiers[tier]; !valid {
+		return
+	}
+	_ = s.Mutate(id, func(it *model.Item) error {
+		it.Doc.SetField("model_tier_rec", tier)
+		return nil
+	})
+	fmt.Fprintf(os.Stdout, "[%s] model recommendation: %s\n", id, line)
 }
 
 // callRecommender builds the Haiku prompt, runs claude, parses the JSON

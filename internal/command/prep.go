@@ -697,6 +697,8 @@ func prepItem(s *store.Store, cfg *config.Config, itemID string, item *model.Ite
 				return "rejected"
 			}
 
+			// Pre-warm model recommendation so `st start` model check resolves instantly.
+			stampModelRec(s, cfg, itemID, engine)
 			fmt.Printf("[%s] Plan accepted — plan_approved: true written to item\n", itemID)
 			return "accepted"
 		}
