@@ -457,3 +457,100 @@ func TestWriteCache_AtomicRenameNoCorruption(t *testing.T) {
 		}
 	}
 }
+
+func TestModelRecPersist_WritesModelTierRec(t *testing.T) {
+	root := modelRecTestEnv(t)
+	body := `id: I-800
+type: issue
+title: Backfill target
+status: queued
+sbar:
+  situation: needs model_tier_rec stamped
+`
+	writeItemFile(t, root, "issues", "I-800", body)
+	s, cfg := loadStore(t, root)
+
+	envelope := `{"type":"result","subtype":"success","is_error":false,"result":"{\"tier\":\"haiku\",\"reason\":\"simple\"}"}`
+	engine := RunEngine{
+		RunClaude: func(cwd string, args []string, env []string) ([]byte, int, error) {
+			return []byte(envelope), 0, nil
+		},
+	}
+
+	var out bytes.Buffer
+	code := ModelRecPersist(s, cfg, "I-800", engine, &out)
+	if code != 0 {
+		t.Errorf("exit = %d, want 0", code)
+	}
+	if !strings.Contains(out.String(), "model_tier_rec=haiku") {
+		t.Errorf("output missing persisted tier: %q", out.String())
+	}
+
+	// Reload to verify the field was actually written to the item file.
+	s2, _ := loadStore(t, root)
+	item, ok := s2.Get("I-800")
+	if !ok {
+		t.Fatal("I-800 not found after persist")
+	}
+	rec, ok := item.Doc.GetField("model_tier_rec")
+	if !ok || strings.TrimSpace(rec) != "haiku" {
+		t.Errorf("model_tier_rec = %q, want haiku", rec)
+	}
+}
+
+func TestModelRecPersist_MissingItemReturnsOne(t *testing.T) {
+	root := modelRecTestEnv(t)
+	s, cfg := loadStore(t, root)
+
+	var out bytes.Buffer
+	code := ModelRecPersist(s, cfg, "I-999", RunEngine{}, &out)
+	if code != 1 {
+		t.Errorf("exit = %d, want 1 for missing item", code)
+	}
+}
+
+func TestModelRecPersist_OperatorOverridePreserved(t *testing.T) {
+	root := modelRecTestEnv(t)
+	body := `id: I-801
+type: issue
+title: Operator pinned to opus
+status: queued
+model_tier: opus
+sbar:
+  situation: operator wants opus
+`
+	writeItemFile(t, root, "issues", "I-801", body)
+	s, cfg := loadStore(t, root)
+
+	// The engine returns haiku but operator override is opus — model_tier must
+	// not be changed; model_tier_rec gets stamped as haiku (the recommender
+	// result), and decideTier will still return opus via the override path.
+	envelope := `{"type":"result","subtype":"success","is_error":false,"result":"{\"tier\":\"haiku\",\"reason\":\"trivial\"}"}`
+	engine := RunEngine{
+		RunClaude: func(cwd string, args []string, env []string) ([]byte, int, error) {
+			return []byte(envelope), 0, nil
+		},
+	}
+
+	var out bytes.Buffer
+	code := ModelRecPersist(s, cfg, "I-801", engine, &out)
+	if code != 0 {
+		t.Errorf("exit = %d, want 0", code)
+	}
+
+	s2, _ := loadStore(t, root)
+	item, _ := s2.Get("I-801")
+
+	// model_tier (operator) must be unchanged.
+	override, _ := item.Doc.GetField("model_tier")
+	if strings.TrimSpace(override) != "opus" {
+		t.Errorf("model_tier changed: got %q, want opus", override)
+	}
+
+	// decideTier should still return opus via operator override.
+	var recOut bytes.Buffer
+	ModelRec(s2, cfg, ModelRecOpts{ItemID: "I-801", NoCache: true}, &recOut)
+	if !strings.HasPrefix(recOut.String(), "tier:opus|") {
+		t.Errorf("decideTier should return opus via override, got %q", recOut.String())
+	}
+}

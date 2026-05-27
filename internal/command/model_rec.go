@@ -146,6 +146,27 @@ func readItemTierRec(item *model.Item) string {
 	return strings.ToLower(strings.TrimSpace(val))
 }
 
+// ModelRecPersist is the --persist entry point: runs the recommender for id,
+// writes the result as model_tier_rec on the item, and prints the outcome to
+// out. Returns 1 if the item is not found; 0 otherwise (fallback to sonnet is
+// not an error). Operator override (model_tier) is preserved — only
+// model_tier_rec is written.
+func ModelRecPersist(s *store.Store, cfg *config.Config, id string, engine RunEngine, out io.Writer) int {
+	if _, ok := s.Get(id); !ok {
+		fmt.Fprintf(os.Stderr, "model-rec --persist: item %s not found\n", id)
+		return 1
+	}
+	stampModelRec(s, cfg, id, engine)
+	// Re-read the written value so the caller can confirm what was stored.
+	item, _ := s.Get(id)
+	rec := readItemTierRec(item)
+	if rec == "" {
+		rec = defaultTier
+	}
+	fmt.Fprintf(out, "persisted model_tier_rec=%s on %s\n", rec, id)
+	return 0
+}
+
 // stampModelRec calls the recommender for id and writes the result as
 // model_tier_rec on the item so `st start` model checks resolve without
 // a Haiku API call. Called from plan prep/approve paths. Non-blocking —
