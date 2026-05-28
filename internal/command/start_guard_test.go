@@ -40,10 +40,10 @@ func TestStartRefusesWhenExistingPRFound(t *testing.T) {
 	}
 }
 
-// TestStartProceedsWhenGHUnavailable: when gh is not available AND no injectable
+// TestStartGuardSkipsWithoutGH: when gh is not available AND no injectable
 // PRFetch is provided, createWorktrees must not call the PR guard and must
 // proceed to attempt worktree creation (graceful degradation).
-func TestStartProceedsWhenGHUnavailable(t *testing.T) {
+func TestStartGuardSkipsWithoutGH(t *testing.T) {
 	dir := t.TempDir()
 	cfg := config.Defaults()
 	cfg.Worktree = &config.WorktreeConfig{
