@@ -303,6 +303,42 @@ func TestAgentID(t *testing.T) {
 	})
 }
 
+// TestIdentitySTRootLeakResolvesFromCWD verifies that when ST_ROOT points at a
+// peer agent's workspace (the I-936 leak scenario), AgentID() still returns the
+// identity from the CWD-anchored .as/agent-workspace.yaml rather than the
+// peer's path-derived identity. I-936.
+func TestIdentitySTRootLeakResolvesFromCWD(t *testing.T) {
+	clearHeritage(t)
+	t.Setenv("AS_AGENT_ID", "")
+
+	tmp := t.TempDir()
+
+	// Peer workspace — leaked ST_ROOT points here (agent-a).
+	peerRoot := filepath.Join(tmp, "theraprac-agent-a", "theraprac-workspace")
+	if err := os.MkdirAll(peerRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Real agent workspace — where st is actually running (agent-d).
+	realAgentDir := filepath.Join(tmp, "theraprac-agent-d")
+	realAS := filepath.Join(realAgentDir, ".as")
+	if err := os.MkdirAll(realAS, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := "agent_id: agent-d\npath: " + realAgentDir + "\n"
+	if err := os.WriteFile(filepath.Join(realAS, "agent-workspace.yaml"), []byte(marker), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := Defaults()
+	cfg.root = peerRoot      // poisoned by leaked ST_ROOT
+	cfg.startDir = realAgentDir // CWD — the un-tainted anchor
+
+	if got := cfg.AgentID(); got != "agent-d" {
+		t.Errorf("AgentID() = %q under ST_ROOT leak, want %q", got, "agent-d")
+	}
+}
+
 // clearHeritage zeros out all heritage env vars for the duration of a test
 // to keep parent tests from leaking into child subtests.
 func clearHeritage(t *testing.T) {
