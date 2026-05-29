@@ -241,6 +241,7 @@ func TestAgentWorkspaceCreateDryRunPrintsCompletePlan(t *testing.T) {
 		"docker_label: theraprac.agent=agent-b",
 		"registry:",
 		"workspace_config:",
+		"st_root:",
 		"dry-run: no filesystem, git, Docker, or env changes will be made",
 	} {
 		if !strings.Contains(stdout, want) {
@@ -550,6 +551,20 @@ func TestPersistAgentWorkspaceConfigWritesRegistryAndLocalConfig(t *testing.T) {
 				t.Errorf("%s missing %q:\n%s", path, want, s)
 			}
 		}
+	}
+}
+
+func TestWriteStRootCreatesFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeStRoot(dir); err != nil {
+		t.Fatalf("writeStRoot: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, ".st-root"))
+	if err != nil {
+		t.Fatalf("expected .st-root: %v", err)
+	}
+	if string(data) != "theraprac-workspace" {
+		t.Errorf("got %q, want %q", string(data), "theraprac-workspace")
 	}
 }
 
