@@ -364,6 +364,12 @@ func (c *Config) Identity() Identity {
 	} else if markerID := agentIDFromWorkspaceMarker(c.startDir); markerID != "" {
 		id.ID = markerID
 		id.Source = "local-config"
+		// agent-workspace.yaml is an infrastructure marker with no display/role
+		// fields; compose with local-agent.yaml for those if it agrees on the ID.
+		if la, err := loadLocalAgent(c.root); err == nil && la.ID == markerID {
+			id.DisplayName = la.DisplayName
+			id.Role = la.Role
+		}
 	} else if la, err := loadLocalAgent(c.root); err == nil && la.ID != "" {
 		id.ID = la.ID
 		id.DisplayName = la.DisplayName
@@ -1054,7 +1060,14 @@ func LoadFrom(configPath string) (*Config, error) {
 		return nil, fmt.Errorf("loading %s: %w", configPath, err)
 	}
 	cfg.root = filepath.Dir(filepath.Dir(configPath))
-	cfg.startDir = cfg.root
+	// startDir must be CWD (un-tainted by ST_ROOT), not the config-derived root.
+	// agentIDFromWorkspaceMarker walks up from startDir to find the real agent
+	// identity — using cfg.root here would re-introduce the ST_ROOT leak. I-936.
+	if cwd, err := os.Getwd(); err == nil {
+		cfg.startDir = cwd
+	} else {
+		cfg.startDir = cfg.root
+	}
 	return cfg, nil
 }
 
