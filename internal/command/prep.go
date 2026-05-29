@@ -456,16 +456,15 @@ func prepItem(s *store.Store, cfg *config.Config, itemID string, item *model.Ite
 			p = &plan.Plan{RawText: planText}
 		}
 
-		// I-982: commit any item-file writes the sub-agent made via
-		// `st update` before reloading the store. Non-fatal — a GitSync
-		// failure leaves the workspace dirty but must not abort the plan.
-		if syncErr := s.GitSync("plan-prep: commit item updates for " + itemID); syncErr != nil {
-			fmt.Fprintf(os.Stderr, "[%s] Warning: GitSync after RunClaude: %v\n", itemID, syncErr)
-		}
-
 		// Reload item (claude may have updated it via st update)
-		s, _ = store.New(cfg)
-		item, _ = s.Get(itemID)
+		if newS, reloadErr := store.New(cfg); reloadErr != nil {
+			fmt.Fprintf(os.Stderr, "[%s] Warning: failed to reload store: %v\n", itemID, reloadErr)
+		} else {
+			s = newS
+			if reloadedItem, ok := s.Get(itemID); ok {
+				item = reloadedItem
+			}
+		}
 
 		// Fill in ACs from item if claude set them there
 		if len(p.ACs) == 0 && len(item.AcceptanceCriteria) > 0 {
@@ -489,6 +488,23 @@ func prepItem(s *store.Store, cfg *config.Config, itemID string, item *model.Ite
 		} else {
 			fmt.Printf("[%s] Draft plan saved\n", itemID)
 		}
+
+		// I-982: commit item writes and the plan sidecar together. Placed
+		// after plan.Save so the plan file is included in the commit.
+		// Non-fatal — a GitSync failure (e.g. non-state dirty file triggers
+		// checkNonStateGate) must not abort the plan; the warning names the
+		// consequence so the operator can act.
+		if syncErr := s.GitSync("plan-prep: commit item updates + draft for " + itemID); syncErr != nil {
+			fmt.Fprintf(os.Stderr, "[%s] Warning: GitSync after prep: %v — item writes may not be committed\n", itemID, syncErr)
+		}
+	}
+
+	// I-982: resume-path guard — commit item writes a previous crashed run
+	// left dirty before reaching GitSync. No-op when the block above ran
+	// (already committed). Placed here so both fresh and resume paths call
+	// GitSync at least once.
+	if syncErr := s.GitSync("plan-prep: commit pending writes for " + itemID); syncErr != nil {
+		fmt.Fprintf(os.Stderr, "[%s] Warning: GitSync on resume: %v — pending item writes may not be committed\n", itemID, syncErr)
 	}
 
 	// Review loop
@@ -824,15 +840,15 @@ func prepItemWriteOnly(s *store.Store, cfg *config.Config, itemID string, item *
 			p = &plan.Plan{RawText: planText}
 		}
 
-		// I-982: commit any item-file writes the sub-agent made via
-		// `st update` before reloading the store. Non-fatal.
-		if syncErr := s.GitSync("plan-prep: commit item updates for " + itemID); syncErr != nil {
-			fmt.Printf("[%s] Warning: GitSync after RunClaude: %v\n", itemID, syncErr)
-		}
-
 		// Reload item — claude may have updated it via `st update`
-		s, _ = store.New(cfg)
-		item, _ = s.Get(itemID)
+		if newS, reloadErr := store.New(cfg); reloadErr != nil {
+			fmt.Fprintf(os.Stderr, "[%s] Warning: failed to reload store: %v\n", itemID, reloadErr)
+		} else {
+			s = newS
+			if reloadedItem, ok := s.Get(itemID); ok {
+				item = reloadedItem
+			}
+		}
 
 		if len(p.ACs) == 0 && len(item.AcceptanceCriteria) > 0 {
 			p.ACs = item.AcceptanceCriteria
@@ -850,6 +866,19 @@ func prepItemWriteOnly(s *store.Store, cfg *config.Config, itemID string, item *
 			fmt.Printf("[%s] FAILED: save draft plan: %v\n", itemID, err)
 			return "rejected"
 		}
+
+		// I-982: commit item writes and the plan sidecar after plan.Save.
+		// Non-fatal — warn to stderr (not stdout) to avoid corrupting the
+		// structured batch output that callers parse.
+		if syncErr := s.GitSync("plan-prep: commit item updates + draft for " + itemID); syncErr != nil {
+			fmt.Fprintf(os.Stderr, "[%s] Warning: GitSync after prep: %v — item writes may not be committed\n", itemID, syncErr)
+		}
+	}
+
+	// I-982: resume-path guard — commit item writes left dirty by a previous
+	// crashed run. No-op on fresh runs (already committed above).
+	if syncErr := s.GitSync("plan-prep: commit pending writes for " + itemID); syncErr != nil {
+		fmt.Fprintf(os.Stderr, "[%s] Warning: GitSync on resume: %v — pending item writes may not be committed\n", itemID, syncErr)
 	}
 
 	// Run the plan-review subprocess (same call shape as prepItem)
