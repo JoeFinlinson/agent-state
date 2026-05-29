@@ -427,3 +427,55 @@ func TestPlanShowPrintsPlanAndReportContent(t *testing.T) {
 	}
 }
 
+// TestPrepWallTimeoutInjected asserts that when AS_PREP_TIMEOUT is unset,
+// the prep sub-agent receives AS_CLAUDE_WALL_TIMEOUT=10m0s in its env.
+// This is the I-985 gate: without it, the subprocess inherits the global
+// 2h wall cap and hangs undetected when a tool call never returns.
+func TestPrepWallTimeoutInjected(t *testing.T) {
+	t.Setenv("AS_AGENT_ID", "")
+	t.Setenv("AS_PREP_TIMEOUT", "")
+	s, cfg := setupPrepWriteOnlyEnv(t)
+
+	var (
+		mu           sync.Mutex
+		capturedEnvs [][]string
+	)
+	engine := RunEngine{
+		RunClaude: func(cwd string, args []string, env []string) ([]byte, int, error) {
+			mu.Lock()
+			capturedEnvs = append(capturedEnvs, append([]string{}, env...))
+			mu.Unlock()
+			result := ClaudeResult{
+				Type: "result", Subtype: "success",
+				Result: cannedPlanText,
+			}
+			data, _ := json.Marshal(result)
+			return data, 0, nil
+		},
+		PromptUser:    func(p string) (string, error) { return "q", nil },
+		SelectMenu:    func(p string, opts []menuOption, def int) string { return "q" },
+		ConfirmPrompt: func(p string) bool { return false },
+	}
+
+	suppressOutput(t, func() {
+		Prep(s, cfg, "wo-sprint", PrepOpts{WriteOnly: true}, engine)
+	})
+
+	want := "AS_CLAUDE_WALL_TIMEOUT=10m0s"
+	found := false
+	for _, envSnapshot := range capturedEnvs {
+		for _, e := range envSnapshot {
+			if strings.Contains(e, want) {
+				found = true
+				break
+			}
+		}
+		if found {
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected at least one RunClaude invocation with env containing %q; invocations: %v", want, capturedEnvs)
+	}
+}
+

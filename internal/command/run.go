@@ -2607,7 +2607,7 @@ func executeUATReview(s *store.Store, cfg *config.Config, itemID, sprintID strin
 			notes := extractNotesFromReview(reportSR.FullOutput)
 			s, _ = store.New(cfg)
 			if fixItem, ok := s.Get(itemID); ok {
-				runAutoFixFromNotes(s, cfg, itemID, sprintID, fixItem, "UAT review", notes, opts, engine, worktreeDir, claudeSessionID, &sr)
+				runAutoFixFromNotes(s, cfg, itemID, sprintID, fixItem, "UAT review", notes, opts, engine, worktreeDir, claudeSessionID, nil, &sr)
 			}
 			continue // re-run UAT
 		}
@@ -3148,7 +3148,7 @@ func executePlanWithOpts(s *store.Store, cfg *config.Config, itemID string, engi
 				notes := extractNotesFromReview(reviewSR.FullOutput)
 				s, _ = store.New(cfg)
 				item, _ = s.Get(itemID)
-				runAutoFixFromNotes(s, cfg, itemID, "", item, "plan review", notes, opts, engine, worktreeDir, "", &sr)
+				runAutoFixFromNotes(s, cfg, itemID, "", item, "plan review", notes, opts, engine, worktreeDir, "", nil, &sr)
 				continue // re-run review
 			}
 
@@ -3243,7 +3243,7 @@ func executePlanWithOpts(s *store.Store, cfg *config.Config, itemID string, engi
 				notes := extractNotesFromReview(reviewSR.FullOutput)
 				s, _ = store.New(cfg)
 				item, _ = s.Get(itemID)
-				runAutoFixFromNotes(s, cfg, itemID, "", item, "design review", notes, opts, engine, worktreeDir, "", &sr)
+				runAutoFixFromNotes(s, cfg, itemID, "", item, "design review", notes, opts, engine, worktreeDir, "", nil, &sr)
 				continue // re-run review
 			}
 
@@ -5681,8 +5681,11 @@ func extractNotesFromReview(output string) string {
 
 // runAutoFixFromNotes sends the review notes as auto-feedback to claude so it can
 // fix them without user intervention. Returns true if feedback was processed.
+// stepEnv is appended to the auto-fix step's ExtraEnv — pass non-nil to inject
+// a wall-timeout cap (e.g. plan-review callers pass AS_CLAUDE_WALL_TIMEOUT=10m0s
+// so the auto-fix subprocess shares the same ceiling as the review step). I-985.
 func runAutoFixFromNotes(s *store.Store, cfg *config.Config, itemID, sprintID string, item *model.Item,
-	gateType string, notes string, opts RunOpts, engine RunEngine, worktreeDir, claudeSessionID string, sr *StepResult) bool {
+	gateType string, notes string, opts RunOpts, engine RunEngine, worktreeDir, claudeSessionID string, stepEnv []string, sr *StepResult) bool {
 
 	if strings.TrimSpace(notes) == "" {
 		return false
@@ -5697,6 +5700,7 @@ func runAutoFixFromNotes(s *store.Store, cfg *config.Config, itemID, sprintID st
 	feedbackPrompt := buildFeedbackPrompt(itemID, item, gateType, autoFeedback)
 	feedbackStep := config.RunStepDef{Type: "claude", Prompt: feedbackPrompt}
 	feedbackStep.SetName("auto_fix")
+	feedbackStep.ExtraEnv = append(feedbackStep.ExtraEnv, stepEnv...)
 	feedbackSR := executeClaude(s, cfg, itemID, sprintID, feedbackStep, opts, engine, worktreeDir, claudeSessionID, true)
 	sr.CostUSD += feedbackSR.CostUSD
 	sr.AIDurationMs += feedbackSR.AIDurationMs
