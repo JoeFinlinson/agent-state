@@ -342,8 +342,11 @@ func (i Identity) HasHeritage() bool {
 // Identity resolves the current agent identity using this precedence chain
 // for the ID field:
 //  1. $AS_AGENT_ID env var
-//  2. <root>/.as/local-agent.yaml (gitignored, per-workspace)
-//  3. parent directory named theraprac-agent-<suffix> (I-383 path derivation)
+//  2. CWD-anchored .as/agent-workspace.yaml (walked up from c.startDir — immune
+//     to ST_ROOT leaks because startDir is set from CWD before Load() applies
+//     any ST_ROOT redirect). I-936.
+//  3. <root>/.as/local-agent.yaml (gitignored, per-workspace)
+//  4. parent directory named theraprac-agent-<suffix> (I-383 path derivation)
 //
 // Heritage env vars (AS_AGENT_PARENT_ID, AS_AGENT_ROOT_ID,
 // AS_AGENT_SPAWNED_BY_SESSION, AS_AGENT_DELEGATED_ITEM, AS_AGENT_ROLE) are
@@ -358,6 +361,15 @@ func (c *Config) Identity() Identity {
 	if envID := os.Getenv("AS_AGENT_ID"); envID != "" {
 		id.ID = envID
 		id.Source = "env"
+	} else if markerID := agentIDFromWorkspaceMarker(c.startDir); markerID != "" {
+		id.ID = markerID
+		id.Source = "local-config"
+		// agent-workspace.yaml is an infrastructure marker with no display/role
+		// fields; compose with local-agent.yaml for those if it agrees on the ID.
+		if la, err := loadLocalAgent(c.root); err == nil && la.ID == markerID {
+			id.DisplayName = la.DisplayName
+			id.Role = la.Role
+		}
 	} else if la, err := loadLocalAgent(c.root); err == nil && la.ID != "" {
 		id.ID = la.ID
 		id.DisplayName = la.DisplayName
@@ -739,6 +751,34 @@ func walkForAgentRoot(dir, wantAgentID string) string {
 	}
 }
 
+// agentIDFromWorkspaceMarker walks up from dir looking for
+// .as/agent-workspace.yaml and returns the first non-empty agent_id: found.
+// Unlike walkForAgentRoot it does NOT validate the path: field, which avoids
+// a circular dependency with trustedAgentID() → Identity(). I-936.
+func agentIDFromWorkspaceMarker(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return ""
+	}
+	for {
+		candidate := filepath.Join(abs, ".as", "agent-workspace.yaml")
+		if body, err := os.ReadFile(candidate); err == nil {
+			_, agentID := parseAgentWorkspaceMarker(body)
+			if agentID != "" {
+				return agentID
+			}
+		}
+		parent := filepath.Dir(abs)
+		if parent == abs {
+			return ""
+		}
+		abs = parent
+	}
+}
+
 // parseAgentWorkspaceMarker extracts the top-level `path:` and `agent_id:`
 // fields from a flat agent-workspace.yaml. Lines with any leading
 // whitespace are ignored so a nested `path:` key (e.g., under a future
@@ -1020,7 +1060,14 @@ func LoadFrom(configPath string) (*Config, error) {
 		return nil, fmt.Errorf("loading %s: %w", configPath, err)
 	}
 	cfg.root = filepath.Dir(filepath.Dir(configPath))
-	cfg.startDir = cfg.root
+	// startDir must be CWD (un-tainted by ST_ROOT), not the config-derived root.
+	// agentIDFromWorkspaceMarker walks up from startDir to find the real agent
+	// identity — using cfg.root here would re-introduce the ST_ROOT leak. I-936.
+	if cwd, err := os.Getwd(); err == nil {
+		cfg.startDir = cwd
+	} else {
+		cfg.startDir = cfg.root
+	}
 	return cfg, nil
 }
 
