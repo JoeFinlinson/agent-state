@@ -130,16 +130,20 @@ func runPlanReview(s *store.Store, cfg *config.Config, id string, item *model.It
 			if wrapEnabled {
 				wrapStep := config.RunStepDef{
 					Type:     "claude",
-					Prompt:   buildPlanReviewWrapUpPrompt(id),
+					Prompt:   buildPlanReviewWrapUpPrompt(id, planReviewWrapUpBudget),
 					ExtraEnv: []string{"AS_CLAUDE_WALL_TIMEOUT=" + planReviewWrapUpBudget.String()},
 				}
-				wrapStep.SetName("plan_review_approve")
+				wrapStep.SetName("plan_review_wrapup")
 				wrapSR := executeClaude(s, cfg, id, "", wrapStep, RunOpts{}, engine, cwd, reviewSessionID, true)
-				if wrapSR.FullOutput != "" {
+				// Accept wrap-up output only when the sub-agent exited cleanly
+				// (Passed=true). A non-zero exit may still carry non-empty
+				// FullOutput (e.g. error_during_execution with a result field);
+				// treating that as a verdict would approve the plan on garbage.
+				if wrapSR.Passed && wrapSR.FullOutput != "" {
 					fmt.Fprintf(os.Stderr,
 						"%s: plan review first pass timed out — wrap-up verdict captured (partial analysis)\n", id)
 					sr = wrapSR
-					// sr.FullOutput is now non-empty; fall through to rec parsing.
+					// sr.FullOutput is now valid; fall through to rec parsing.
 				} else {
 					fmt.Fprintf(os.Stderr,
 						"%s: plan review timed out after %s — refusing approval. Re-run, set AS_PLAN_APPROVE_TIMEOUT=<longer>, or pass --bypass-review.\n",

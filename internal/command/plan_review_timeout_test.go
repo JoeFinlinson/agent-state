@@ -268,6 +268,62 @@ func TestPlanReviewWrapUpYieldsVerdict(t *testing.T) {
 	}
 }
 
+// TestPlanReviewWrapUpNonZeroExitRefusesApproval asserts that when the
+// wrap-up resume returns non-empty output but exits non-zero (e.g. an
+// error_during_execution subtype that carries a result field), the garbage
+// output is NOT parsed as a verdict and approval is refused (exit 2).
+func TestPlanReviewWrapUpNonZeroExitRefusesApproval(t *testing.T) {
+	t.Setenv("AS_AGENT_ID", "")
+	t.Setenv("AS_PLAN_APPROVE_TIMEOUT", "") // default 25m; wrap-up enabled
+	s, cfg := setupTestEnv(t)
+
+	if err := plan.Save(cfg.PlansDir(), "T-001", &plan.Plan{
+		Approach:   "Approach.",
+		ScopeRepos: []string{"as"},
+		ACs:        []string{"cmd: go test ./..."},
+	}); err != nil {
+		t.Fatalf("seeding sidecar: %v", err)
+	}
+
+	engine := RunEngine{
+		RunClaude: func(cwd string, args []string, env []string) ([]byte, int, error) {
+			for _, a := range args {
+				if strings.Contains(a, "haiku") {
+					body, _ := json.Marshal(ClaudeResult{
+						Type: "result", Subtype: "success",
+						Result: `{"tier":"sonnet","reason":"test"}`,
+					})
+					return body, 0, nil
+				}
+			}
+			for _, a := range args {
+				if a == "--resume" {
+					// Wrap-up exits non-zero but still carries output (e.g.
+					// error_during_execution with a result body). Must NOT
+					// be treated as a valid verdict.
+					body, _ := json.Marshal(ClaudeResult{
+						Type:    "result",
+						Subtype: "error_during_execution",
+						Result:  "I would Accept this if I had more context.",
+					})
+					return body, 1, nil
+				}
+			}
+			// First pass: wall-time kill.
+			return nil, 1, errors.New("killed: wall time limit (23m30s)")
+		},
+	}
+
+	if code := PlanApprove(s, cfg, "T-001", PlanApproveOpts{Engine: &engine}); code != 2 {
+		t.Errorf("expected exit 2 when wrap-up exits non-zero; got %d", code)
+	}
+
+	item, _ := s.Get("T-001")
+	if item.PlanApproved {
+		t.Error("PlanApproved must stay false when wrap-up exits non-zero despite non-empty output")
+	}
+}
+
 // TestPlanReviewWrapUpDoubleTimeout asserts that when both the first pass
 // and the wrap-up resume time out, runPlanReview returns 2 and the plan
 // is not approved.

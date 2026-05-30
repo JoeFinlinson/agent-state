@@ -5374,15 +5374,16 @@ func buildPlanReviewPrompt(itemID string, item *model.Item) string {
 
 // buildPlanReviewWrapUpPrompt is the drive-to-conclusion prompt sent when the
 // first-pass plan-review sub-agent hits its wall cap (I-810). It resumes the
-// same session so all prior analysis is in context.
-func buildPlanReviewWrapUpPrompt(itemID string) string {
+// same session so all prior analysis is in context. budget is passed explicitly
+// so the prompt stays in sync with the actual AS_CLAUDE_WALL_TIMEOUT cap.
+func buildPlanReviewWrapUpPrompt(itemID string, budget time.Duration) string {
 	return fmt.Sprintf(
-		"You are reviewing the plan for %s and you have approximately 90 seconds remaining.\n\n"+
+		"You are reviewing the plan for %s and you have approximately %s remaining.\n\n"+
 			"STOP all further investigation. Using only the analysis you have already done, "+
 			"emit your verdict NOW:\n\n"+
 			"RECOMMENDATION: Accept | Reject | Feedback\n\n"+
 			"One sentence of justification. Be terse — operators need a decision, not a perfect report.\n",
-		itemID,
+		itemID, budget.Round(time.Second),
 	)
 }
 
