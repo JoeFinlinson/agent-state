@@ -38,7 +38,7 @@ type ArtifactOpts struct {
 // whose value is reproducible introspection cannot emit map-ordered output.
 var facetOrder = []string{
 	"item", "plan", "ac", "history", "testing", "pr",
-	"uat", "commits", "deps", "bus", "worktree", "accounting",
+	"uat", "commits", "deps", "bus", "worktree", "accounting", "observations",
 }
 
 type facetResult struct {
@@ -75,8 +75,9 @@ var facets = map[string]facetFunc{
 	"commits":    facetCommits,
 	"deps":       facetDeps,
 	"bus":        facetBus,
-	"worktree":   facetWorktree,
-	"accounting": facetAccounting,
+	"worktree":     facetWorktree,
+	"accounting":   facetAccounting,
+	"observations": facetObservations,
 }
 
 // Artifact resolves the item, dispatches the kind (or every facet for
@@ -389,6 +390,22 @@ func facetWorktree(_ *store.Store, _ *config.Config, it *model.Item) facetResult
 // run-history view as net-new; this facet does not overclaim it).
 func facetAccounting(_ *store.Store, _ *config.Config, it *model.Item) facetResult {
 	return mapFacet(it.TimeTracking, "accounting / time tracking")
+}
+
+// facetObservations: the re-discovery log written by semantic dedup (T-437).
+// Delegates text rendering to renderObservations so the default `st show` and
+// `st show --full` / `st artifact observations` paths stay in sync.
+func facetObservations(_ *store.Store, _ *config.Config, it *model.Item) facetResult {
+	if len(it.Observations) == 0 {
+		return facetResult{Text: emptyText("re-discovery observations"), JSON: []string{}, Summary: "none"}
+	}
+	var b strings.Builder
+	renderObservations(&b, it)
+	return facetResult{
+		Text:    strings.TrimRight(b.String(), "\n"),
+		JSON:    it.Observations,
+		Summary: plural(len(it.Observations), "re-discovery", "re-discoveries"),
+	}
 }
 
 // --- tiny shared renderers ---
