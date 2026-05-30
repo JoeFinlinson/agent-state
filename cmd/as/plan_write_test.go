@@ -211,6 +211,49 @@ scope_repos: [as]
 	}
 }
 
+// TestPlanWriteRefusesAlreadyApprovedItem checks that st plan write exits 1
+// when the item is already approved, to prevent the approval stamp from
+// silently certifying a replacement plan body.
+func TestPlanWriteRefusesAlreadyApprovedItem(t *testing.T) {
+	ws := setupPlanWriteWorkspace(t)
+
+	planFile := filepath.Join(t.TempDir(), "plan.md")
+	os.WriteFile(planFile, []byte(validPlanBody()), 0644)
+
+	// First write + self-approve to get the item into approved state.
+	_, code := runInProcess(t, ws, "plan", "write", "T-001", "--file", planFile, "--self-approve")
+	if code != 0 {
+		t.Fatalf("initial plan write --self-approve exit %d", code)
+	}
+
+	// Second write on the now-approved item should be refused.
+	_, code = runInProcess(t, ws, "plan", "write", "T-001", "--file", planFile)
+	if code == 0 {
+		t.Error("expected non-zero exit when overwriting an approved item's plan without st plan reset")
+	}
+}
+
+// TestPlanWriteSelfApproveRefusesAlreadyApprovedItem checks that
+// --self-approve also refuses on an already-approved item (preventing the
+// idempotent-guard bypass that would skip all static gates on the new body).
+func TestPlanWriteSelfApproveRefusesAlreadyApprovedItem(t *testing.T) {
+	ws := setupPlanWriteWorkspace(t)
+
+	planFile := filepath.Join(t.TempDir(), "plan.md")
+	os.WriteFile(planFile, []byte(validPlanBody()), 0644)
+
+	_, code := runInProcess(t, ws, "plan", "write", "T-001", "--file", planFile, "--self-approve")
+	if code != 0 {
+		t.Fatalf("initial write exit %d", code)
+	}
+
+	// Second --self-approve on the same item should fail too.
+	_, code = runInProcess(t, ws, "plan", "write", "T-001", "--file", planFile, "--self-approve")
+	if code == 0 {
+		t.Error("expected non-zero exit: --self-approve on already-approved item must be refused (not silently bypass gates)")
+	}
+}
+
 // TestPlanWriteStampsLinkedPlans checks that writing a plan without
 // --self-approve still stamps linked_plans on the item.
 func TestPlanWriteStampsLinkedPlans(t *testing.T) {
@@ -231,5 +274,43 @@ func TestPlanWriteStampsLinkedPlans(t *testing.T) {
 	}
 	if !strings.Contains(showOut, "T-001") {
 		t.Errorf("plan show missing T-001 reference: %q", showOut)
+	}
+}
+
+// TestPlanWriteStdinPiped checks that plan body delivered via stdin (not
+// --file) is read and written correctly. It swaps os.Stdin with a pipe
+// pre-loaded with the plan body, mirroring the os.Stdout swap used by
+// runInProcess.
+func TestPlanWriteStdinPiped(t *testing.T) {
+	ws := setupPlanWriteWorkspace(t)
+
+	// Swap os.Stdin for a pipe containing the plan body.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	origStdin := os.Stdin
+	os.Stdin = r
+	t.Cleanup(func() { os.Stdin = origStdin })
+
+	// Write plan body into the pipe write-end and close it so io.ReadAll
+	// sees EOF rather than blocking.
+	if _, err := w.WriteString(validPlanBody()); err != nil {
+		t.Fatalf("writing to pipe: %v", err)
+	}
+	w.Close()
+
+	// No --file: command must read from the swapped stdin.
+	stdout, code := runInProcess(t, ws, "plan", "write", "T-001")
+	if code != 0 {
+		t.Fatalf("plan write via stdin exit %d; stdout: %q", code, stdout)
+	}
+	if !strings.Contains(stdout, "Wrote plan for T-001") {
+		t.Errorf("expected 'Wrote plan for T-001' in stdout: %q", stdout)
+	}
+
+	sidecar := filepath.Join(ws, ".plans", "T-001.md")
+	if _, err := os.Stat(sidecar); err != nil {
+		t.Fatalf("sidecar not created: %v", err)
 	}
 }

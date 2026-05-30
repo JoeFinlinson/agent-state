@@ -2720,6 +2720,11 @@ st plan approve <id> separately (which runs the full review sub-agent).`,
 					return
 				}
 			} else {
+				if !command.StdinIsPiped() {
+					fmt.Fprintf(os.Stderr, "st plan write: no --file given and stdin is not piped — pipe content or use --file <path>\n")
+					exitCode = 1
+					return
+				}
 				body, err = io.ReadAll(os.Stdin)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "st plan write: reading stdin: %v\n", err)

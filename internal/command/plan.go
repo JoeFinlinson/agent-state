@@ -557,9 +557,26 @@ func PlanShow(s *store.Store, cfg *config.Config, id string) int {
 // returns a non-zero exit code so the agent can fix the plan inline
 // and re-run (I-1092).
 func PlanWrite(s *store.Store, cfg *config.Config, id string, body string, selfApprove bool) int {
-	_, ok := s.Get(id)
+	item, ok := s.Get(id)
 	if !ok {
 		fmt.Fprintf(os.Stderr, "not found: %s\n", id)
+		return 1
+	}
+
+	// Refuse to overwrite an already-approved plan sidecar without an
+	// explicit reset first. The approval stamp (approver + timestamp)
+	// would otherwise certify a plan body that no longer exists on disk,
+	// creating a silent integrity violation. The --self-approve path has
+	// the same problem: PlanApprove's idempotent guard would return 0
+	// without re-validating the new body against any gate.
+	// Resolution: if the item is already approved, require the caller to
+	// run `st plan reset <id>` first, which clears the stamp and makes
+	// PlanApprove re-run all gates normally.
+	if item.PlanApproved {
+		fmt.Fprintf(os.Stderr,
+			"%s: plan is already approved (by %s at %s) — refusing overwrite.\n"+
+				"Run `st plan reset %s` first to revoke approval, then re-run `st plan write`.\n",
+			id, fallback(item.PlanApprovedBy, "?"), fallback(item.PlanApprovedAt, "?"), id)
 		return 1
 	}
 
@@ -599,7 +616,7 @@ func PlanWrite(s *store.Store, cfg *config.Config, id string, body string, selfA
 	_ = changelog.Append(cfg, id, changelog.Entry{
 		Op:       "plan_write",
 		NewValue: agentID,
-		Reason:   "I-917: plan written directly by agent (st plan write)",
+		Reason:   "plan written directly via st plan write (no exploration agent)",
 	})
 
 	fmt.Printf("Wrote plan for %s (%d bytes)\n", id, len(body))
@@ -608,10 +625,14 @@ func PlanWrite(s *store.Store, cfg *config.Config, id string, body string, selfA
 		fmt.Fprintf(os.Stderr, "st plan write: running static gates (SBAR + AC verifiability; no review sub-agent)…\n")
 		// Engine:nil skips the I-710 review sub-agent; SBAR substance
 		// and AC verifiability gates still run. I-1092.
+		// PlanApprove's idempotent guard is not triggered here because
+		// we refused already-approved items above.
 		return PlanApprove(s, cfg, id, PlanApproveOpts{Engine: nil})
 	}
 
-	autoSync(s, fmt.Sprintf("st plan write: %s", id))
+	if err := autoSync(s, fmt.Sprintf("st plan write: %s", id)); err != nil {
+		return 1
+	}
 	return 0
 }
 
