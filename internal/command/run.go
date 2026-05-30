@@ -3329,7 +3329,7 @@ func executePlanWithOpts(s *store.Store, cfg *config.Config, itemID string, engi
 	// Validate AC shell syntax — catch quoting errors before they waste pipeline time
 	syntaxErrors := ValidateACsyntax(item.AcceptanceCriteria)
 	if len(syntaxErrors) > 0 {
-		fmt.Printf("\n⚠ %d AC(s) have shell syntax errors:\n", len(syntaxErrors))
+		fmt.Printf("\n⚠ %d AC(s) have shell syntax or anti-pattern errors:\n", len(syntaxErrors))
 		for _, e := range syntaxErrors {
 			fmt.Printf("  %s\n", e)
 		}

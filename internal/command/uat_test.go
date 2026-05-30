@@ -215,6 +215,7 @@ func TestValidateACsyntax(t *testing.T) {
 	valid := []string{
 		"- cmd: grep -q 'foo' file.txt",
 		"- cmd: go test ./internal/handlers/ -run TestClaimsAging -v -count=1",
+		"- cmd: cd ../theraprac-api && go test ./internal/handlers/ -run TestFoo -v -count=1",
 		"- cmd: test -f file.go",
 	}
 	errors := ValidateACsyntax(valid)
@@ -514,6 +515,8 @@ func TestValidateACsyntaxFullSuiteAntiPattern(t *testing.T) {
 	allowed := []string{
 		"- cmd: go test ./internal/handlers/ -run TestAgingBucketCalculation -v -count=1",
 		"- cmd: go test -run TestFoo ./internal/db/...",
+		"- cmd: go test -run=TestFoo ./internal/db/...",
+		`- cmd: GOFLAGS="-run=TestClaimsAging" go test ./internal/db/...`,
 		"- cmd: npm run test -- --testPathPattern=AgingReport",
 		"- cmd: npm run test:unit",
 		"- cmd: grep -q 'handler' ./internal/handlers/api_aging.go",

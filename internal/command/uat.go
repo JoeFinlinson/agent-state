@@ -391,7 +391,8 @@ var reStTestRun = regexp.MustCompile(`\bst\s+test\b.+--run\b`)
 var reGoTestSuite = regexp.MustCompile(`\bgo\s+test\b`)
 
 // reGoTestRunFilter matches the -run flag that scopes a `go test` to specific functions.
-var reGoTestRunFilter = regexp.MustCompile(`(?:^|\s)-run\b`)
+// Handles -run with space, = separator, or quoted env var (GOFLAGS="-run=...").
+var reGoTestRunFilter = regexp.MustCompile(`(?:^|[\s"=])-run\b`)
 
 // reMakeTestTarget matches `make test-<anything>` suite targets.
 var reMakeTestTarget = regexp.MustCompile(`\bmake\s+test-\S`)
