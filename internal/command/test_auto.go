@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/jfinlinson/agent-state/internal/config"
 	"github.com/jfinlinson/agent-state/internal/model"
@@ -48,6 +49,14 @@ func AutoTest(s *store.Store, cfg *config.Config, id string, opts TestRecordOpts
 
 	tier1, tier2 := selectAutoSuites(cfg, item, touched)
 	all := append(tier1, tier2...)
+
+	// Write auto-skip evidence for required suites whose repo had no changes.
+	// This satisfies the testing_complete gate without requiring the operator
+	// to run irrelevant suites or use --skip (which is blocked on required suites).
+	if code := autoRecordSkips(s, cfg, id, item, touched); code != 0 {
+		return code
+	}
+
 	if len(all) == 0 {
 		fmt.Printf("[auto] %s — no applicable suites (touched repos: %s)\n", id, descTouched(touched))
 		return 0
@@ -79,6 +88,45 @@ func AutoTest(s *store.Store, cfg *config.Config, id string, opts TestRecordOpts
 	}
 	fmt.Printf("[auto] %d/%d suite(s) failed: %s\n", len(failed), len(all), strings.Join(failed, ", "))
 	return 1
+}
+
+// autoRecordSkips writes "auto-skip: no files changed in <repo>" evidence for
+// each required suite whose repo had no changes in this worktree. This allows
+// the testing_complete gate to pass without running suites that don't apply.
+// Unlike user --skip, auto-skip is a system determination — it bypasses the
+// user-skip guard in TestRecord intentionally.
+func autoRecordSkips(s *store.Store, cfg *config.Config, id string, item *model.Item, touched map[string][]string) int {
+	if item.ScopeClass != "" {
+		// Class items have a fixed required-suite set; no auto-skip applies.
+		return 0
+	}
+	requiredSuites, _ := cfg.Testing.RequiredSuitesFor(item.ScopeClass)
+	now := time.Now().Format(time.RFC3339)
+	var skipped []string
+	for name := range requiredSuites {
+		repo := autoScopeRepo(name)
+		if _, changed := touched[repo]; changed || repo == "" {
+			continue // suite applies (will run) or prefix unmapped (don't auto-skip)
+		}
+		ev := fmt.Sprintf("auto-skip: no files changed in %s", repo)
+		if err := s.Mutate(id, func(it *model.Item) error {
+			it.SetNested("testing_evidence", name, ev)
+			it.Doc.SetField("last_touched", now)
+			return nil
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "recording auto-skip for %s: %v\n", name, err)
+			return 1
+		}
+		skipped = append(skipped, name)
+	}
+	if len(skipped) > 0 {
+		sort.Strings(skipped)
+		fmt.Printf("[auto] auto-skipped (no repo changes): %s\n", strings.Join(skipped, ", "))
+		if err := autoSync(s, fmt.Sprintf("st test --auto: %s auto-skip", id)); err != nil {
+			return 1
+		}
+	}
+	return 0
 }
 
 // detectTouchedRepos runs `git diff main..HEAD --name-only` in each configured
