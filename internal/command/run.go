@@ -2361,7 +2361,7 @@ func executeUAT(s *store.Store, cfg *config.Config, itemID, worktreeDir string) 
 	}
 	code := UAT(s, cfg, itemID, UATOpts{
 		RunCmd: func(cmd string) ([]byte, int, error) {
-			return runCmdInDir(uatDir, cmd)
+			return runCmdInDirWithTimeout(uatDir, cmd, 10*time.Minute)
 		},
 	})
 	if code != 0 {
@@ -2559,7 +2559,7 @@ func executeUATReview(s *store.Store, cfg *config.Config, itemID, sprintID strin
 			RunCmd: func(cmd string) ([]byte, int, error) {
 				// Rewrite ../repo paths for worktree context
 				cmd = rewriteACPaths(cfg, itemID, uatDir, cmd)
-				return runCmdInDir(uatDir, cmd)
+				return runCmdInDirWithTimeout(uatDir, cmd, 10*time.Minute)
 			},
 		})
 

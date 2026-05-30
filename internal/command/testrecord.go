@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/jfinlinson/agent-state/internal/awsauth"
@@ -584,10 +585,17 @@ func runCmdInDirWithTimeout(dir, command string, timeout time.Duration) ([]byte,
 	if dir != "" {
 		cmd.Dir = dir
 	}
+	// Put the child in its own process group so the Cancel kills the whole
+	// tree (grandchildren of sh), not just sh itself — mirrors the I-752
+	// pattern in runCmdGuarded.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+	}
 	output, err := cmd.CombinedOutput()
-	if ctx.Err() == context.DeadlineExceeded {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		msg := fmt.Sprintf("exit timeout: command exceeded %.0fs\n%s", timeout.Seconds(), string(output))
-		return []byte(msg), -1, nil
+		return []byte(msg), -1, fmt.Errorf("killed: timeout after %.0fs", timeout.Seconds())
 	}
 	exitCode := 0
 	if err != nil {

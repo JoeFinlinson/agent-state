@@ -344,6 +344,7 @@ func ValidateACsyntax(acs []string) []string {
 				"AC #%d: anti-pattern — 'st test --run' re-runs the full suite during UAT; use a targeted 'go test -run TestFoo' instead. Suite pass/fail is already checked from testing_evidence.\n  cmd: %s",
 				i+1, cmd,
 			))
+			continue
 		}
 		// Shell syntax check
 		check := exec.Command("sh", "-n", "-c", cmd)
