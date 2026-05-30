@@ -664,7 +664,7 @@ func prepItem(s *store.Store, cfg *config.Config, itemID string, item *model.Ite
 			// Validate AC shell syntax before accepting
 			syntaxErrors := ValidateACsyntax(p.ACs)
 			if len(syntaxErrors) > 0 {
-				fmt.Printf("\n⚠ %d AC(s) have shell syntax errors — fix before accepting:\n", len(syntaxErrors))
+				fmt.Printf("\n⚠ %d AC(s) have shell syntax or anti-pattern errors — fix before accepting:\n", len(syntaxErrors))
 				for _, e := range syntaxErrors {
 					fmt.Printf("  %s\n", e)
 				}
