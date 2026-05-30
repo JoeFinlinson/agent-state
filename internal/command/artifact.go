@@ -393,17 +393,14 @@ func facetAccounting(_ *store.Store, _ *config.Config, it *model.Item) facetResu
 }
 
 // facetObservations: the re-discovery log written by semantic dedup (T-437).
-// Each entry is "timestamp | trigger | situation excerpt" appended when a new
-// st create call matches this item instead of creating a duplicate.
+// Delegates text rendering to renderObservations so the default `st show` and
+// `st show --full` / `st artifact observations` paths stay in sync.
 func facetObservations(_ *store.Store, _ *config.Config, it *model.Item) facetResult {
 	if len(it.Observations) == 0 {
 		return facetResult{Text: emptyText("re-discovery observations"), JSON: []string{}, Summary: "none"}
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%d independent re-discovery/discoveries\n", len(it.Observations))
-	for _, obs := range it.Observations {
-		fmt.Fprintf(&b, "- %s\n", obs)
-	}
+	renderObservations(&b, it)
 	return facetResult{
 		Text:    strings.TrimRight(b.String(), "\n"),
 		JSON:    it.Observations,
