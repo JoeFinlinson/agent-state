@@ -358,7 +358,7 @@ To list goals with weights use:
 		Use:     "create <type> <title> [--sbar-situation S] [--sbar-background B] [--sbar-assessment A] [--sbar-recommendation R] [--no-validate]",
 		Short:   "Create a new task, issue, or idea (--sbar-situation/background/assessment/recommendation; --no-validate skips LLM check)",
 		Aliases: []string{"new"},
-		Args:    cobra.ExactArgs(2),
+		Args:    cobra.RangeArgs(1, 2),
 		Run: func(cmd *cobra.Command, args []string) {
 			priority, _ := cmd.Flags().GetInt("priority")
 			severity, _ := cmd.Flags().GetString("severity")
@@ -366,13 +366,27 @@ To list goals with weights use:
 			depends, _ := cmd.Flags().GetString("depends")
 			sprint, _ := cmd.Flags().GetString("sprint")
 			goals, _ := cmd.Flags().GetStringSlice("goals")
+			goalSingular, _ := cmd.Flags().GetStringSlice("goal")
+			goals = append(goals, goalSingular...)
 			situation, _ := cmd.Flags().GetString("sbar-situation")
 			background, _ := cmd.Flags().GetString("sbar-background")
 			assessment, _ := cmd.Flags().GetString("sbar-assessment")
 			recommendation, _ := cmd.Flags().GetString("sbar-recommendation")
 			noValidate, _ := cmd.Flags().GetBool("no-validate")
 			noDedup, _ := cmd.Flags().GetBool("no-dedup")
-			exitCode = command.Create(appStore, appCfg, args[0], args[1], command.CreateOpts{
+			// Support --title as an alternative to the positional title arg.
+			titleFlag, _ := cmd.Flags().GetString("title")
+			var title string
+			if len(args) == 2 {
+				title = args[1]
+			} else if titleFlag != "" {
+				title = titleFlag
+			} else {
+				fmt.Fprintln(os.Stderr, "create: title is required — pass it as the second positional arg or via --title")
+				exitCode = 2
+				return
+			}
+			exitCode = command.Create(appStore, appCfg, args[0], title, command.CreateOpts{
 				Priority: priority, Severity: severity, Tag: tag, Depends: depends, Sprint: sprint,
 				Goals:          goals,
 				Situation:      situation,
@@ -398,6 +412,10 @@ To list goals with weights use:
 	createCmd.Flags().String("depends", "", "depends on item ID")
 	createCmd.Flags().String("sprint", "", "assign to sprint on creation")
 	createCmd.Flags().StringSlice("goals", nil, "goal IDs to associate on creation (comma-separated)")
+	createCmd.Flags().StringSlice("goal", nil, "alias for --goals (singular form accepted)")
+	_ = createCmd.Flags().MarkHidden("goal")
+	createCmd.Flags().String("title", "", "title (alternative to positional arg)")
+	_ = createCmd.Flags().MarkHidden("title")
 	// I-908: SBAR fields at create time — these names are already used by
 	// security-scan-on-push.sh (T-433); adding them here makes those calls live.
 	createCmd.Flags().String("sbar-situation", "", "SBAR situation field (what is observable right now)")
