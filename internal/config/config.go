@@ -257,7 +257,8 @@ type AgentsConfig struct {
 }
 
 type SprintsConfig struct {
-	StaleClaimTTL int // seconds before a claim is stale (default 7200)
+	StaleClaimTTL   int // seconds before a claim is stale (default 7200)
+	StaleActiveHours int // hours before an active item with no changelog activity is released (default 6). I-874.
 }
 
 // RunConfig holds settings for st run / st advance.
@@ -864,6 +865,32 @@ func (c *Config) StaleClaimTTL() int {
 	return 7200
 }
 
+// StaleActiveHours returns the threshold (in hours) after which a
+// status=active item with no recent changelog activity is eligible
+// for auto-release by st reconcile. Resolution order:
+//  1. sprints.stale_active_hours in .as/config.yaml (when > 0)
+//  2. ST_STALE_ACTIVE_HOURS env var
+//  3. ST_STALE_ACTIVE_DAYS env var × 24 (backward compat)
+//  4. Default: 6 (hours). I-874.
+func (c *Config) StaleActiveHours() int {
+	if c.Sprints != nil && c.Sprints.StaleActiveHours > 0 {
+		return c.Sprints.StaleActiveHours
+	}
+	if env := os.Getenv("ST_STALE_ACTIVE_HOURS"); env != "" {
+		var h int
+		if _, err := fmt.Sscanf(env, "%d", &h); err == nil && h > 0 {
+			return h
+		}
+	}
+	if env := os.Getenv("ST_STALE_ACTIVE_DAYS"); env != "" {
+		var days int
+		if _, err := fmt.Sscanf(env, "%d", &days); err == nil && days > 0 {
+			return days * 24
+		}
+	}
+	return 6
+}
+
 // ValidStatuses returns the allowed statuses for a given item type.
 func (c *Config) ValidStatuses(itemType string) []string {
 	if tc, ok := c.Types[itemType]; ok {
@@ -1434,6 +1461,10 @@ func applyValue(cfg *Config, levels [4]string, key, val string) {
 		case "stale_claim_ttl":
 			if v, err := strconv.Atoi(val); err == nil {
 				cfg.Sprints.StaleClaimTTL = v
+			}
+		case "stale_active_hours":
+			if v, err := strconv.Atoi(val); err == nil {
+				cfg.Sprints.StaleActiveHours = v
 			}
 		}
 

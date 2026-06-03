@@ -9,6 +9,9 @@ import (
 	"strings"
 	"time"
 
+	"bufio"
+
+	"github.com/jfinlinson/agent-state/internal/agent"
 	"github.com/jfinlinson/agent-state/internal/config"
 	"github.com/jfinlinson/agent-state/internal/deps"
 	"github.com/jfinlinson/agent-state/internal/model"
@@ -905,21 +908,30 @@ func reconcileStackCleanup(s *store.Store, cfg *config.Config, opts ReconcileOpt
 
 // reconcileStaleActive releases items whose status is the type's
 // ActiveStatus AND:
+//   - no changelog activity for the item in the last N hours (default 6h,
+//     configurable via sprints.stale_active_hours / ST_STALE_ACTIVE_HOURS /
+//     ST_STALE_ACTIVE_DAYS). Falls back to last_touched when no changelog. I-874.
 //   - no worktree exists at either the per-agent or legacy locations
 //   - no open PR is associated with the recorded branch
-//   - last_touched is older than the stale threshold (default 7 days,
-//     overridable via ST_STALE_ACTIVE_DAYS)
+//   - assigned agent (if set) has no live PID registration (safety gate). I-874.
 //
 // Calls Release() to reset the item back to its StartStatus. I-232.
 func reconcileStaleActive(s *store.Store, cfg *config.Config, opts ReconcileOpts) int {
-	threshold := 7 * 24 * time.Hour
-	if env := os.Getenv("ST_STALE_ACTIVE_DAYS"); env != "" {
-		var days int
-		if _, err := fmt.Sscanf(env, "%d", &days); err == nil && days > 0 {
-			threshold = time.Duration(days) * 24 * time.Hour
+	threshold := time.Duration(cfg.StaleActiveHours()) * time.Hour
+	now := time.Now()
+
+	// Build live-agent set once for the whole pass. Errors are non-fatal:
+	// if we can't list registrations we skip the liveness gate (safe-fail
+	// keeps active; no false positives).
+	liveAgents := map[string]bool{}
+	if regs, err := agent.ListRegistrations(cfg); err == nil {
+		for _, r := range regs {
+			if agent.IsPIDLive(r.PID) {
+				liveAgents[r.AgentID] = true
+			}
 		}
 	}
-	now := time.Now()
+
 	updates := 0
 	for _, item := range s.List() {
 		tc, ok := cfg.Types[item.Type]
@@ -929,8 +941,18 @@ func reconcileStaleActive(s *store.Store, cfg *config.Config, opts ReconcileOpts
 		if item.Status != tc.ActiveStatus {
 			continue
 		}
-		// Recent touch — owner is probably still working.
-		if !item.LastTouched.IsZero() && now.Sub(item.LastTouched) < threshold {
+		// I-874 safety gate: if the assigned agent has a live process, it may
+		// be deep in a compile or test cycle. Don't yank from under it.
+		if item.AssignedTo != "" && liveAgents[item.AssignedTo] {
+			continue
+		}
+		// Use changelog latest-entry timestamp as the activity signal; fall back
+		// to last_touched when no changelog exists for this item.
+		activityAt, ok := changelogLatestTimestamp(cfg, item.ID)
+		if !ok {
+			activityAt = item.LastTouched
+		}
+		if !activityAt.IsZero() && now.Sub(activityAt) < threshold {
 			continue
 		}
 		// Worktree present anywhere — owner has on-disk state.
@@ -949,14 +971,52 @@ func reconcileStaleActive(s *store.Store, cfg *config.Config, opts ReconcileOpts
 				continue
 			}
 		}
+		staleAge := now.Sub(activityAt)
 		updates++
-		fmt.Printf("  %s: releasing stale-active (last_touched %s ago)\n",
-			item.ID, formatStaleAge(now.Sub(item.LastTouched)))
+		fmt.Printf("  %s: releasing stale-active (no changelog activity for %s)\n",
+			item.ID, formatStaleAge(staleAge))
 		if !opts.DryRun {
 			Release(s, cfg, item.ID)
 		}
 	}
 	return updates
+}
+
+// changelogLatestTimestamp returns the timestamp of the most recent changelog
+// entry for the given item, reading only the last line of the JSONL log for
+// efficiency. Returns (zero, false) when the file doesn't exist or the last
+// line is unparseable. I-874.
+func changelogLatestTimestamp(cfg *config.Config, id string) (time.Time, bool) {
+	path := filepath.Join(cfg.ChangelogDir(), id+".log")
+	f, err := os.Open(path)
+	if err != nil {
+		return time.Time{}, false
+	}
+	defer f.Close()
+
+	// Scan all lines to find the last non-empty one.
+	var lastLine string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		if line := scanner.Text(); line != "" {
+			lastLine = line
+		}
+	}
+	if lastLine == "" {
+		return time.Time{}, false
+	}
+
+	var entry struct {
+		Timestamp string `json:"timestamp"`
+	}
+	if err := json.Unmarshal([]byte(lastLine), &entry); err != nil || entry.Timestamp == "" {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339, entry.Timestamp)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
 }
 
 // formatStaleAge renders a duration as the simplest human form for the
