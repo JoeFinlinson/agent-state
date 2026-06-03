@@ -1,8 +1,6 @@
 package command
 
 import (
-	"io"
-	"os"
 	"strings"
 	"testing"
 )
@@ -15,27 +13,16 @@ func TestCreatePrintsNewItemIDBeforeReview(t *testing.T) {
 	t.Setenv("AS_INTERNAL_NO_REVIEW", "1")
 	s, cfg := setupTestEnv(t)
 
-	// Capture stdout.
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	old := os.Stdout
-	os.Stdout = w
-
-	code := Create(s, cfg, "issue", "New item ID test", CreateOpts{
-		Priority: 3,
-		Situation:      "Test situation for the new item ID output test (I-1301).",
-		Background:     "Background for the new item ID output test.",
-		Assessment:     "Assessment for the new item ID output test.",
-		Recommendation: "Recommendation for the new item ID output test.",
+	var code int
+	output := captureStdout(t, func() {
+		code = Create(s, cfg, "issue", "New item ID test", CreateOpts{
+			Priority:       3,
+			Situation:      "Test situation for the new item ID output test (I-1301).",
+			Background:     "Background for the new item ID output test.",
+			Assessment:     "Assessment for the new item ID output test.",
+			Recommendation: "Recommendation for the new item ID output test.",
+		})
 	})
-
-	w.Close()
-	os.Stdout = old
-
-	out, _ := io.ReadAll(r)
-	output := string(out)
 
 	if code != 0 {
 		t.Fatalf("Create returned %d, want 0; output: %s", code, output)

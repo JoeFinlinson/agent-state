@@ -221,14 +221,9 @@ func testRunMode(s *store.Store, cfg *config.Config, id, suite, suiteCmd, sha st
 	// NOTE: the RepoMap resolution below must stay in sync with rewriteSuiteForWorktree.
 	if cfg.Worktree != nil && cfg.Worktree.Enabled && cfg.Worktree.BaseDir != "" {
 		if wtBase := cfg.WorktreeForItem(id); wtBase != "" {
+			wtExists := true
 			if _, statErr := os.Stat(wtBase); statErr != nil {
-				// Worktree is expected but doesn't exist — running would execute
-				// against the main clone and clobber any existing evidence record.
-				fmt.Fprintf(os.Stderr,
-					"error: item %s has no active worktree at %s — running would produce misleading results.\n"+
-						"  Run `st start %s` to recreate the worktree, then retry.\n",
-					id, wtBase, id)
-				return 1
+				wtExists = false
 			}
 			for _, repo := range cfg.Worktree.Repos {
 				repoDir := repo
@@ -245,12 +240,23 @@ func testRunMode(s *store.Store, cfg *config.Config, id, suite, suiteCmd, sha st
 				}
 				for _, pattern := range patterns {
 					if strings.Contains(cmd, pattern) {
-						fmt.Fprintf(os.Stderr,
-							"error: suite %q references %q but the worktree rewrite did not fire for item %s.\n"+
-								"  Running would execute against the main clone, not the feature-branch worktree.\n"+
-								"  Expected repo at: %s\n"+
-								"  If the repo dir is missing, run `st start %s` to recreate the worktree.\n",
-							suite, pattern, id, filepath.Join(wtBase, repoDir), id)
+						if !wtExists {
+							// Worktree never created or was removed — cmd references a repo
+							// that can only run correctly inside the worktree.
+							fmt.Fprintf(os.Stderr,
+								"error: item %s has no active worktree at %s — running would produce misleading results.\n"+
+									"  Run `st start %s` to recreate the worktree, then retry.\n",
+								id, wtBase, id)
+						} else {
+							// Worktree exists but the repo dir is missing inside it —
+							// the rewrite did not fire, so cmd still points at the main clone.
+							fmt.Fprintf(os.Stderr,
+								"error: suite %q references %q but the worktree rewrite did not fire for item %s.\n"+
+									"  Running would execute against the main clone, not the feature-branch worktree.\n"+
+									"  Expected repo at: %s\n"+
+									"  If the repo dir is missing, run `st start %s` to recreate the worktree.\n",
+								suite, pattern, id, filepath.Join(wtBase, repoDir), id)
+						}
 						return 1
 					}
 				}

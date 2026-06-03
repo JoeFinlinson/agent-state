@@ -315,7 +315,6 @@ func Create(s *store.Store, cfg *config.Config, itemType, title string, opts Cre
 	// Print machine-parseable ID immediately — before autoSync and runItemReview
 	// (which can produce hundreds of lines), so it's the first capturable output.
 	fmt.Printf("new item: %s\n", id)
-	os.Stdout.Sync() //nolint:errcheck
 
 	// Assign to sprint if requested. Sprint registry I/O is hoisted
 	// out of the Mutate closure (it touches a different file).
