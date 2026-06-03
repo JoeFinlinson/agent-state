@@ -183,10 +183,16 @@ func setupPushWorkspace(t *testing.T) (bareDir, cloneDir string, s *store.Store,
 	seedDir := filepath.Join(base, "seed")
 	git(base, "clone", bareDir, seedDir)
 	for _, dir := range []string{"agent-state/tasks", "agent-state/issues", "agent-state/archive"} {
-		os.MkdirAll(filepath.Join(seedDir, dir), 0755)
+		if err := os.MkdirAll(filepath.Join(seedDir, dir), 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
 	}
-	os.MkdirAll(filepath.Join(seedDir, ".as"), 0755)
-	os.WriteFile(filepath.Join(seedDir, ".as", "config.yaml"), []byte("paths:\n  root: agent-state\n"), 0644)
+	if err := os.MkdirAll(filepath.Join(seedDir, ".as"), 0755); err != nil {
+		t.Fatalf("mkdir .as: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(seedDir, ".as", "config.yaml"), []byte("paths:\n  root: agent-state\n"), 0644); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
 	itemBody := `id: T-001
 type: task
 status: queued
@@ -204,8 +210,12 @@ sbar:
   assessment: Task exists to be modified by test scenarios.
   recommendation: Keep fixture stable.
 `
-	os.WriteFile(filepath.Join(seedDir, "agent-state/tasks", "T-001-push-test.md"), []byte(itemBody), 0644)
-	os.WriteFile(filepath.Join(seedDir, ".gitignore"), []byte("**/.st-git.lock\n"), 0644)
+	if err := os.WriteFile(filepath.Join(seedDir, "agent-state/tasks", "T-001-push-test.md"), []byte(itemBody), 0644); err != nil {
+		t.Fatalf("write T-001: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(seedDir, ".gitignore"), []byte("**/.st-git.lock\n"), 0644); err != nil {
+		t.Fatalf("write .gitignore: %v", err)
+	}
 	git(seedDir, "config", "user.email", "test@test.com")
 	git(seedDir, "config", "user.name", "Test")
 	git(seedDir, "add", "-A")

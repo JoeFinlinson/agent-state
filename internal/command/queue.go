@@ -136,11 +136,15 @@ func IsGoalReachable(s *store.Store, cfg *config.Config, id string) bool {
 }
 
 // autoSync commits + pushes any working-tree changes left by a state-mutating
-// command. Two behaviors:
+// command. Four behaviors:
 //   - Gate sentinel (ErrI807MainBranchGate): prints the full actionable error
 //     to stderr and returns the error so the caller can exit non-zero. The gate
 //     is operator-actionable and won't self-resolve — silencing it hides a real
 //     problem (I-821).
+//   - ErrPushDiverged: prints an actionable warning naming the conflict and
+//     returns nil. Operator must resolve the conflict before re-running st sync.
+//   - ErrPushRejectedButOriginUnchanged: prints an actionable warning including
+//     the remote rejection text (I-684) and returns nil. No retry will help.
 //   - Any other error: prints a "warning:" line and returns nil (best-effort for
 //     transient failures like network blips or git-lock contention that recover
 //     on the next sync).
@@ -154,11 +158,11 @@ func autoSync(s *store.Store, msg string, newPaths ...string) error {
 			return err
 		}
 		if errors.Is(err, store.ErrPushDiverged) {
-			fmt.Fprintf(os.Stderr, "warning: auto-sync: push diverged — a peer changed the same file(s); resolve the conflict, then run `st sync`\n")
+			fmt.Fprintf(os.Stderr, "warning: auto-sync: push diverged — a peer changed the same file(s); resolve the conflict, then run `st sync` (%v)\n", err)
 			return nil
 		}
 		if errors.Is(err, store.ErrPushRejectedButOriginUnchanged) {
-			fmt.Fprintf(os.Stderr, "warning: auto-sync: push blocked by a server-side gate (branch protection or pre-receive hook) — retrying won't help; check remote settings\n")
+			fmt.Fprintf(os.Stderr, "warning: auto-sync: push blocked by a server-side gate (branch protection or pre-receive hook) — retrying won't help; check remote settings (%v)\n", err)
 			return nil
 		}
 		fmt.Fprintf(os.Stderr, "warning: auto-sync failed: %v (run `st sync` manually)\n", err)
