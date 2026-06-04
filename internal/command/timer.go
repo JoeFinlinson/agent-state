@@ -38,13 +38,21 @@ func TimerPauseAll(s *store.Store, cfg *config.Config, agentID string) (int, err
 		if elapsed < 0 {
 			elapsed = 0 // clock-skew guard
 		}
-		acc := 0
-		if v, ok2 := getNestedField(item, "time_tracking", "accumulated_seconds"); ok2 && v != "" {
-			fmt.Sscanf(v, "%d", &acc) //nolint:errcheck
-		}
-		newAcc := acc + elapsed
+		capturedElapsed := elapsed
 		mutErr := s.Mutate(id, func(it *model.Item) error {
-			it.SetNested("time_tracking", "accumulated_seconds", strconv.Itoa(newAcc))
+			// Re-read session_started_at under the lock: a concurrent st timer pause
+			// may have already cleared it. If so, skip to avoid double-counting.
+			if ss, _ := getNestedField(it, "time_tracking", "session_started_at"); ss == "" {
+				return nil
+			}
+			// Re-read accumulated_seconds from the freshly parsed item to avoid
+			// overwriting a value written by a concurrent process between s.All()
+			// and this Mutate lock acquisition.
+			acc := 0
+			if v, ok2 := getNestedField(it, "time_tracking", "accumulated_seconds"); ok2 && v != "" {
+				fmt.Sscanf(v, "%d", &acc) //nolint:errcheck
+			}
+			it.SetNested("time_tracking", "accumulated_seconds", strconv.Itoa(acc+capturedElapsed))
 			it.SetNested("time_tracking", "session_started_at", "")
 			return nil
 		})

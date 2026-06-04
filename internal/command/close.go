@@ -205,7 +205,9 @@ func Close(s *store.Store, cfg *config.Config, id, resolution string, opts Close
 			if sessStart, ok := getNestedField(item, "time_tracking", "session_started_at"); ok && sessStart != "" {
 				haveSessionFields = true
 				if t0, err := time.Parse(time.RFC3339, sessStart); err == nil {
-					if elapsed := now.Sub(t0); elapsed > 0 {
+					// Use time.Now() here (not the pre-LOC-snapshot `now`) so that
+					// git-diff latency in computeLOCSnapshot is included in work time.
+					if elapsed := time.Now().Sub(t0); elapsed > 0 {
 						workDur += elapsed
 					}
 				}
@@ -214,7 +216,7 @@ func Close(s *store.Store, cfg *config.Config, id, resolution string, opts Close
 				workDur += time.Duration(accSecs) * time.Second
 			} else if startedAt, ok := getNestedField(item, "time_tracking", "started_at"); ok && startedAt != "" {
 				if t0, err := time.Parse(time.RFC3339, startedAt); err == nil {
-					workDur = now.Sub(t0)
+					workDur = time.Now().Sub(t0)
 				}
 			}
 		}
