@@ -154,6 +154,9 @@ type TestingConfig struct {
 // SuiteConfig values are reused as-is.
 type ScopeClassConfig struct {
 	RequiredSuites map[string]SuiteConfig
+	// I-830: goal slugs (e.g. "st-tooling") that auto-assign this class on
+	// create/start when the item carries a matching "goal:<slug>" tag.
+	AppliesToGoals []string
 }
 
 // RequiredSuitesFor returns the required-suite set that applies to a given
@@ -180,6 +183,35 @@ func (t *TestingConfig) RequiredSuitesFor(scopeClass string) (map[string]SuiteCo
 		return nil, false
 	}
 	return class.RequiredSuites, true
+}
+
+// ScopeClassForGoalTags returns the first scope class name whose AppliesToGoals
+// list contains a slug matching a "goal:<slug>" tag in tags. Returns "" if none
+// match. I-830: used by create/start to auto-assign scope_class from goal tags.
+func (t *TestingConfig) ScopeClassForGoalTags(tags []string) string {
+	if t == nil {
+		return ""
+	}
+	classNames := make([]string, 0, len(t.ScopeClasses))
+	for cn := range t.ScopeClasses {
+		classNames = append(classNames, cn)
+	}
+	sort.Strings(classNames)
+	for _, tag := range tags {
+		slug, ok := strings.CutPrefix(tag, "goal:")
+		if !ok {
+			continue
+		}
+		for _, className := range classNames {
+			class := t.ScopeClasses[className]
+			for _, g := range class.AppliesToGoals {
+				if g == slug {
+					return className
+				}
+			}
+		}
+	}
+	return ""
 }
 
 type CoverageThresholds struct {
@@ -1373,12 +1405,23 @@ func applyValue(cfg *Config, levels [4]string, key, val string) {
 					key, className, levels[3])
 				return
 			}
+			// applies_to_goals is only valid as an inline list [a, b]; a scalar
+			// form reaches applyValue — guard and drop rather than registering a
+			// phantom suite named "applies_to_goals".
+			if key == "applies_to_goals" {
+				fmt.Fprintf(os.Stderr,
+					"warning: applies_to_goals under scope_classes.%s must be an inline list (e.g. [st-tooling]), not a scalar %q; dropping\n",
+					className, val)
+				return
+			}
 			class, ok := cfg.Testing.ScopeClasses[className]
 			if !ok {
 				class = ScopeClassConfig{RequiredSuites: make(map[string]SuiteConfig)}
 			} else if class.RequiredSuites == nil {
 				class.RequiredSuites = make(map[string]SuiteConfig)
 			}
+			// applies_to_goals with inline-list value [a, b] routes through
+			// applyInlineList (not here) — see the testing case there.
 			class.RequiredSuites[key] = SuiteConfig{Command: val}
 			cfg.Testing.ScopeClasses[className] = class
 		}
@@ -1584,6 +1627,17 @@ func applyInlineList(cfg *Config, levels [4]string, key string, items []string) 
 
 	case "testing":
 		ensureTesting(cfg)
+		// I-830: applies_to_goals is an inline list under scope_classes.<class>.
+		if key == "applies_to_goals" && levels[1] == "scope_classes" && levels[2] != "" {
+			className := levels[2]
+			class, ok := cfg.Testing.ScopeClasses[className]
+			if !ok {
+				class = ScopeClassConfig{RequiredSuites: make(map[string]SuiteConfig)}
+			}
+			class.AppliesToGoals = items
+			cfg.Testing.ScopeClasses[className] = class
+			return
+		}
 		if (key == "artifacts" || key == "triggers") && levels[2] != "" {
 			suiteName := levels[2]
 			switch levels[1] {
