@@ -372,9 +372,17 @@ func HeuristicAppend(cfg *config.Config, entry Entry) error {
 	return nil
 }
 
-// HeuristicList reads heuristic entries for a given agent. If filterTags is
-// non-empty, only entries with no RelevanceTags (universal) or with at least
-// one RelevanceTags element matching a filterTags element are returned.
+// HeuristicList reads heuristic entries for a given agent.
+//
+// filterTags controls relevance filtering:
+//   - Empty filterTags (nil or zero-length): return ALL entries. An item
+//     with no tags is a signal that any operational rule may be relevant —
+//     surfacing everything is the conservative "superset beats silent drop"
+//     choice and matches the approved plan (I-804 §HeuristicList).
+//   - Non-empty filterTags: include only entries where len(RelevanceTags)==0
+//     (universal) OR at least one RelevanceTags element matches a filterTags
+//     element. This narrows to rules relevant to the item's context.
+//
 // Returns nil, nil if the heuristic file does not exist.
 func HeuristicList(cfg *config.Config, agentID string, filterTags []string) ([]Entry, error) {
 	path := heuristicPath(cfg, agentID)
