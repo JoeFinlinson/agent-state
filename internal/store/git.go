@@ -626,9 +626,26 @@ func (s *Store) GitSync(message string, newPaths ...string) error {
 		return nil
 	}
 
-	// Commit
-	if err := gitCmd(root, "commit", "-m", message); err != nil {
-		return fmt.Errorf("git commit: %w", err)
+	// I-1313: commit the staged agent-state onto refs/heads/main via
+	// plumbing, NEVER `git commit` onto HEAD. When a code feature branch is
+	// checked out, `git commit` would strand the agent-state commit on that
+	// branch (PR pollution + "unpushed" nag) while pushWithRetry pushes the
+	// LOCAL main ref that never received it — the routing bug this fixes.
+	// Building the commit on refs/heads/main keeps agent-state fully
+	// decoupled from the working-tree branch; the existing pushWithRetry /
+	// replay handle staleness and same-file peer conflicts at push time.
+	if _, err := s.commitStagedOntoMain(root, message); err != nil {
+		return fmt.Errorf("commit onto main: %w", err)
+	}
+
+	// Clear the real index. The just-staged changes were committed onto
+	// refs/heads/main, not onto HEAD, so they must not linger staged
+	// against the working-tree branch (a subsequent `git add -u` / sync
+	// would otherwise re-stage and re-commit them). Mixed reset to HEAD
+	// leaves the working-tree files intact (they now match main) while
+	// unstaging them. On main this is a no-op (HEAD already advanced).
+	if err := gitCmdQuiet(root, "reset", "-q"); err != nil {
+		return fmt.Errorf("git reset after main commit: %w", err)
 	}
 
 	// Push with retry
@@ -651,6 +668,152 @@ func (s *Store) GitSync(message string, newPaths ...string) error {
 	}
 
 	return nil
+}
+
+// commitStagedOntoMain builds a commit containing the currently-staged
+// agent-state changes on top of refs/heads/main and advances that ref —
+// without ever touching the working-tree HEAD/index. It is the I-1313 fix
+// for the routing bug where `git commit` landed agent-state on whatever
+// feature branch happened to be checked out.
+//
+// Mechanism (same plumbing as replayCommitOnFetchedMain): seed a temp index
+// from main's tree, overlay each staged path (hash-object the working-tree
+// blob, or remove if deleted), write-tree, commit-tree -p main, and
+// update-ref refs/heads/main with a compare-and-swap on the old value so a
+// racing local writer can't be silently lost. The working tree and real
+// index are never mutated here; the caller resets the real index afterward.
+//
+// Staleness / conflicts: this commits on whatever local refs/heads/main is.
+// If origin/main has advanced, pushWithRetry's replay rebuilds the commit on
+// the freshly-fetched origin/main and refuses (ErrPushDiverged) on a
+// same-file peer edit — so no extra fetch/merge logic is needed here.
+//
+// Fallback: if refs/heads/main does not exist (flat-layout fixtures /
+// single-branch repos), it targets the symbolic HEAD branch instead, so the
+// behavior on such repos is identical to the previous `git commit`.
+func (s *Store) commitStagedOntoMain(root, message string) (string, error) {
+	// All path-sensitive plumbing here runs against the git TOPLEVEL. The
+	// commit tree spans the whole repo, and `git diff --cached --name-only`
+	// emits toplevel-relative paths — joining those onto `root` (which in a
+	// nested layout is the `agent-state/` subdir) would double-prefix and
+	// mis-stat every file. Resolve the toplevel once and anchor everything
+	// (stat, hash-object, update-index) to it.
+	toplevelOut, err := gitOutput(root, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return "", fmt.Errorf("rev-parse --show-toplevel: %w", err)
+	}
+	toplevel := strings.TrimSpace(toplevelOut)
+
+	// Resolve the base ref. Prefer refs/heads/main; fall back to HEAD's
+	// branch when main is absent (flat-layout fixtures / single-branch repos).
+	ref := "refs/heads/main"
+	baseOut, err := gitOutput(toplevel, "rev-parse", "--verify", "--quiet", ref)
+	if err != nil || strings.TrimSpace(baseOut) == "" {
+		symOut, symErr := gitOutput(toplevel, "symbolic-ref", "-q", "HEAD")
+		if symErr != nil || strings.TrimSpace(symOut) == "" {
+			return "", fmt.Errorf("commitStagedOntoMain: no refs/heads/main and HEAD is detached")
+		}
+		ref = strings.TrimSpace(symOut)
+		baseOut, err = gitOutput(toplevel, "rev-parse", "--verify", ref)
+		if err != nil {
+			return "", fmt.Errorf("rev-parse %s: %w", ref, err)
+		}
+	}
+	baseSHA := strings.TrimSpace(baseOut)
+
+	// The staged paths (real index vs HEAD) are exactly what st just staged,
+	// toplevel-relative.
+	changedOut, err := gitOutput(toplevel, "diff", "--cached", "--name-only")
+	if err != nil {
+		return "", fmt.Errorf("diff --cached: %w", err)
+	}
+	var changed []string
+	for _, l := range strings.Split(strings.TrimSpace(changedOut), "\n") {
+		if l != "" {
+			changed = append(changed, l)
+		}
+	}
+	if len(changed) == 0 {
+		return baseSHA, nil
+	}
+
+	// Temp index seeded from base's tree, so we overlay onto main's content
+	// (not HEAD's). Place it inside the REAL git dir.
+	gitDirOut, err := gitOutput(toplevel, "rev-parse", "--git-dir")
+	if err != nil {
+		return "", fmt.Errorf("rev-parse --git-dir: %w", err)
+	}
+	gitDir := strings.TrimSpace(gitDirOut)
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(toplevel, gitDir)
+	}
+	tmpIdx, err := os.CreateTemp(gitDir, "index.stcommit-*")
+	if err != nil {
+		return "", fmt.Errorf("create temp index: %w", err)
+	}
+	tmpIdxPath := tmpIdx.Name()
+	tmpIdx.Close()
+	defer os.Remove(tmpIdxPath)
+	env := []string{"GIT_INDEX_FILE=" + tmpIdxPath}
+
+	if err := gitCmdEnv(toplevel, env, "read-tree", baseSHA); err != nil {
+		return "", fmt.Errorf("read-tree %s into temp index: %w", baseSHA, err)
+	}
+
+	for _, rel := range changed {
+		abs := filepath.Join(toplevel, rel)
+		if _, statErr := os.Stat(abs); statErr != nil {
+			if os.IsNotExist(statErr) {
+				if err := gitCmdEnv(toplevel, env, "update-index", "--remove", "--", rel); err != nil {
+					return "", fmt.Errorf("update-index --remove %q: %w", rel, err)
+				}
+				continue
+			}
+			return "", fmt.Errorf("stat %q: %w", abs, statErr)
+		}
+		// `--path <rel>` applies .gitattributes the same way `git add` would,
+		// so the blob hash matches a normal commit's.
+		blobOut, err := gitOutput(toplevel, "hash-object", "-w", "--path", rel, "--", abs)
+		if err != nil {
+			return "", fmt.Errorf("hash-object %q: %w", abs, err)
+		}
+		blob := strings.TrimSpace(blobOut)
+		if err := gitCmdEnv(toplevel, env, "update-index", "--add", "--cacheinfo",
+			"100644,"+blob+","+rel); err != nil {
+			return "", fmt.Errorf("update-index %q: %w", rel, err)
+		}
+	}
+
+	treeOut, err := gitOutputEnv(toplevel, env, "write-tree")
+	if err != nil {
+		return "", fmt.Errorf("write-tree: %w", err)
+	}
+	tree := strings.TrimSpace(treeOut)
+
+	// If the overlaid tree is identical to main's tree, the working-tree
+	// agent-state already matches main (e.g. a re-sync on a feature branch
+	// whose change was committed to main on a prior sync). Skip the commit
+	// so we don't accumulate empty commits on main.
+	baseTreeOut, err := gitOutput(toplevel, "rev-parse", baseSHA+"^{tree}")
+	if err != nil {
+		return "", fmt.Errorf("rev-parse %s^{tree}: %w", baseSHA, err)
+	}
+	if strings.TrimSpace(baseTreeOut) == tree {
+		return baseSHA, nil
+	}
+
+	commitOut, err := gitOutputStdin(toplevel, strings.TrimRight(message, "\n"),
+		"commit-tree", tree, "-p", baseSHA)
+	if err != nil {
+		return "", fmt.Errorf("commit-tree: %w", err)
+	}
+	newCommit := strings.TrimSpace(commitOut)
+
+	// Compare-and-swap: refuse if main moved under us (racing local writer).
+	if err := gitCmdQuiet(toplevel, "update-ref", ref, newCommit, baseSHA); err != nil {
+		return "", fmt.Errorf("update-ref %s (main moved concurrently?): %w", ref, err)
+	}
+	return newCommit, nil
 }
 
 // verifyPushLanded confirms the local `refs/heads/main` HEAD is reachable

@@ -844,6 +844,77 @@ func dirtyItem(t *testing.T, s *Store) {
 	s.write(item)
 }
 
+// TestGitSync_FromFeatureBranch_LandsOnMainNotBranch is the I-1313
+// regression guard: running an agent-state sync while a CODE feature branch
+// is checked out must land the commit on main (local + origin) and leave the
+// feature branch byte-identical — zero leak onto the PR branch.
+func TestGitSync_FromFeatureBranch_LandsOnMainNotBranch(t *testing.T) {
+	root, _ := setupTestDir(t)
+	asDir := filepath.Join(root, ".as")
+	os.MkdirAll(asDir, 0755)
+	os.WriteFile(filepath.Join(asDir, "config.yaml"), []byte("paths:\n  root: .\n"), 0644)
+	initGitRepo(t, root)
+	gitBareRemote(t, root)
+
+	run := func(args ...string) string {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+
+	// Check out a CODE feature branch off main — the exact situation that
+	// stranded agent-state commits on PR branches before this fix.
+	run("checkout", "-b", "feat/some-code-work")
+	featureRefBefore := run("rev-parse", "feat/some-code-work")
+	mainBefore := run("rev-parse", "refs/heads/main")
+
+	// st mutates agent-state while standing on the feature branch.
+	s := gitSyncStore(t, root)
+	dirtyItem(t, s)
+
+	if err := s.GitSync("agent-d: update T-001"); err != nil {
+		t.Fatalf("GitSync on a feature branch must succeed, got: %v", err)
+	}
+
+	// (1) ZERO LEAK: the feature branch ref must be byte-identical.
+	if got := run("rev-parse", "feat/some-code-work"); got != featureRefBefore {
+		t.Errorf("agent-state leaked onto the feature branch: ref moved %s -> %s", featureRefBefore, got)
+	}
+
+	// (2) local main advanced by exactly one commit.
+	mainAfter := run("rev-parse", "refs/heads/main")
+	if mainAfter == mainBefore {
+		t.Fatal("local main did not advance — the agent-state commit did not land on main")
+	}
+	if parent := run("rev-parse", "refs/heads/main^"); parent != mainBefore {
+		t.Errorf("main advanced by more than one commit (parent=%s want %s)", parent, mainBefore)
+	}
+
+	// (3) the new main commit actually contains the T-001 change.
+	files := run("diff-tree", "--no-commit-id", "--name-only", "-r", "refs/heads/main")
+	if !strings.Contains(files, "T-001") {
+		t.Errorf("main commit does not contain the T-001 change; files=%q", files)
+	}
+
+	// (4) push landed: origin/main contains the new local main HEAD.
+	if err := gitCmdQuiet(root, "merge-base", "--is-ancestor", mainAfter, "refs/remotes/origin/main"); err != nil {
+		t.Errorf("origin/main does not contain the new main commit %s — push did not land", mainAfter)
+	}
+
+	// (5) HEAD is still the feature branch and nothing is left STAGED
+	// against it (no stranded staged diff that a later sync would re-commit).
+	if cur := run("symbolic-ref", "--short", "HEAD"); cur != "feat/some-code-work" {
+		t.Errorf("HEAD moved off the feature branch to %q", cur)
+	}
+	if staged := run("diff", "--cached", "--name-only"); staged != "" {
+		t.Errorf("agent-state left staged against the feature branch: %q", staged)
+	}
+}
+
 // TestGitSync_RejectedPushIsLoud is the core I-684 guard: when the remote
 // rejects the push (pre-receive / GH001), GitSync MUST return a non-nil
 // error (so `st sync` exits 1 and never prints "Synced.") and the error
