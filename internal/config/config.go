@@ -192,12 +192,18 @@ func (t *TestingConfig) ScopeClassForGoalTags(tags []string) string {
 	if t == nil {
 		return ""
 	}
+	classNames := make([]string, 0, len(t.ScopeClasses))
+	for cn := range t.ScopeClasses {
+		classNames = append(classNames, cn)
+	}
+	sort.Strings(classNames)
 	for _, tag := range tags {
 		slug, ok := strings.CutPrefix(tag, "goal:")
 		if !ok {
 			continue
 		}
-		for className, class := range t.ScopeClasses {
+		for _, className := range classNames {
+			class := t.ScopeClasses[className]
 			for _, g := range class.AppliesToGoals {
 				if g == slug {
 					return className
@@ -1397,6 +1403,15 @@ func applyValue(cfg *Config, levels [4]string, key, val string) {
 				fmt.Fprintf(os.Stderr,
 					"warning: scope_classes does not support the nested suite form (%q under %q.%q); use the flat shape (<class>.<suite>: <cmd>) — dropping\n",
 					key, className, levels[3])
+				return
+			}
+			// applies_to_goals is only valid as an inline list [a, b]; a scalar
+			// form reaches applyValue — guard and drop rather than registering a
+			// phantom suite named "applies_to_goals".
+			if key == "applies_to_goals" {
+				fmt.Fprintf(os.Stderr,
+					"warning: applies_to_goals under scope_classes.%s must be an inline list (e.g. [st-tooling]), not a scalar %q; dropping\n",
+					className, val)
 				return
 			}
 			class, ok := cfg.Testing.ScopeClasses[className]
