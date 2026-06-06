@@ -497,6 +497,9 @@ func Start(s *store.Store, cfg *config.Config, id string, opts StartOpts) int {
 	if agentID != "" {
 		fmt.Printf("  Assigned to: %s\n", agentID)
 	}
+	if item.Sprint != "" {
+		fmt.Printf("  sprint %s siblings discoverable via st next\n", item.Sprint)
+	}
 
 	// Emit dispatch directive so the operator knows which model tier to
 	// launch. decideTier follows the model_tier → model_tier_rec → Haiku

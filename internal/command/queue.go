@@ -16,18 +16,6 @@ import (
 	"github.com/jfinlinson/agent-state/internal/store"
 )
 
-// I-489 chain-position constants. The formula
-// `epic_priority*epicMul + sprint_position*sprintMul + within-sprint`
-// produces a deterministic insert key for sprint-sourced queue entries
-// so the queue reflects epic→sprint→item priority by default. Manual
-// `queue move` overrides aren't subject to this — see
-// findChainInsertIndex for how operator-pinned entries are tolerated.
-const (
-	epicMul           = 1_000_000
-	sprintMul         = 10_000
-	unprioritizedEpic = 999 // sentinel: epics without Priority sort after numbered ones
-)
-
 // Queue entry source values. Missing/empty = legacy "manual" semantics.
 const (
 	QueueSourceManual = "manual"
@@ -426,115 +414,6 @@ func QueueRm(s *store.Store, cfg *config.Config, id string) int {
 		return 1
 	}
 	return 0
-}
-
-// upsertQueueSprintEntry ensures `id` has a sprint-sourced queue entry.
-// When the entry is absent we insert a new one with Approved=false (so a
-// 30-item sprint doesn't flood the operator's "next" view) and
-// Source="sprint" so a later `st sprint rm` cascades the removal. The
-// insert position is computed from the epic→sprint→within-sprint chain
-// (I-489) so high-priority epics' sprints land ahead of lower ones by
-// default. Operator-pinned entries (Source != "sprint") are tolerated —
-// the chain walk skips them — so prior `queue move` overrides survive.
-//
-// When an entry already exists we leave it alone — operator-queued
-// entries (empty or "manual" Source) keep their origin so sprint rm
-// won't cascade-remove them, matching the "track origin" contract in
-// I-488.
-//
-// `s` and `r` are optional; when nil, the function falls back to
-// appending at the end of the queue (used by tests / pathological
-// states where the chain can't be resolved).
-//
-// Returns true if a new queue entry was added.
-func upsertQueueSprintEntry(cfg *config.Config, s *store.Store, r *registry.Registry, id, sprintID string) (bool, error) {
-	entries := LoadQueue(cfg)
-	for _, e := range entries {
-		if e.ID == id {
-			return false, nil
-		}
-	}
-
-	addedBy := cfg.AgentID()
-	if addedBy == "" {
-		addedBy = "user"
-	}
-	newEntry := QueueEntry{
-		ID:       id,
-		AddedAt:  time.Now().Format(time.RFC3339),
-		AddedBy:  addedBy,
-		Reason:   fmt.Sprintf("sprint:%s", sprintID),
-		Approved: IsGoalReachable(s, cfg, id),
-		Source:   QueueSourceSprint,
-	}
-
-	insertIdx := len(entries)
-	if s != nil && r != nil {
-		targetPos := computeSprintQueuePosition(r, sprintID, id)
-		insertIdx = findChainInsertIndex(entries, s, r, targetPos)
-	}
-	updated := make([]QueueEntry, 0, len(entries)+1)
-	updated = append(updated, entries[:insertIdx]...)
-	updated = append(updated, newEntry)
-	updated = append(updated, entries[insertIdx:]...)
-
-	if err := SaveQueue(cfg, updated); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-// computeSprintQueuePosition returns the deterministic chain-position
-// key for a sprint-sourced item: epic priority dominates, sprint
-// Sequence within the epic breaks ties, item index within the sprint
-// breaks the next tie. Items in unprioritized epics sort after every
-// numbered one. Used at insert time (I-489); not stored on the queue
-// entry.
-func computeSprintQueuePosition(r *registry.Registry, sprintID, itemID string) int {
-	sp, err := r.SprintByID(sprintID)
-	if err != nil {
-		return unprioritizedEpic * epicMul
-	}
-
-	epicPrio := unprioritizedEpic
-	if e, ok := r.GetEpic(sp.Epic); ok && e.Priority != nil {
-		epicPrio = *e.Priority
-	}
-
-	sprintPos := sp.Sequence
-
-	withinIdx := len(sp.Items) // not yet appended → land at the tail of the sprint band
-	for i, sid := range sp.Items {
-		if sid == itemID {
-			withinIdx = i
-			break
-		}
-	}
-
-	return epicPrio*epicMul + sprintPos*sprintMul + withinIdx
-}
-
-// findChainInsertIndex walks the queue and returns the first index whose
-// sprint-sourced predecessor has a computed chain-position greater than
-// targetPos. Manual / operator-pinned entries (Source != "sprint") are
-// tolerated and skipped — the operator put them there explicitly, so a
-// future sprint add should not displace them. When no entry's position
-// dominates targetPos, the function returns len(entries) (= append).
-func findChainInsertIndex(entries []QueueEntry, s *store.Store, r *registry.Registry, targetPos int) int {
-	for i, e := range entries {
-		if e.Source != QueueSourceSprint {
-			continue
-		}
-		item, ok := s.Get(e.ID)
-		if !ok || item.Sprint == "" {
-			continue
-		}
-		otherPos := computeSprintQueuePosition(r, item.Sprint, e.ID)
-		if otherPos > targetPos {
-			return i
-		}
-	}
-	return len(entries)
 }
 
 // removeSprintSourcedQueueEntry drops the entry for `id` IFF it was
