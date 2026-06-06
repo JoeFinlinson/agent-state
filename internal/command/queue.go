@@ -30,16 +30,15 @@ type QueueEntry struct {
 	Reason   string
 	Approved bool // agent-added items need user approval
 	// Source identifies what put the entry on the queue. "sprint" means
-	// the entry was created as a side effect of `st sprint add`; sprint
-	// rm then cascade-removes it. "manual" means the operator placed
-	// or re-placed the entry explicitly (via `st queue add` or via
-	// `st queue move`, which I-489 flips to "manual" on move) — sprint
-	// rm leaves it alone and the chain-position walk skips it. The
-	// empty string is a legacy on-disk form (pre-I-488) treated as
-	// equivalent to "manual" at runtime: SaveQueue writes "manual"
-	// explicitly when the field is set, but skips the line for empty
-	// so the file format stays compact for entries that never carried
-	// the field. Future readers must check `Source != QueueSourceSprint`
+	// the entry was created as a side effect of a historical `st sprint add`
+	// (pre-I-1322); sprint rm cascade-removes it. "manual" means the operator
+	// placed or re-placed the entry explicitly (via `st queue add` or via
+	// `st queue move`, which I-489 flips to "manual" on move) — sprint rm
+	// leaves it alone. The empty string is a legacy on-disk form (pre-I-488)
+	// treated as equivalent to "manual" at runtime: SaveQueue writes "manual"
+	// explicitly when the field is set, but skips the line for empty so the
+	// file format stays compact for entries that never carried the field.
+	// Future readers must check `Source != QueueSourceSprint`
 	// (not `== QueueSourceManual`) so legacy empty-source entries
 	// behave identically to operator-pinned ones.
 	Source string
@@ -568,13 +567,13 @@ func QueueMove(s *store.Store, cfg *config.Config, id string, position int) int 
 		return 1
 	}
 
-	// I-489: an operator move is an explicit override of the
-	// epic→sprint chain ordering. Flip Source to "manual" so a future
-	// `st sprint add` won't compare its chain-position against this
-	// entry and silently displace it. As a side effect, `st sprint rm`
-	// no longer cascade-removes this entry — also intentional, since
-	// the operator's manual placement signals "I want this in the
-	// queue regardless of sprint membership."
+	// I-489: an operator move is an explicit override. Flip Source to
+	// "manual" so `st sprint rm` no longer cascade-removes this entry —
+	// intentional, since the operator's manual placement signals "I want
+	// this in the queue regardless of sprint membership." Pre-I-1322
+	// this also prevented a sprint-add chain walk from displacing the
+	// entry; that chain walk no longer exists but the cascade-remove
+	// guard is still the right behaviour.
 	entry.Source = QueueSourceManual
 
 	entries = append(entries[:idx], entries[idx+1:]...)

@@ -536,11 +536,11 @@ func TestSprintRmLeavesManualEntry(t *testing.T) {
 
 // sprint show renders members in queue-position order.
 func TestSprintShowOrdersByQueuePosition(t *testing.T) {
+	t.Setenv("AS_AGENT_ID", "") // operator mode so QueueAdd marks Approved=true
 	s, cfg, _, sprintID := setupSprintTestEnv(t)
 
 	SprintAdd(s, cfg, sprintID, []string{"T-001", "T-002"})
 	// Manually add items to the queue (I-1322: SprintAdd no longer auto-queues).
-	t.Setenv("AS_AGENT_ID", "")
 	QueueAdd(s, cfg, "T-001", QueueOpts{})
 	QueueAdd(s, cfg, "T-002", QueueOpts{})
 	if code := QueueMove(s, cfg, "T-002", 1); code != 0 {
@@ -570,16 +570,14 @@ func TestSprintNextHonorsApprovalAndDeps(t *testing.T) {
 		t.Errorf("expected 'No approved' with empty queue, got %q", out)
 	}
 
-	// Add both as pending (agent-added), then approve both.
+	// Add both as pending (agent-added → Approved=false), then approve both.
 	// T-002 depends on T-001 → blocked → next is T-001.
 	// I-491 plan gate isn't under test here — bypass to focus on
 	// approval-and-block ordering.
-	if err := SaveQueue(cfg, []QueueEntry{
-		{ID: "T-001", Source: QueueSourceSprint, Approved: false},
-		{ID: "T-002", Source: QueueSourceSprint, Approved: false},
-	}); err != nil {
-		t.Fatalf("SaveQueue: %v", err)
-	}
+	t.Setenv("AS_AGENT_ID", "agent-a")
+	QueueAdd(s, cfg, "T-001", QueueOpts{})
+	QueueAdd(s, cfg, "T-002", QueueOpts{})
+	t.Setenv("AS_AGENT_ID", "")
 
 	out = captureStdout(t, func() { SprintNext(s, cfg, sprintID) })
 	if !strings.Contains(out, "No approved") {
