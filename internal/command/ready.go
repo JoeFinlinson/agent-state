@@ -20,9 +20,9 @@ type ReadyOpts struct {
 
 func Ready(s *store.Store, cfg *config.Config, opts ReadyOpts) int {
 	g := deps.Build(s.All(), cfg)
-	cands := g.Ready()
-	leverage, names := unblockLeverage(g, cands)
 	sprints := loadSprintInfo(cfg, g)
+	cands := recommendCandidates(s, cfg, g, RecommendOpts{}, sprints)
+	leverage, names := unblockLeverage(g, cands)
 	recs := coordinator.Recommend(cands, leverage, sprints, loadGoalWeights(s), loadQueuePins(cfg), time.Now())
 	enrichUnblockDetail(recs, names)
 
