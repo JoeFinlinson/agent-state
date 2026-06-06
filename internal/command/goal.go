@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jfinlinson/agent-state/internal/agent"
+	"github.com/jfinlinson/agent-state/internal/changelog"
 	"github.com/jfinlinson/agent-state/internal/config"
 	"github.com/jfinlinson/agent-state/internal/model"
 	"github.com/jfinlinson/agent-state/internal/store"
@@ -65,8 +66,12 @@ func GoalCreate(s *store.Store, cfg *config.Config, title string, weight int, op
 		model.Line{Raw: ""},
 	)
 	if opts.SuccessCriterion != "" {
+		criterionLine := "success_criterion: " + opts.SuccessCriterion
+		if strings.ContainsAny(opts.SuccessCriterion, ":`\"#") {
+			criterionLine = fmt.Sprintf("success_criterion: %q", opts.SuccessCriterion)
+		}
 		lines = append(lines,
-			model.Line{Raw: "success_criterion: " + opts.SuccessCriterion, Key: "success_criterion", Value: opts.SuccessCriterion},
+			model.Line{Raw: criterionLine, Key: "success_criterion", Value: opts.SuccessCriterion},
 			model.Line{Raw: ""},
 		)
 	}
@@ -194,6 +199,17 @@ func GoalMarkMet(s *store.Store, cfg *config.Config, id string, opts GoalMarkMet
 	if err := s.Move(id); err != nil {
 		fmt.Fprintf(os.Stderr, "moving %s: %v\n", id, err)
 		return 1
+	}
+
+	_ = changelog.Append(cfg, id, changelog.Entry{
+		Op: "goal_mark_met", Field: "status",
+		OldValue: "active", NewValue: "met",
+	})
+	if opts.NoValidate {
+		_ = changelog.Append(cfg, id, changelog.Entry{
+			Op:     "goal_mark_met_no_validate",
+			Reason: "bypassed success_criterion gate via --no-validate",
+		})
 	}
 
 	fmt.Printf("%s marked met\n", id)

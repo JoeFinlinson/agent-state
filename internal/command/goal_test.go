@@ -157,6 +157,35 @@ func TestGoalCreateRequiresSuccessCriterion(t *testing.T) {
 	}
 }
 
+func TestGoalCreateCriterionRoundtrip(t *testing.T) {
+	// Criteria containing YAML-special chars (colon, hash) must survive a
+	// write→read roundtrip without truncation. Values with embedded
+	// double-quotes follow the same pre-existing limitation as title quoting
+	// (the parser's unquote does not unescape \") and are excluded here.
+	cases := []string{
+		"revenue: $10k MRR",
+		"all P0 done # verified by QA",
+	}
+	for _, criterion := range cases {
+		t.Run(criterion, func(t *testing.T) {
+			dir, s, cfg := newGoalEnv(t)
+			_ = dir
+			rc := GoalCreate(s, cfg, "Test Goal", 10, GoalCreateOpts{SuccessCriterion: criterion})
+			if rc != 0 {
+				t.Fatalf("GoalCreate rc=%d", rc)
+			}
+			s2 := reloadStoreGoal(t, cfg)
+			goals := s2.List(store.TypeFilter("goal"))
+			if len(goals) == 0 {
+				t.Fatal("no goals after create")
+			}
+			if got := goals[0].SuccessCriterion; got != criterion {
+				t.Errorf("roundtrip: got %q, want %q", got, criterion)
+			}
+		})
+	}
+}
+
 func TestGoalActivateEnforcesWeightSum(t *testing.T) {
 	_, _, cfg := newGoalEnv(t)
 
