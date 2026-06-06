@@ -186,7 +186,7 @@ func TestQueueMoveFlipsSourceToManual(t *testing.T) {
 	s, cfg := setupTestEnv(t)
 
 	r, _ := registry.Load(cfg.EpicsPath())
-	e := r.AddEpic("e")
+	e := r.AddEpic("e", "")
 	prio := 1
 	r.Epics[indexOfEpicTest(r, e.ID)].Priority = &prio
 	sp, _ := r.AddSprint(e.ID, "sp1")
@@ -615,8 +615,8 @@ func TestComputeSprintQueuePosition(t *testing.T) {
 	_ = s
 
 	r, _ := registry.Load(cfg.EpicsPath())
-	a := r.AddEpic("alpha")
-	b := r.AddEpic("billing")
+	a := r.AddEpic("alpha", "")
+	b := r.AddEpic("billing", "")
 	prio1 := 1
 	prio2 := 2
 	r.Epics[indexOfEpicTest(r, a.ID)].Priority = &prio1
@@ -640,7 +640,7 @@ func TestComputeSprintQueuePosition(t *testing.T) {
 		t.Errorf("first-in-sprint should sort before second: pos1=%d pos3=%d", pos1, pos3)
 	}
 
-	c := r.AddEpic("unprio")
+	c := r.AddEpic("unprio", "")
 	sc, _ := r.AddSprint(c.ID, "unprio-1")
 	r.SprintAddItems(sc.ID, []string{"T-004"})
 	posC := computeSprintQueuePosition(r, sc.ID, "T-004")
@@ -656,8 +656,8 @@ func TestSprintAddRespectsEpicPriority(t *testing.T) {
 	s, cfg := setupTestEnv(t)
 
 	r, _ := registry.Load(cfg.EpicsPath())
-	hi := r.AddEpic("hi")
-	lo := r.AddEpic("lo")
+	hi := r.AddEpic("hi", "")
+	lo := r.AddEpic("lo", "")
 	prioHi := 1
 	prioLo := 2
 	r.Epics[indexOfEpicTest(r, hi.ID)].Priority = &prioHi
@@ -689,7 +689,7 @@ func TestFindChainInsertIndexSkipsManual(t *testing.T) {
 	s, cfg := setupTestEnv(t)
 
 	r, _ := registry.Load(cfg.EpicsPath())
-	e := r.AddEpic("e")
+	e := r.AddEpic("e", "")
 	prio := 1
 	r.Epics[indexOfEpicTest(r, e.ID)].Priority = &prio
 	sp, _ := r.AddSprint(e.ID, "sp1")

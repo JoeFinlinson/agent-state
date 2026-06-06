@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/jfinlinson/agent-state/internal/config"
+	"github.com/jfinlinson/agent-state/internal/registry"
 	"github.com/jfinlinson/agent-state/internal/store"
 )
 
@@ -125,6 +126,16 @@ func goalReviewTo(w io.Writer, r io.Reader, s *store.Store, cfg *config.Config, 
 		return 0
 	}
 
+	// Load epic registry once to annotate goals with their linked epics.
+	epicsByGoal := make(map[string][]string)
+	if reg, err := registry.Load(cfg.EpicsPath()); err == nil {
+		for _, e := range reg.ListEpics() {
+			if e.GoalID != "" {
+				epicsByGoal[e.GoalID] = append(epicsByGoal[e.GoalID], e.ID)
+			}
+		}
+	}
+
 	if len(activeGoals) > 0 {
 		fmt.Fprintln(w, "Active goals:")
 		for _, row := range activeGoals {
@@ -134,6 +145,9 @@ func goalReviewTo(w io.Writer, r io.Reader, s *store.Store, cfg *config.Config, 
 			}
 			fmt.Fprintf(w, "  %-6s  wt=%-3d  members %d/%d (%d%%)  %s%s\n",
 				row.id, row.weight, row.done, row.total, row.pct, row.title, annotation)
+			if epics := epicsByGoal[row.id]; len(epics) > 0 {
+				fmt.Fprintf(w, "    epics: %s\n", strings.Join(epics, ", "))
+			}
 		}
 		fmt.Fprintln(w)
 	}
