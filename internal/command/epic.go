@@ -14,7 +14,7 @@ type EpicCreateOpts struct {
 	GoalID string
 }
 
-// validateGoalID returns an error if goalID is not a valid goal item.
+// validateGoalID returns an error if goalID is not an active goal item.
 func validateGoalID(s *store.Store, goalID string) error {
 	item, ok := s.Get(goalID)
 	if !ok {
@@ -22,6 +22,9 @@ func validateGoalID(s *store.Store, goalID string) error {
 	}
 	if item.Type != "goal" {
 		return fmt.Errorf("%s is type %q, not \"goal\"", goalID, item.Type)
+	}
+	if item.Status != "active" {
+		return fmt.Errorf("%s is a %s goal; only active goals can be linked", goalID, item.Status)
 	}
 	return nil
 }
@@ -50,6 +53,9 @@ func EpicCreate(s *store.Store, cfg *config.Config, title string, opts EpicCreat
 	fmt.Printf("Created epic %s — %s\n", e.ID, e.Title)
 	if opts.GoalID != "" {
 		fmt.Printf("  goal: %s\n", opts.GoalID)
+	}
+	if err := autoSync(s, fmt.Sprintf("st epic create: %s", e.ID)); err != nil {
+		return 1
 	}
 	return 0
 }

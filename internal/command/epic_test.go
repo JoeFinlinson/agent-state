@@ -969,13 +969,19 @@ func TestEpicCreateWithGoal(t *testing.T) {
 func TestEpicCreateRejectsNonGoal(t *testing.T) {
 	s, cfg := setupTestEnv(t)
 
-	// Missing ID.
+	// Missing ID — hits the "not found" path.
 	code := EpicCreate(s, cfg, "Epic", EpicCreateOpts{GoalID: "G-999"})
 	if code == 0 {
 		t.Error("expected non-zero for missing goal ID, got 0")
 	}
 
-	// Wrong type (task).
+	// Wrong type — T-001 is type "task", not "goal".
+	code = EpicCreate(s, cfg, "Epic", EpicCreateOpts{GoalID: "T-001"})
+	if code == 0 {
+		t.Error("expected non-zero for wrong-type goal ID, got 0")
+	}
+
+	// Neither attempt should have written an epic.
 	r, _ := registry.Load(cfg.EpicsPath())
 	if len(r.Epics) != 0 {
 		t.Error("EpicCreate must not write an epic on validation failure")
