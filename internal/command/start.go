@@ -517,7 +517,8 @@ func Start(s *store.Store, cfg *config.Config, id string, opts StartOpts) int {
 	fmt.Printf("DISPATCH: launch session with model=%s\n", dispatchTier)
 
 	// I-1326: hint when item has no goal link — it won't appear in goal-weighted ranking.
-	if len(item.Goals) == 0 {
+	// Skip for goal-type items: goals don't have parent goals.
+	if item.Type != "goal" && len(item.Goals) == 0 {
 		allGoals := s.List(store.TypeFilter("goal"))
 		var goalHints []string
 		for _, g := range allGoals {
