@@ -23,12 +23,18 @@ func freshStore(t *testing.T, cfg *config.Config) *store.Store {
 }
 
 // makeClassifyEngine returns a RunEngine whose RunClaude returns a
-// classifyVerdict with the given goal IDs.
+// classifyVerdict wrapped in a ClaudeResult envelope, matching what
+// defaultRunClaude returns in production from claude --output-format json.
 func makeClassifyEngine(goalIDs []string) RunEngine {
-	data, _ := json.Marshal(classifyVerdict{GoalIDs: goalIDs, Reason: "test match"})
+	inner, _ := json.Marshal(classifyVerdict{GoalIDs: goalIDs, Reason: "test match"})
+	envelope, _ := json.Marshal(ClaudeResult{
+		Type:    "result",
+		Subtype: "success",
+		Result:  string(inner),
+	})
 	return RunEngine{
 		RunClaude: func(cwd string, args []string, env []string) ([]byte, int, error) {
-			return data, 0, nil
+			return envelope, 0, nil
 		},
 	}
 }
@@ -96,7 +102,7 @@ func TestClassifyGoals_NilEngine(t *testing.T) {
 	s, cfg := newClassifyEnv(t)
 	writeGoalFixtureClassify(t, cfg, "G-005", "st improvements", "active")
 	s = freshStore(t, cfg)
-	matched, err := classifyGoals(s, cfg, "issue", "fix something", "some situation", RunEngine{})
+	matched, _, err := classifyGoals(s, cfg, "issue", "fix something", "some situation", RunEngine{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -111,7 +117,7 @@ func TestClassifyGoals_NonTaskType(t *testing.T) {
 	writeGoalFixtureClassify(t, cfg, "G-005", "st improvements", "active")
 	s = freshStore(t, cfg)
 	engine := makeClassifyEngine([]string{"G-005"})
-	matched, err := classifyGoals(s, cfg, "idea", "some idea", "", engine)
+	matched, _, err := classifyGoals(s, cfg, "idea", "some idea", "", engine)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -127,7 +133,7 @@ func TestClassifyGoals_NoActiveGoals(t *testing.T) {
 	writeGoalFixtureClassify(t, cfg, "G-001", "Alpha Go-Live", "met")
 	s = freshStore(t, cfg)
 	engine := makeClassifyEngine([]string{"G-001"})
-	matched, err := classifyGoals(s, cfg, "issue", "fix something", "situation", engine)
+	matched, _, err := classifyGoals(s, cfg, "issue", "fix something", "situation", engine)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -142,7 +148,7 @@ func TestClassifyGoals_MatchReturned(t *testing.T) {
 	writeGoalFixtureClassify(t, cfg, "G-005", "st improvements", "active")
 	s = freshStore(t, cfg)
 	engine := makeClassifyEngine([]string{"G-005"})
-	matched, err := classifyGoals(s, cfg, "issue", "st create goal auto-assign", "situation", engine)
+	matched, _, err := classifyGoals(s, cfg, "issue", "st create goal auto-assign", "situation", engine)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -158,7 +164,7 @@ func TestClassifyGoals_HallucinatedID(t *testing.T) {
 	writeGoalFixtureClassify(t, cfg, "G-005", "st improvements", "active")
 	s = freshStore(t, cfg)
 	engine := makeClassifyEngine([]string{"G-999"}) // hallucinated
-	matched, err := classifyGoals(s, cfg, "issue", "some title", "situation", engine)
+	matched, _, err := classifyGoals(s, cfg, "issue", "some title", "situation", engine)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -174,7 +180,7 @@ func TestClassifyGoals_EnvBypass(t *testing.T) {
 	writeGoalFixtureClassify(t, cfg, "G-005", "st improvements", "active")
 	s = freshStore(t, cfg)
 	engine := makeClassifyEngine([]string{"G-005"})
-	matched, err := classifyGoals(s, cfg, "issue", "some title", "situation", engine)
+	matched, _, err := classifyGoals(s, cfg, "issue", "some title", "situation", engine)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -276,7 +282,8 @@ func TestCreate_ExplicitGoalsSkipsClassify(t *testing.T) {
 	engine := RunEngine{
 		RunClaude: func(cwd string, args []string, env []string) ([]byte, int, error) {
 			called = true
-			data, _ := json.Marshal(classifyVerdict{GoalIDs: []string{"G-005"}})
+			inner, _ := json.Marshal(classifyVerdict{GoalIDs: []string{"G-005"}})
+			data, _ := json.Marshal(ClaudeResult{Type: "result", Subtype: "success", Result: string(inner)})
 			return data, 0, nil
 		},
 	}
