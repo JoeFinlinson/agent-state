@@ -96,6 +96,45 @@ func TimerResumeAll(s *store.Store, cfg *config.Config, agentID string) (int, er
 	return resumed, nil
 }
 
+// TimerScrub removes wall-clock-contaminated work_duration_seconds values
+// (I-1335). Before the fix, st close substituted the started_at wall-clock
+// span when no session timer data existed, storing it indistinguishably from
+// measured values. Discriminator: a measured close always leaves a non-empty
+// accumulated_seconds behind, a fallback close never does — so any item with
+// work_duration_seconds set but accumulated_seconds absent/empty holds a
+// wall-clock span, and the field is removed (null = unknown). Returns count
+// of items scrubbed.
+func TimerScrub(s *store.Store, cfg *config.Config, dryRun bool) (int, error) {
+	scrubbed := 0
+	for id, item := range s.All() {
+		workDur, ok := getNestedField(item, "time_tracking", "work_duration_seconds")
+		if !ok || workDur == "" {
+			continue
+		}
+		if acc, ok := getNestedField(item, "time_tracking", "accumulated_seconds"); ok && acc != "" {
+			continue // measured — keep
+		}
+		if dryRun {
+			fmt.Printf("  %s: would remove work_duration_seconds=%s\n", id, workDur)
+			scrubbed++
+			continue
+		}
+		mutErr := s.Mutate(id, func(it *model.Item) error {
+			it.Doc.RemoveNestedField("time_tracking.work_duration_seconds")
+			if it.TimeTracking != nil {
+				delete(it.TimeTracking, "work_duration_seconds")
+			}
+			return nil
+		})
+		if mutErr != nil {
+			fmt.Fprintf(os.Stderr, "timer scrub: %s: %v\n", id, mutErr)
+			continue
+		}
+		scrubbed++
+	}
+	return scrubbed, nil
+}
+
 // isActiveForAgent returns true when item is in its type's active status and
 // is assigned to agentID.
 func isActiveForAgent(item *model.Item, cfg *config.Config, agentID string) bool {
