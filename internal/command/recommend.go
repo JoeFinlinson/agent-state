@@ -116,6 +116,10 @@ func recommendTo(w io.Writer, s *store.Store, cfg *config.Config, opts Recommend
 	if opts.Brief && !opts.JSON {
 		r := recs[0]
 		fmt.Fprintf(w, "%-8s p%d  %s — %s\n", r.Item.ID, r.Priority, r.Item.Title, r.Rationale())
+		// I-1435: brief mode is what `st next` uses — peer note must appear here too.
+		if peers := peerAssignedReady(g, cfg.AgentID()); len(peers) > 0 {
+			printPeerNote(w, peers)
+		}
 		return 0
 	}
 	for _, r := range recs {

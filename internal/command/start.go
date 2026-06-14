@@ -154,6 +154,12 @@ func Start(s *store.Store, cfg *config.Config, id string, opts StartOpts) int {
 	if path, hasPath := s.Path(id); hasPath {
 		if fresh, err := parse.File(path); err == nil {
 			item = fresh
+		} else if errors.Is(err, os.ErrNotExist) {
+			// File moved or deleted by the pull (e.g., peer closed the item
+			// and the archive move landed). The stale in-memory item must not
+			// be trusted — abort so the agent re-runs after `st sync`.
+			fmt.Fprintf(os.Stderr, "item %s: file moved after git pull; run `st sync` and retry\n", id)
+			return 1
 		}
 	}
 
