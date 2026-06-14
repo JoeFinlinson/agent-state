@@ -37,14 +37,16 @@ type RecommendOpts struct {
 
 // recommendJSON is the STABLE machine contract (documented for the T-348
 // TUI planning panel). Field names are part of that contract — additive
-// changes only.
+// changes only. Priority is the item's own label; EffectivePriority is set
+// only when inheritance or a queue pin lifts it above the label value.
 type recommendJSON struct {
-	ID        string       `json:"id"`
-	Title     string       `json:"title"`
-	Priority  int          `json:"priority"`
-	Score     float64      `json:"score"`
-	Rationale string       `json:"rationale"`
-	Factors   []factorJSON `json:"factors"`
+	ID               string       `json:"id"`
+	Title            string       `json:"title"`
+	Priority         int          `json:"priority"`
+	EffectivePriority *int        `json:"effective_priority,omitempty"`
+	Score            float64      `json:"score"`
+	Rationale        string       `json:"rationale"`
+	Factors          []factorJSON `json:"factors"`
 }
 
 type factorJSON struct {
@@ -80,7 +82,7 @@ func recommendTo(w io.Writer, s *store.Store, cfg *config.Config, opts Recommend
 
 	recs := coordinator.Recommend(cands, leverage, sprints, loadGoalWeights(s), priorityOverrides, time.Now())
 	enrichUnblockDetail(recs, names)
-	enrichPriorityDetail(recs, priorityOverrides, g.Items)
+	enrichPriorityDetail(recs, priorityOverrides, g.Items, pins)
 
 	if len(recs) > top {
 		recs = recs[:top]
@@ -93,10 +95,16 @@ func recommendTo(w io.Writer, s *store.Store, cfg *config.Config, opts Recommend
 			for _, f := range r.Factors {
 				fjs = append(fjs, factorJSON{Name: f.Name, Points: f.Points, Detail: f.Detail})
 			}
-			out = append(out, recommendJSON{
-				ID: r.Item.ID, Title: r.Item.Title, Priority: r.Priority,
+			own := r.Item.ResolvedPriority()
+			jrec := recommendJSON{
+				ID: r.Item.ID, Title: r.Item.Title, Priority: own,
 				Score: r.Score, Rationale: r.Rationale(), Factors: fjs,
-			})
+			}
+			if r.Priority != own {
+				eff := r.Priority
+				jrec.EffectivePriority = &eff
+			}
+			out = append(out, jrec)
 		}
 		b, err := json.MarshalIndent(out, "", "  ")
 		if err != nil {
@@ -250,14 +258,6 @@ func recommendCandidates(s *store.Store, cfg *config.Config, g *deps.Graph,
 	return cands
 }
 
-// itemPriority resolves the priority of an item, defaulting to 2.
-func itemPriority(it *model.Item) int {
-	if it.Priority != nil {
-		return *it.Priority
-	}
-	return 2
-}
-
 // buildPriorityOverrides computes effective priority for each candidate by
 // walking the dependency graph transitively (priority inheritance) and applying
 // queue-pin as a bounded band modifier (+1 toward p0, floored at 0). Only
@@ -266,7 +266,7 @@ func itemPriority(it *model.Item) int {
 func buildPriorityOverrides(g *deps.Graph, cands []*model.Item, pins map[string]bool) map[string]int {
 	overrides := map[string]int{}
 	for _, it := range cands {
-		own := itemPriority(it)
+		own := it.ResolvedPriority()
 		eff := g.TransitiveMinPriority(it.ID, own)
 		if pins[it.ID] && eff > 0 {
 			eff--
@@ -281,7 +281,8 @@ func buildPriorityOverrides(g *deps.Graph, cands []*model.Item, pins map[string]
 // enrichPriorityDetail rewrites the "priority" factor detail when an item's
 // effective priority was inherited from a downstream dependency or lifted by a
 // queue pin, so the rationale is transparent about what drove the rank.
-func enrichPriorityDetail(recs []coordinator.Recommendation, overrides map[string]int, items map[string]*model.Item) {
+// pins is passed to distinguish a queue-pin lift from pure inheritance.
+func enrichPriorityDetail(recs []coordinator.Recommendation, overrides map[string]int, items map[string]*model.Item, pins map[string]bool) {
 	for i := range recs {
 		id := recs[i].Item.ID
 		eff, ok := overrides[id]
@@ -292,10 +293,14 @@ func enrichPriorityDetail(recs []coordinator.Recommendation, overrides map[strin
 		if it == nil {
 			continue
 		}
-		own := itemPriority(it)
+		own := it.ResolvedPriority()
+		cause := "inherited"
+		if pins[id] {
+			cause = "queue pin"
+		}
 		for j := range recs[i].Factors {
 			if recs[i].Factors[j].Name == "priority" {
-				recs[i].Factors[j].Detail = fmt.Sprintf("priority p%d (effective p%d)", own, eff)
+				recs[i].Factors[j].Detail = fmt.Sprintf("priority p%d (effective p%d — %s)", own, eff, cause)
 			}
 		}
 	}

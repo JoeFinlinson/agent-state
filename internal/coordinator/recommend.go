@@ -74,13 +74,6 @@ const (
 	maxRationaleIDs = 3 // how many unblocked-item IDs to name before "+k"
 )
 
-func resolvePriority(item *model.Item) int {
-	if item.Priority != nil {
-		return *item.Priority
-	}
-	return 2 // project default (mirrors deps.priorityOf / SizeClassBaseline)
-}
-
 // Recommend ranks cands. leverage[id] is the number of NON-terminal items
 // id unblocks (computed by the shell from the dep graph). sprints maps an
 // item's Sprint id to its SprintInfo. goalWeights[id] is the sum of active
@@ -101,7 +94,7 @@ func Recommend(cands []*model.Item, leverage map[string]int,
 		if it == nil {
 			continue
 		}
-		pri := resolvePriority(it)
+		pri := it.ResolvedPriority()
 		if ov, ok := priorityOverrides[it.ID]; ok {
 			pri = ov
 		}

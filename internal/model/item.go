@@ -149,6 +149,15 @@ var SBARPlaceholders = map[string]string{
 	"recommendation": "TODO: proposed fix — scoped enough to be actionable",
 }
 
+// ResolvedPriority returns the item's priority, defaulting to 2 when nil.
+// 2 is the project default, shared by deps.priorityOf and coordinator.resolvePriority.
+func (it *Item) ResolvedPriority() int {
+	if it.Priority != nil {
+		return *it.Priority
+	}
+	return 2
+}
+
 // SetNested updates a nested string field on the item, keeping the
 // in-memory typed map and the parsed document in sync. It is the single
 // canonical write entry point for nested scalars used by command

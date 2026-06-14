@@ -341,7 +341,9 @@ func QueueNext(s *store.Store, cfg *config.Config, opts QueueNextOpts) int {
 	cands := recommendCandidates(s, cfg, g, RecommendOpts{}, sprints)
 	lev, _ := unblockLeverage(g, cands)
 	pins := loadQueuePins(cfg)
-	recs := coordinator.Recommend(cands, lev, sprints, loadGoalWeights(s), buildPriorityOverrides(g, cands, pins), time.Now())
+	priorityOverrides := buildPriorityOverrides(g, cands, pins)
+	recs := coordinator.Recommend(cands, lev, sprints, loadGoalWeights(s), priorityOverrides, time.Now())
+	enrichPriorityDetail(recs, priorityOverrides, g.Items, pins)
 
 	for _, r := range recs {
 		if opts.Sprint != "" && r.Item.Sprint != opts.Sprint {

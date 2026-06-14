@@ -336,7 +336,7 @@ func selectFrom(s *store.Store, cfg *config.Config, occupied map[string]bool, in
 	priorityOverrides := buildPriorityOverrides(g, cands, pins)
 	recs := coordinator.Recommend(cands, lev, sprints, loadGoalWeights(s), priorityOverrides, time.Now())
 	enrichUnblockDetail(recs, names)
-	enrichPriorityDetail(recs, priorityOverrides, g.Items)
+	enrichPriorityDetail(recs, priorityOverrides, g.Items, pins)
 	serialized := 0
 	for _, r := range recs {
 		if !r.Item.PlanApproved {

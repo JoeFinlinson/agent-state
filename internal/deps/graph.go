@@ -106,7 +106,7 @@ func (g *Graph) TransitiveMinPriority(id string, ownPriority int) int {
 			if !ok {
 				continue
 			}
-			if p := priorityOf(down); p < best {
+			if p := down.ResolvedPriority(); p < best {
 				best = p
 			}
 			queue = append(queue, downID)
@@ -163,8 +163,8 @@ func (g *Graph) Ready() []*model.Item {
 
 	// Sort by priority (nil/missing = 2 default), then by ID
 	sort.Slice(ready, func(i, j int) bool {
-		pi := priorityOf(ready[i])
-		pj := priorityOf(ready[j])
+		pi := ready[i].ResolvedPriority()
+		pj := ready[j].ResolvedPriority()
 		if pi != pj {
 			return pi < pj
 		}
@@ -266,13 +266,6 @@ func (g *Graph) treeHelper(id string, depth, maxDepth int, seen map[string]bool)
 	}
 
 	return result
-}
-
-func priorityOf(item *model.Item) int {
-	if item.Priority != nil {
-		return *item.Priority
-	}
-	return 2 // default priority
 }
 
 // isStageAtOrPast checks if stage is at or past target in the default pipeline.
