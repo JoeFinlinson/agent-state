@@ -473,6 +473,18 @@ func superviseItem(cfg *config.Config, b *coordinator.Boundary,
 			return 1
 		}
 		mu.Lock()
+		// Re-check cancel under the lock: the dispatch loop closes cancel
+		// (stopAll) BEFORE taking mu for the D1 Fire, so any worker that was
+		// blocked here waiting on mu will see the stop and bail rather than
+		// launch a process after the budget already tripped. (A worker already
+		// mid-Spawn when cancel closes cannot be caught — its per-item cap still
+		// bounds the overrun.)
+		select {
+		case <-cancel:
+			mu.Unlock()
+			return 0
+		default:
+		}
 		rc := Spawn(gs, cfg, SpawnOpts{
 			Item:           itemID,
 			BudgetOverride: opts.BudgetOverride,
