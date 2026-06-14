@@ -46,3 +46,23 @@ func TestReleaseRefusesGoal(t *testing.T) {
 		t.Errorf("goal status must be unchanged after a refused release; got %q, want \"active\"", final.Status)
 	}
 }
+
+func TestStartRefusesGoal(t *testing.T) {
+	// Goals are not workable items: `st start` would flip a goal to active
+	// and stamp a claim no goal verb can clear (and release now refuses
+	// goals). Refuse up front. Use the active fixture — the guard fires
+	// for any goal regardless of status, before the start-status check.
+	s, cfg := setupTestEnvWithGoal(t, true)
+
+	if code := Start(s, cfg, "G-TEST", StartOpts{}); code == 0 {
+		t.Error("Start on a goal must refuse (non-zero exit) — goals use st goal activate")
+	}
+
+	final, ok := newStoreOrFail(t, cfg).Get("G-TEST")
+	if !ok {
+		t.Fatal("G-TEST disappeared")
+	}
+	if final.AssignedTo != "" || final.ClaimedBy != "" {
+		t.Errorf("refused start must not stamp assignment/claim; assigned_to=%q claimed_by=%q", final.AssignedTo, final.ClaimedBy)
+	}
+}
