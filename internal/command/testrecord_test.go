@@ -1771,3 +1771,65 @@ func TestTestRecordRunProceedsForSuiteWithNoRepoMapping(t *testing.T) {
 		t.Error("RunCmd not called — suite with no repo mapping should never auto-skip")
 	}
 }
+
+// I-1304: --skip on a required suite must succeed (recording "auto-skip: ...")
+// when the suite's repo has no diff. Without worktree dirs present, detectTouchedRepos
+// finds no git repos and returns an empty map — correctly treating all repos as untouched.
+func TestTestRecord_SkipRequiredSuite_NotApplicable_I1304(t *testing.T) {
+	s, cfg := setupPRTestEnv(t)
+
+	// Add a worktree config so the not-applicable check can run.
+	cfg.Worktree = &config.WorktreeConfig{
+		Enabled: true,
+		Repos:   []string{"theraprac-api"},
+		RepoMap: map[string]string{"theraprac-api": "theraprac-api"},
+		BaseDir: t.TempDir(), // no real git repos here → detectTouchedRepos returns empty
+	}
+
+	opts := testRecordOpts()
+	opts.Skip = "no api changes in this PR"
+
+	stderr := captureStderrStr(t, func() {
+		captureStdout(t, func() {
+			code := TestRecord(s, cfg, "T-003", "api_lint", opts)
+			if code != 0 {
+				t.Errorf("TestRecord returned %d, want 0 (required suite not applicable)", code)
+			}
+		})
+	})
+
+	if strings.Contains(stderr, "cannot skip") {
+		t.Errorf("should not reject skip when repo has no changes; stderr: %s", stderr)
+	}
+
+	item, _ := s.Get("T-003")
+	ev, ok := getNestedField(item, "testing_evidence", "api_lint")
+	if !ok || !strings.HasPrefix(ev, "auto-skip:") {
+		t.Errorf("testing_evidence.api_lint = %q, want auto-skip:...", ev)
+	}
+}
+
+// I-1304: --skip on a required suite must be rejected when the suite's repo
+// cannot be determined (suite has no repo prefix mapping) — we can't confirm
+// not-applicable without a repo to check.
+func TestTestRecord_SkipRequiredSuite_NoRepoMapping_Rejected_I1304(t *testing.T) {
+	s, cfg := setupPRTestEnv(t)
+
+	// Add a required suite with no repo prefix mapping (name doesn't start with api/web/etc.)
+	cfg.Testing.RequiredSuites["custom_required"] = config.SuiteConfig{Command: "make custom"}
+
+	cfg.Worktree = &config.WorktreeConfig{
+		Enabled: true,
+		Repos:   []string{"theraprac-api"},
+		RepoMap: map[string]string{"theraprac-api": "theraprac-api"},
+		BaseDir: t.TempDir(),
+	}
+
+	opts := testRecordOpts()
+	opts.Skip = "not applicable"
+
+	code := TestRecord(s, cfg, "T-003", "custom_required", opts)
+	if code == 0 {
+		t.Error("TestRecord should reject --skip when suite has no repo mapping (cannot verify not-applicable)")
+	}
+}
