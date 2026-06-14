@@ -585,6 +585,9 @@ func prepItem(s *store.Store, cfg *config.Config, itemID string, item *model.Ite
 		reviewDur := time.Since(reviewStart)
 		rec := extractRecommendation(reviewSR.FullOutput)
 
+		// Stamp prep_reviewed_at so st plan approve can skip the duplicate LLM review pass.
+		p.PrepReviewedAt = plan.Now()
+
 		// Auto-fix "Accept with notes" — feed notes back to claude without user input
 		if isAcceptWithNotes(rec) && autoFixCount < maxAutoFixIterations {
 			autoFixCount++
@@ -933,6 +936,12 @@ func prepItemWriteOnly(s *store.Store, cfg *config.Config, itemID string, item *
 		fmt.Printf("[%s] FAILED: plan-review error: %s\n", itemID, reviewSR.Error)
 		stampPrepFailure(s, itemID, "plan-review error: "+reviewSR.Error)
 		return "rejected"
+	}
+
+	// Stamp prep_reviewed_at so st plan approve can skip the duplicate LLM review pass.
+	p.PrepReviewedAt = plan.Now()
+	if err := plan.Save(cfg.PlansDir(), itemID, p); err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] Warning: failed to stamp prep_reviewed_at: %v — approve will fall back to full review\n", itemID, err)
 	}
 
 	if err := plan.SaveReport(cfg.PlansDir(), itemID, reviewSR.FullOutput); err != nil {
