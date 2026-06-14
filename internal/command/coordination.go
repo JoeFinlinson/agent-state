@@ -37,12 +37,30 @@ const defaultMailWindow = 30 * time.Minute
 // Pass selfAgentID = cfg.Identity().ID at the call site so this
 // function is testable without mutating env. T-314.
 func buildCoordinationBlock(s *store.Store, cfg *config.Config, selfAgentID, selfItemID string) string {
+	return buildCoordinationBlockWithWindow(s, cfg, selfAgentID, selfItemID, defaultMailWindow)
+}
+
+// CoordinationShow prints the coordination block (active agents + pending
+// mail + coordination rules) to stdout using the given mail window. Returns
+// 0 on success. I-568: called by the session-start hook so every
+// interactive Claude session sees peer state without requiring st run.
+func CoordinationShow(s *store.Store, cfg *config.Config, mailWindow time.Duration) int {
+	block := buildCoordinationBlockWithWindow(s, cfg, cfg.AgentID(), "", mailWindow)
+	fmt.Print(block)
+	return 0
+}
+
+// buildCoordinationBlockWithWindow is the configurable variant of
+// buildCoordinationBlock. Pass a larger window (e.g. 7*24*time.Hour)
+// when surfacing at session-start so messages sent hours or days ago
+// are still shown to the newly-started agent. I-568.
+func buildCoordinationBlockWithWindow(s *store.Store, cfg *config.Config, selfAgentID, selfItemID string, mailWindow time.Duration) string {
 	var b strings.Builder
 	b.WriteString("\n\n## Active Agents\n")
 	writeActiveAgents(&b, s, cfg, selfAgentID, selfItemID)
 
-	b.WriteString("\n## Recent Mail (last 30 min, unconsumed)\n")
-	writeRecentMailAndConsume(&b, cfg, selfAgentID, defaultMailWindow)
+	b.WriteString(fmt.Sprintf("\n## Recent Mail (last %s, unconsumed)\n", mailWindow.Round(time.Minute)))
+	writeRecentMailAndConsume(&b, cfg, selfAgentID, mailWindow)
 
 	b.WriteString(coordinationRulesText)
 	return b.String()

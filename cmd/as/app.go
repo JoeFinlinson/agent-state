@@ -3057,6 +3057,38 @@ Kinds:
 
 	root.AddCommand(mailCmd)
 
+	// --- Coordination ---
+
+	// I-568: st coordination show — surfaces the coordination block
+	// (active agents + pending mail + rules) to stdout. Called by the
+	// session-start hook so every interactive Claude session sees peer
+	// state and unconsumed mail without requiring st run.
+	coordinationCmd := &cobra.Command{
+		Use:   "coordination",
+		Short: "Multi-agent coordination utilities",
+	}
+	coordinationShowCmd := &cobra.Command{
+		Use:   "show",
+		Short: "Print active agents, pending mail, and coordination rules",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			windowStr, _ := cmd.Flags().GetString("mail-window")
+			window := 7 * 24 * time.Hour // default: 7 days for interactive sessions
+			if windowStr != "" {
+				parsed, err := time.ParseDuration(windowStr)
+				if err != nil {
+					return fmt.Errorf("invalid --mail-window %q: %w", windowStr, err)
+				}
+				window = parsed
+			}
+			os.Exit(command.CoordinationShow(appStore, appCfg, window))
+			return nil
+		},
+	}
+	coordinationShowCmd.Flags().String("mail-window", "", "how far back to look for pending mail (default: 7*24h; pass 30m to match st run behavior)")
+	coordinationCmd.AddCommand(coordinationShowCmd)
+	root.AddCommand(coordinationCmd)
+
 	// --- Maintenance ---
 
 	syncCmd := &cobra.Command{
