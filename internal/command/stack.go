@@ -172,9 +172,14 @@ func StackPop(s *store.Store, cfg *config.Config) int {
 	// current top matches the marker, this pop is redundant — the close
 	// already returned us here. No-op with a clear message so the agent
 	// doesn't silently drop the active parent item.
-	returnedTo := readAndClearCloseReturn(cfg)
+	//
+	// The marker is cleared ONLY when the guard fires (top matches), so
+	// that any intervening push+pop does NOT consume the marker before
+	// the intended reflexive pop reaches it.
+	returnedTo := readCloseReturn(cfg)
 	top := entries[len(entries)-1]
 	if returnedTo != "" && top.ID == returnedTo {
+		clearCloseReturn(cfg)
 		if item, ok := s.Get(top.ID); ok {
 			fmt.Fprintf(os.Stderr, "st close already returned to %s — %s; nothing to pop\n", top.ID, item.Title)
 		} else {
@@ -424,27 +429,44 @@ func SaveStack(cfg *config.Config, entries []StackEntry) error {
 // redundant pop that would drop the just-restored parent. I-1302.
 func closeReturnPath(cfg *config.Config) string {
 	sp := cfg.StackPath()
-	return sp[:len(sp)-len(".yaml")] + "-close-return.txt"
+	base := strings.TrimSuffix(sp, ".yaml")
+	if base == sp {
+		// StackPath() returned a path without .yaml — append the suffix to the
+		// full path rather than silently truncating the basename. I-1302.
+		return sp + "-close-return.txt"
+	}
+	return base + "-close-return.txt"
 }
 
 // setCloseReturn records that st close auto-popped and returned to
 // returnedToID (empty string when the stack became empty). Called by
 // the close command immediately after SaveStack.
 func setCloseReturn(cfg *config.Config, returnedToID string) {
-	_ = os.MkdirAll(filepath.Dir(closeReturnPath(cfg)), 0755)
-	_ = os.WriteFile(closeReturnPath(cfg), []byte(returnedToID), 0644)
+	p := closeReturnPath(cfg)
+	if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "warning(I-1302): could not create close-return dir: %v\n", err)
+		return
+	}
+	if err := os.WriteFile(p, []byte(returnedToID), 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "warning(I-1302): could not write close-return marker: %v; st pop double-pop guard will not fire\n", err)
+	}
 }
 
-// readAndClearCloseReturn returns the ID stored by setCloseReturn and
-// removes the marker so subsequent pops are not affected. Returns ""
-// when no marker exists.
-func readAndClearCloseReturn(cfg *config.Config) string {
+// readAndClearCloseReturn returns the ID stored by setCloseReturn.
+// The marker file is removed ONLY when the returned ID matches the
+// current stack top (called by the guard-firing branch in StackPop).
+// Returns "" when no marker exists.
+func readCloseReturn(cfg *config.Config) string {
 	data, err := os.ReadFile(closeReturnPath(cfg))
 	if err != nil {
 		return ""
 	}
-	_ = os.Remove(closeReturnPath(cfg))
 	return strings.TrimSpace(string(data))
+}
+
+// clearCloseReturn removes the close-return marker file.
+func clearCloseReturn(cfg *config.Config) {
+	_ = os.Remove(closeReturnPath(cfg))
 }
 
 // removeFromStackSilently drops the entry with the given ID from the
