@@ -29,6 +29,13 @@ type remoteState struct {
 	prURLs  []string // PR URLs if any
 }
 
+// branchInfo holds the git state for one sister repo listed in scope_repos.
+type branchInfo struct {
+	Repo   string
+	Branch string
+	Dirty  bool // uncommitted changes present
+}
+
 // tapeAudit is the self-attestation result. The dangerous failure mode is a
 // record that LOOKS complete but is not, so the audit is rendered FIRST and
 // degrades to a loud, explicit "unverified/gap" rather than a confident
@@ -74,14 +81,20 @@ func Resume(s *store.Store, cfg *config.Config, opts ResumeOpts) int {
 	// has to be impossible to miss rather than a quietly empty section.
 	plansDir := cfg.PlansDir()
 	planBody, planNote := "", ""
-	switch p, err := plan.Load(plansDir, id); {
-	case err != nil:
-		planNote = "load error: " + err.Error()
-	case p == nil:
-		planNote = "NOT FOUND — expected " + filepath.Join(plansDir, id+".md")
-	default:
-		if planBody = strings.TrimSpace(p.RawText); planBody == "" {
-			planNote = "file present but EMPTY at " + filepath.Join(plansDir, id+".md")
+	var loadedPlan *plan.Plan
+	{
+		p, err := plan.Load(plansDir, id)
+		switch {
+		case err != nil:
+			planNote = "load error: " + err.Error()
+		case p == nil:
+			planNote = "NOT FOUND — expected " + filepath.Join(plansDir, id+".md")
+		default:
+			if planBody = strings.TrimSpace(p.RawText); planBody == "" {
+				planNote = "file present but EMPTY at " + filepath.Join(plansDir, id+".md")
+			} else {
+				loadedPlan = p
+			}
 		}
 	}
 
@@ -99,7 +112,15 @@ func Resume(s *store.Store, cfg *config.Config, opts ResumeOpts) int {
 		}
 	}
 
-	fmt.Print(renderResume(cfg, item, entries, sessionID, planBody, planNote, audit, rs))
+	// Sister-repo branch capture: resolve current branch + dirty state for
+	// each repo in scope_repos so a cold session immediately sees the git
+	// state across all repos without manual `git branch` invocations.
+	var branches []branchInfo
+	if loadedPlan != nil {
+		branches = sisterRepoBranches(cfg, loadedPlan.ScopeRepos)
+	}
+
+	fmt.Print(renderResume(cfg, item, entries, sessionID, planBody, planNote, audit, rs, branches, loadedPlan))
 	return 0
 }
 
@@ -214,7 +235,7 @@ func priorSessionUnfinalized(entries []changelog.Entry, currentSessionID string)
 // authoritative; non-empty means the plan could not be loaded (missing /
 // unreadable / empty) and the section renders a ⚠️ block instead of silently
 // vanishing (I-690 — operator silent-failure principle).
-func renderResume(cfg *config.Config, item *model.Item, entries []changelog.Entry, sessionID, planBody, planNote string, audit tapeAudit, rs remoteState) string {
+func renderResume(cfg *config.Config, item *model.Item, entries []changelog.Entry, sessionID, planBody, planNote string, audit tapeAudit, rs remoteState, branches []branchInfo, p *plan.Plan) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "# RESUME %s — %s\n\n", item.ID, item.Title)
@@ -283,6 +304,21 @@ func renderResume(cfg *config.Config, item *model.Item, entries []changelog.Entr
 		}
 		for _, u := range rs.prURLs {
 			fmt.Fprintf(&b, "  %s\n", u)
+		}
+		b.WriteString("\n")
+	}
+
+	// (2c) Branches — current git state for each sister repo in scope_repos.
+	// Replaces the "no resolvable git worktree" anti-pattern: a cold session
+	// sees per-repo branch + clean/dirty at a glance without running git.
+	if len(branches) > 0 {
+		b.WriteString("## Branches\n")
+		for _, br := range branches {
+			state := "clean"
+			if br.Dirty {
+				state = "dirty"
+			}
+			fmt.Fprintf(&b, "  %-24s %s  (%s)\n", br.Repo, br.Branch, state)
 		}
 		b.WriteString("\n")
 	}
@@ -424,6 +460,13 @@ func renderResume(cfg *config.Config, item *model.Item, entries []changelog.Entr
 	} else {
 		b.WriteString("## ⚠️  PLAN " + planNote + "\n")
 		b.WriteString("  Resume cannot fold in the plan body — author/repair .plans/" + item.ID + ".md, then re-run `st resume " + item.ID + "`.\n\n")
+	}
+
+	// Next-action synthesis: derive the most concrete "what to do next" from
+	// the plan body + item stage so a cold session can act immediately.
+	if next := synthesizeNextAction(item, p); next != "" {
+		b.WriteString("## Next action\n")
+		fmt.Fprintf(&b, "  → %s\n\n", next)
 	}
 
 	b.WriteString("---\n")
@@ -669,5 +712,65 @@ func indent(s, pad string) string {
 		lines[i] = pad + l
 	}
 	return strings.Join(lines, "\n")
+}
+
+// sisterRepoBranches resolves the current branch and dirty state for each
+// repo in scopeRepos using the main checkout (not a worktree). Silent per
+// repo on git errors so a missing or uninitialized repo doesn't block the
+// rest of the output.
+func sisterRepoBranches(cfg *config.Config, scopeRepos []string) []branchInfo {
+	var out []branchInfo
+	for _, repo := range scopeRepos {
+		dir := resolveRepoDir(cfg, repo)
+		if dir == "" || !isGitDir(dir) {
+			continue
+		}
+		branch, err := runGit(dir, "branch", "--show-current")
+		if err != nil {
+			continue
+		}
+		branch = strings.TrimSpace(branch)
+		dirty := false
+		if status, serr := runGit(dir, "status", "--porcelain"); serr == nil {
+			dirty = strings.TrimSpace(status) != ""
+		}
+		out = append(out, branchInfo{Repo: repo, Branch: branch, Dirty: dirty})
+	}
+	return out
+}
+
+// synthesizeNextAction derives a single concrete "next step" directive from
+// the item's delivery stage and the plan body. Returns "" when nothing can be
+// inferred (no plan, no stage, or an unrecognized stage with no files).
+func synthesizeNextAction(item *model.Item, p *plan.Plan) string {
+	if p == nil {
+		return ""
+	}
+	stage := nestedString(item.Delivery, "stage")
+	switch stage {
+	case "coding", "code":
+		if len(p.FilesToModify) > 0 {
+			return "coding → edit " + p.FilesToModify[0]
+		}
+		if len(p.FilesToCreate) > 0 {
+			return "coding → create " + p.FilesToCreate[0]
+		}
+		if len(p.Steps) > 0 {
+			return "coding → " + p.Steps[0]
+		}
+		return "coding → (read plan for files to edit)"
+	case "tests", "test":
+		return "tests → run test suite and fix failures"
+	case "pr", "pr_open", "pr-open":
+		return "pr → open pull request (gh pr create ...)"
+	case "uat":
+		return "uat → run `st uat " + item.ID + "`"
+	case "merge":
+		return "merge → merge the open PR"
+	}
+	if stage != "" {
+		return stage + " → (read plan for next step)"
+	}
+	return ""
 }
 
