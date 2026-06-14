@@ -107,11 +107,56 @@ func TestRecord(s *store.Store, cfg *config.Config, id, suite string, opts TestR
 		return 1
 	}
 
-	// Handle --skip: mark a scope suite as intentionally skipped.
+	// Handle --skip: mark a suite as intentionally skipped.
+	// I-1304: required suites are skippable when their target repo has no
+	// diff (not-applicable). Record as "auto-skip: ..." (same format as
+	// --auto) so the UAT gate accepts it identically. If the repo DOES have
+	// changes the suite is applicable and the skip is rejected as before.
 	if opts.Skip != "" {
 		if isRequired {
-			fmt.Fprintf(os.Stderr, "cannot skip required suite %q\n", suite)
-			return 1
+			if item.ScopeClass != "" {
+				fmt.Fprintf(os.Stderr, "cannot skip required suite %q on class item — class suites must always run (use --run or --auto)\n", suite)
+				return 1
+			}
+			repo := autoScopeRepo(suite)
+			notApplicable := false
+			if repo != "" && cfg.Worktree != nil {
+				touched, err := detectTouchedRepos(cfg, id)
+				if err == nil {
+					_, hasChanges := touched[repo]
+					notApplicable = !hasChanges
+				}
+			}
+			if !notApplicable {
+				if repo == "" {
+					fmt.Fprintf(os.Stderr, "cannot skip required suite %q — no repo mapping (use --auto or --run instead)\n", suite)
+				} else if cfg.Worktree == nil {
+					fmt.Fprintf(os.Stderr, "cannot skip required suite %q — worktree not configured, cannot verify repo diff (use --run or --auto)\n", suite)
+				} else {
+					fmt.Fprintf(os.Stderr, "cannot skip required suite %q — repo %s has changes (use --auto or --run instead)\n", suite, repo)
+				}
+				return 1
+			}
+			// Repo is untouched: record the same evidence --auto would emit
+			// so the gate sees a consistent auto-skip regardless of path.
+			ev := fmt.Sprintf("auto-skip: no files changed in %s", repo)
+			nowStr := time.Now().Format(time.RFC3339)
+			if err := s.Mutate(id, func(it *model.Item) error {
+				it.SetNested("testing_evidence", suite, ev)
+				it.Doc.SetField("last_touched", nowStr)
+				return nil
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "writing %s: %v\n", id, err)
+				return 1
+			}
+			changelog.Append(cfg, id, changelog.Entry{
+				Op: "test_skipped", Field: "testing_evidence." + suite, NewValue: ev,
+			})
+			fmt.Printf("auto-skipped %s on %s: no files changed in %s\n", suite, id, repo)
+			if err := autoSync(s, fmt.Sprintf("st test skip: %s %s", id, suite)); err != nil {
+				return 1
+			}
+			return 0
 		}
 		ev := fmt.Sprintf("skip: %s", opts.Skip)
 		nowStr := time.Now().Format(time.RFC3339)
