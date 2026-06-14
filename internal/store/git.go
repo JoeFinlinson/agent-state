@@ -609,6 +609,12 @@ func (s *Store) GitSync(message string, newPaths ...string) error {
 		return fmt.Errorf("git add -u: %w", err)
 	}
 
+	// I-1451: .st-git.lock is a runtime lock file written by acquireGitLock.
+	// If it was ever accidentally committed, git add -u re-stages it on every
+	// st op, churning history. Drop it from the index unconditionally;
+	// --ignore-unmatch is a no-op when the file is not tracked.
+	_ = gitCmdQuiet(root, "rm", "--cached", "--ignore-unmatch", "--", ".st-git.lock")
+
 	// I-575: also stage untracked-or-modified files inside the
 	// agent-state plan-files subdirectory. `.plans/<id>.md` files are
 	// dropped by `st prep` and `st start` and are unambiguously
@@ -825,10 +831,12 @@ func (s *Store) commitStagedOntoMain(root, message string) (string, error) {
 
 	for _, e := range entries {
 		// Deletion (status D / dstmode 000000 / null dstsha): remove from the
-		// temp index.
+		// temp index. --force-remove is required instead of --remove because
+		// --remove is a no-op when the file still exists in the working tree
+		// (e.g. .st-git.lock, which is held open by acquireGitLock). I-1451.
 		if e.status == "D" || e.mode == "000000" || strings.Trim(e.sha, "0") == "" {
-			if err := gitCmdEnv(toplevel, env, "update-index", "--remove", "--", e.path); err != nil {
-				return "", fmt.Errorf("update-index --remove %q: %w", e.path, err)
+			if err := gitCmdEnv(toplevel, env, "update-index", "--force-remove", "--", e.path); err != nil {
+				return "", fmt.Errorf("update-index --force-remove %q: %w", e.path, err)
 			}
 			continue
 		}
