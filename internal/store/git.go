@@ -609,11 +609,15 @@ func (s *Store) GitSync(message string, newPaths ...string) error {
 		return fmt.Errorf("git add -u: %w", err)
 	}
 
-	// I-1451: .st-git.lock is a runtime lock file written by acquireGitLock.
-	// If it was ever accidentally committed, git add -u re-stages it on every
-	// st op, churning history. Drop it from the index unconditionally;
-	// --ignore-unmatch is a no-op when the file is not tracked.
-	_ = gitCmdQuiet(root, "rm", "--cached", "--ignore-unmatch", "--", ".st-git.lock")
+	// I-1451: .st-git.lock is the git lock itself — acquireGitLock rewrites it
+	// ("pid=N cmd=...") on EVERY st op. It's gitignored, but on workspaces where
+	// it was committed before that rule it stays tracked, so `git add -u` above
+	// re-stages its churn every sync — polluting history and leaving the working
+	// tree perpetually dirty (blocks session-stop). The workspace is a single
+	// shared clone, so agents read the file directly and it never needs to be in
+	// git. Drop it from the index every sync: untracks it on the first run
+	// (commits the removal), then a harmless no-op (--ignore-unmatch).
+	_ = gitCmd(root, "rm", "--cached", "--ignore-unmatch", ".st-git.lock")
 
 	// I-575: also stage untracked-or-modified files inside the
 	// agent-state plan-files subdirectory. `.plans/<id>.md` files are
@@ -837,9 +841,11 @@ func (s *Store) commitStagedOntoMain(root, message string) (string, error) {
 
 	for _, e := range entries {
 		// Deletion (status D / dstmode 000000 / null dstsha): remove from the
-		// temp index. --force-remove is required instead of --remove because
-		// --remove is a no-op when the file still exists in the working tree
-		// (e.g. .st-git.lock, which is held open by acquireGitLock). I-1451.
+		// temp index. --force-remove (not --remove): the staged index already
+		// says "deleted", so the commit must drop it regardless of whether the
+		// file still exists on disk. Plain --remove only drops MISSING files, so
+		// a staged deletion of a still-present file (e.g. I-1451's live
+		// .st-git.lock) would be silently ignored and survive in the tree.
 		if e.status == "D" || e.mode == "000000" || strings.Trim(e.sha, "0") == "" {
 			if err := gitCmdEnv(toplevel, env, "update-index", "--force-remove", "--", e.path); err != nil {
 				return "", fmt.Errorf("update-index --force-remove %q: %w", e.path, err)

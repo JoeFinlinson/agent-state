@@ -171,6 +171,71 @@ func TestGitSyncHappy(t *testing.T) {
 	}
 }
 
+// I-1451: on workspaces where .st-git.lock was committed before the .gitignore
+// rule, it stays tracked, so `git add -u` re-stages its per-op churn every sync
+// (blocking session-stop + polluting history). GitSync must drop it from the
+// index. This reproduces that production state (force-tracked lock) and asserts
+// GitSync untracks it.
+func TestGitSyncUntracksLegacyTrackedLock(t *testing.T) {
+	root, _ := setupTestDir(t)
+	asDir := filepath.Join(root, ".as")
+	os.MkdirAll(asDir, 0755)
+	os.WriteFile(filepath.Join(asDir, "config.yaml"), []byte("paths:\n  root: .\n"), 0644)
+	initGitRepo(t, root)
+
+	gitT := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return string(out)
+	}
+
+	// Production clones are on `main`; commitStagedOntoMain (I-1313) advances
+	// refs/heads/main, so the working branch must BE main for the index/HEAD to
+	// reflect the lock removal (initGitRepo's default branch may be master).
+	gitT("branch", "-M", "main")
+
+	// Force-track a committed lock (the pre-.gitignore production state).
+	lockPath := filepath.Join(root, ".st-git.lock")
+	os.WriteFile(lockPath, []byte("pid=1 cmd=st sync"), 0644)
+	gitT("add", "-f", ".st-git.lock")
+	gitT("commit", "-m", "legacy: committed lock")
+
+	cfg, _ := config.Load(root)
+	cfg.Git = &config.GitConfig{AutoCommit: true, AutoPush: false}
+	s, _ := New(cfg)
+
+	// The lock mutates every op; also make a real change so GitSync commits.
+	os.WriteFile(lockPath, []byte("pid=2 cmd=st update"), 0644)
+	item, _ := s.Get("T-001")
+	item.Doc.SetField("status", "active")
+	s.write(item)
+
+	if err := s.GitSync("update"); err != nil {
+		t.Fatalf("GitSync: %v", err)
+	}
+
+	// The lock must no longer be tracked.
+	if tracked := gitT("ls-files", "--", ".st-git.lock"); strings.TrimSpace(tracked) != "" {
+		t.Errorf(".st-git.lock still tracked after GitSync: %q", tracked)
+	}
+	// A second sync (lock churns again) must not re-stage or commit it.
+	os.WriteFile(lockPath, []byte("pid=3 cmd=st again"), 0644)
+	item2, _ := s.Get("T-002")
+	item2.Doc.SetField("status", "active")
+	s.write(item2)
+	if err := s.GitSync("update 2"); err != nil {
+		t.Fatalf("GitSync 2: %v", err)
+	}
+	if files := gitT("show", "--name-only", "--format=", "HEAD"); strings.Contains(files, ".st-git.lock") {
+		t.Errorf("second commit must not touch .st-git.lock; files:\n%s", files)
+	}
+}
+
 func TestGitSyncNothingToCommit(t *testing.T) {
 	root, _ := setupTestDir(t)
 	asDir := filepath.Join(root, ".as")
