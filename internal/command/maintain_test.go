@@ -58,7 +58,7 @@ func TestBranchMerged(t *testing.T) {
 	}
 	// Squash case: gh reports feature-x's CURRENT tip as a merged PR head.
 	tip := strings.TrimSpace(gitOutput(t, root, "rev-parse", "feature-x"))
-	if !branchMerged(root, "feature-x", map[string][]string{"feature-x": {tip}}) {
+	if !branchMerged(root, "feature-x", map[string][]prHead{"feature-x": {{oid: tip}}}) {
 		t.Error("feature-x should be merged when its tip matches a merged PR head")
 	}
 }
@@ -74,8 +74,51 @@ func TestBranchMergedRejectsReusedName(t *testing.T) {
 	if tip == oldMergedOID {
 		t.Fatal("precondition: tips must differ")
 	}
-	if branchMerged(root, "reused-name", map[string][]string{"reused-name": {oldMergedOID}}) {
+	if branchMerged(root, "reused-name", map[string][]prHead{"reused-name": {{oid: oldMergedOID, num: "999"}}}) {
 		t.Error("a reused name with different commits must NOT be considered merged")
+	}
+}
+
+// A branch that drifted PAST its merged PR head with ONLY churn commits (sync
+// merges / `st sync` agent-state) is merged/prunable; one carrying real code
+// beyond the PR head must be kept (data-safe). Exercises the refs/pull/<n>/head
+// fallback by publishing a pull ref on the bare origin.
+func TestBranchMergedChurnDriftFallback(t *testing.T) {
+	root := setupMaintainRepo(t)
+	// PR head = a feature commit; publish it as refs/pull/42/head on origin.
+	commitOn(t, root, "feat-drift", "feature.go", "real feature")
+	prSha := strings.TrimSpace(gitOutput(t, root, "rev-parse", "feat-drift"))
+	runGitTest(t, root, "push", "origin", "feat-drift:refs/pull/42/head")
+	heads := map[string][]prHead{"feat-drift": {{oid: prSha, num: "42"}}}
+
+	// churn-only commit beyond the PR head → prunable
+	runGitTest(t, root, "checkout", "feat-drift")
+	if err := os.MkdirAll(filepath.Join(root, "agent-state"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "agent-state", "sync.md"), []byte("churn\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, root, "add", "-A")
+	runGitTest(t, root, "commit", "-m", "st sync: agent-state")
+	runGitTest(t, root, "checkout", "main")
+	if !branchMerged(root, "feat-drift", heads) {
+		t.Error("drifted branch with only churn beyond its merged PR head should be prunable")
+	}
+
+	// real code beyond the PR head → must be kept
+	runGitTest(t, root, "checkout", "-b", "feat-drift2", prSha)
+	if err := os.WriteFile(filepath.Join(root, "realcode.go"), []byte("package x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, root, "add", "-A")
+	runGitTest(t, root, "commit", "-m", "more real work")
+	runGitTest(t, root, "checkout", "main")
+	// Same merged PR head (prSha, already at refs/pull/42/head); the branch
+	// drifted past it with REAL code.
+	heads2 := map[string][]prHead{"feat-drift2": {{oid: prSha, num: "42"}}}
+	if branchMerged(root, "feat-drift2", heads2) {
+		t.Error("drifted branch with real code beyond its merged PR head must be kept")
 	}
 }
 

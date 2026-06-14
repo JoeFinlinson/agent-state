@@ -89,7 +89,7 @@ func reapStashes(root string, opts MaintainOpts) {
 
 // ── Phase 2: merged-branch prune ────────────────────────────────────────────
 
-func pruneMergedBranches(root string, mergedPR map[string][]string, opts MaintainOpts) {
+func pruneMergedBranches(root string, mergedPR map[string][]prHead, opts MaintainOpts) {
 	cur := currentBranch(root)
 	if cur == "HEAD" {
 		// Detached HEAD: there's no "current branch" to protect by name, so don't
@@ -148,41 +148,94 @@ func pruneRemoteBranch(root, b string) {
 // Requiring the tip to match the merged head OID is what makes name reuse safe: a
 // later branch that reuses a merged name but carries new commits has a different
 // tip, matches nothing, and is kept.
-func branchMerged(root, b string, mergedPR map[string][]string) bool {
+func branchMerged(root, b string, mergedPR map[string][]prHead) bool {
 	if gitCmdDirQuiet(root, "merge-base", "--is-ancestor", b, "origin/main") == nil {
 		return true
+	}
+	heads := mergedPR[b]
+	if len(heads) == 0 {
+		return false
 	}
 	tipOut, err := gitOutputDir(root, "rev-parse", b)
 	if err != nil {
 		return false
 	}
 	tip := strings.TrimSpace(tipOut)
-	for _, oid := range mergedPR[b] {
-		if oid == tip {
+	for _, h := range heads {
+		if h.oid == tip {
 			return true
 		}
 		// Local branch is an older ancestor of the merged head (oid must be a
-		// local object; if not, this errors → false → kept, which is safe).
-		if gitCmdDirQuiet(root, "merge-base", "--is-ancestor", tip, oid) == nil {
+		// local object; if not, this errors → false → falls through).
+		if gitCmdDirQuiet(root, "merge-base", "--is-ancestor", tip, h.oid) == nil {
 			return true
 		}
 	}
-	return false
+	// The branch drifted past its merged PR head(s) — almost always post-merge
+	// sync merges and `st sync` agent-state churn that accumulated after the PR
+	// merged. Safe to prune ONLY if EVERY non-merge commit it carries beyond
+	// origin/main and the merged PR heads touches nothing but churn. A reused
+	// name with real new code has a non-churn commit here → kept (data-safe).
+	return branchExtraIsChurnOnly(root, b, heads)
 }
 
-// mergedPRHeads maps each merged PR's head branch name → the head commit OIDs
-// merged under that name. Best-effort: empty when gh is missing/unauthed/offline
-// (callers then fall back to ancestor-only detection, still safe). Keyed by name
-// with OIDs so branchMerged can reject a reused name whose commits differ.
-func mergedPRHeads(root string) map[string][]string {
-	m := map[string][]string{}
+// branchExtraIsChurnOnly fetches the merged PR head(s) for b (GitHub exposes
+// refs/pull/<n>/head for every PR, even after the branch is deleted) and reports
+// whether every non-merge commit on b that is NOT in origin/main and NOT in those
+// heads touches only churn paths. Empty set ⇒ true. Any non-churn commit, or any
+// inability to verify (fetch/parse failure), ⇒ false (keep). Network-bound, so
+// it's only reached after the cheap ancestor/OID checks miss.
+func branchExtraIsChurnOnly(root, b string, heads []prHead) bool {
+	excludes := []string{"origin/main"}
+	for _, h := range heads {
+		if err := gitCmdDirQuiet(root, "fetch", "origin", "refs/pull/"+h.num+"/head"); err != nil {
+			return false
+		}
+		shaOut, err := gitOutputDir(root, "rev-parse", "FETCH_HEAD")
+		if err != nil {
+			return false
+		}
+		excludes = append(excludes, strings.TrimSpace(shaOut))
+	}
+	args := append([]string{"rev-list", "--no-merges", b, "--not"}, excludes...)
+	out, err := gitOutputDir(root, args...)
+	if err != nil {
+		return false
+	}
+	for _, c := range strings.Fields(out) {
+		files, err := gitOutputDir(root, "show", "--name-only", "--format=", c)
+		if err != nil {
+			return false
+		}
+		for _, f := range strings.Split(files, "\n") {
+			if f = strings.TrimSpace(f); f != "" && !maintainIsChurn(f) {
+				return false // real code beyond the merge → keep the branch
+			}
+		}
+	}
+	return true
+}
+
+// prHead is a merged PR's head: the GitHub PR number (to fetch refs/pull/<n>/head)
+// and the head commit OID recorded as merged.
+type prHead struct {
+	num string
+	oid string
+}
+
+// mergedPRHeads maps each merged PR's head branch name → its merged head(s).
+// Best-effort: empty when gh is missing/unauthed/offline (callers then fall back
+// to ancestor-only detection, still safe). Keyed by name with OID+number so
+// branchMerged can reject a reused name and verify drifted branches.
+func mergedPRHeads(root string) map[string][]prHead {
+	m := map[string][]prHead{}
 	slug := repoSlug(root)
 	if slug == "" {
 		return m
 	}
 	cmd := exec.Command("gh", "pr", "list", "--repo", slug, "--state", "merged",
-		"--limit", "300", "--json", "headRefName,headRefOid",
-		"-q", `.[] | .headRefName + " " + .headRefOid`)
+		"--limit", "300", "--json", "headRefName,headRefOid,number",
+		"-q", `.[] | .headRefName + " " + .headRefOid + " " + (.number|tostring)`)
 	cmd.Dir = root
 	out, err := cmd.Output()
 	if err != nil {
@@ -190,8 +243,8 @@ func mergedPRHeads(root string) map[string][]string {
 	}
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		f := strings.Fields(line)
-		if len(f) == 2 {
-			m[f[0]] = append(m[f[0]], f[1])
+		if len(f) == 3 {
+			m[f[0]] = append(m[f[0]], prHead{oid: f[1], num: f[2]})
 		}
 	}
 	return m
@@ -204,7 +257,7 @@ func mergedPRHeads(root string) map[string][]string {
 // I-1313 case that makes a manual `git checkout main` fail). It never discards
 // real WIP: any non-churn dirty path aborts, and the stash it parks is dropped
 // only after re-confirming it holds nothing but churn.
-func returnToCleanMain(root string, mergedPR map[string][]string, opts MaintainOpts) {
+func returnToCleanMain(root string, mergedPR map[string][]prHead, opts MaintainOpts) {
 	cur := currentBranch(root)
 	if cur == "" || cur == "main" || cur == "master" || cur == "HEAD" {
 		return // not on a deletable branch (incl. detached HEAD)
