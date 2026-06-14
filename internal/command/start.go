@@ -146,6 +146,17 @@ func Start(s *store.Store, cfg *config.Config, id string, opts StartOpts) int {
 		fmt.Fprintf(os.Stderr, "unknown type: %s\n", item.Type)
 		return 1
 	}
+	// I-1439: goals are not workable items — they have no worktree/branch
+	// and their lifecycle is managed by `st goal activate/drop/mark-met`.
+	// `st start` on a draft goal would flip it to active and stamp an
+	// assigned_to/claimed_by that no goal verb can clear (and `release`
+	// now refuses goals), leaving it stuck-claimed. Refuse up front.
+	if item.Type == "goal" {
+		fmt.Fprintf(os.Stderr,
+			"%s is a goal — `start` does not apply. Use `st goal activate %s` to make it count toward goal-weighted ranking.\n",
+			id, id)
+		return 1
+	}
 	if item.Status != tc.StartStatus {
 		fmt.Fprintf(os.Stderr, "%s is %s, not %s — cannot start\n", id, item.Status, tc.StartStatus)
 		return 1
