@@ -3,6 +3,7 @@ package command
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -513,6 +514,19 @@ func Close(s *store.Store, cfg *config.Config, id, resolution string, opts Close
 	if syncErr != nil {
 		return 1
 	}
+
+	// Refresh the dashboard snapshot. Detached so it doesn't block or fail
+	// the close; best-effort — a missing or crashing script is ignored.
+	script := filepath.Join(cfg.Root(), "scripts", "agent-state-dashboard.py")
+	if _, err := os.Stat(script); err == nil {
+		dashCmd := exec.Command("python3", script)
+		dashCmd.Stdout = nil
+		dashCmd.Stderr = nil
+		if err := dashCmd.Start(); err == nil {
+			_ = dashCmd.Process.Release()
+		}
+	}
+
 	return 0
 }
 
