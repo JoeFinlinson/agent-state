@@ -29,6 +29,13 @@ import (
 
 // c1Class maps a conflict-class token to the path fragments that identify it.
 // Matched as substrings so both repo-relative and nested paths are caught.
+//
+// NOTE: internal/command/gitdiff.go::classifyFile uses the same markers
+// ("api/openapi", "db/changelog") for its spec/migration classification. They
+// cannot share a constant directly (command imports coordinator, so the reverse
+// would cycle), so if the repo's OpenAPI/migration paths ever move, BOTH must
+// be updated — keep these markers in sync with classifyFile's. A shared leaf
+// package would unify them (follow-up, out of T-364 scope).
 var c1Classes = map[string][]string{
 	"openapi":   {"api/openapi", "api.yaml"},
 	"changelog": {"db/changelog"},

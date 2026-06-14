@@ -135,17 +135,21 @@ func Coordinate(s *store.Store, cfg *config.Config, opts CoordinateOpts) int {
 	// --- Concurrent fan-out: maintain up to parallelism_cap in-flight workers ---
 	//
 	// Concurrency-safety (T-364): the supervise loop reads via per-call fresh
-	// stores (freshItem) and each worker spawns through its OWN store, so the
-	// only shared mutable state is the deduper map — serialized by `mu` around
-	// every coordinator.Fire call. The dispatch read path (selectNextExcluding)
-	// also reads a fresh store, so a peer goroutine's claim/completion is
-	// reflected without racing the in-memory parent store.
+	// stores (freshItem) and the dispatch read path (selectNextExcluding) also
+	// reads a fresh store, so a peer goroutine's claim/completion is reflected
+	// without racing the in-memory parent store. The genuinely shared mutable
+	// state is process-global and is serialized by `mu`: worker spawn (git
+	// worktree creation on the shared repo + the lock-free agent-registry
+	// write) and escalation Fire (deduper map + escalator issue create/diff).
 	parCap := b.ParallelismCap
 	if parCap < 1 {
 		parCap = 1
 	}
 
-	var mu sync.Mutex // serializes coordinator.Fire (deduper map + escalator create/diff)
+	// mu serializes the two operations that touch PROCESS-GLOBAL shared state:
+	// Spawn (git index + agent registry) and coordinator.Fire (deduper map +
+	// escalator). Both are brief/rare; worker execution runs unserialized.
+	var mu sync.Mutex
 	cancel := make(chan struct{})
 	var cancelOnce sync.Once
 	stopAll := func() { cancelOnce.Do(func() { close(cancel) }) }
@@ -156,7 +160,15 @@ func Coordinate(s *store.Store, cfg *config.Config, opts CoordinateOpts) int {
 	completedSpendUSD := 0.0
 	var lastSkip string
 
-	canDispatch := func() bool { return opts.MaxItems == 0 || dispatched < maxItems }
+	// canDispatch caps total dispatches. --once is always exactly one (it must
+	// not fan out to the cap even if MaxItems is left unbounded); otherwise
+	// MaxItems==0 means unbounded and any positive value is the hard cap.
+	canDispatch := func() bool {
+		if opts.Once {
+			return dispatched < 1
+		}
+		return opts.MaxItems == 0 || dispatched < maxItems
+	}
 
 	for {
 		// Fill idle slots up to the cap with non-conflicting, unclaimed work.
@@ -194,11 +206,14 @@ func Coordinate(s *store.Store, cfg *config.Config, opts CoordinateOpts) int {
 
 		// Quiescent: nothing in flight and nothing dispatchable → done.
 		if len(active) == 0 {
-			reason := lastSkip
-			if reason == "" {
-				reason = "max-items reached"
+			if lastSkip != "" {
+				// The fill loop found nothing dispatchable — surface WHY.
+				fmt.Printf("coordinate: no eligible item (%s)\n", lastSkip)
+			} else {
+				// Stopped because the dispatch budget (--once / --max-items)
+				// is exhausted, not because the queue is empty.
+				fmt.Printf("coordinate: dispatch budget reached (%d item(s) processed)\n", dispatched)
 			}
-			fmt.Printf("coordinate: no eligible item (%s)\n", reason)
 			return 0
 		}
 
@@ -226,6 +241,13 @@ func Coordinate(s *store.Store, cfg *config.Config, opts CoordinateOpts) int {
 		// D1: per-objective cumulative budget across ALL workers (completed +
 		// live). Escalate-not-exceed (contract §7-D1): stop everything the
 		// moment the cap is crossed.
+		//
+		// "Objective" = this coordinator run (all items it dispatches). Per-goal
+		// / per-sprint budget partitioning is the cross-objective concern (C3),
+		// explicitly operator-only and out of T-364 scope; for the MVP a single
+		// run is one objective. The check fires at completion boundaries, so
+		// in-flight spend can briefly exceed the cap before the next worker
+		// returns — acceptable for an escalate-not-exceed stop.
 		objective := completedSpendUSD + objectiveSpendUSD(cfg, active)
 		if b.PerObjectiveUSD > 0 && objective >= b.PerObjectiveUSD {
 			fmt.Printf("coordinate: per-objective spend $%.2f ≥ cap $%g — D1 escalate, stopping all workers\n",
@@ -420,26 +442,44 @@ func superviseItem(cfg *config.Config, b *coordinator.Boundary,
 
 	extraCtx := "" // empty on the first attempt; set on respawn-with-context
 	for {
+		// Honor a coordinator-wide stop (D1 budget / peer failure) BEFORE
+		// (re)spawning — otherwise a worker that just broke out of the supervise
+		// loop to respawn would launch a NEW worker after the dispatch loop
+		// already killed everything, orphaning a budget-burning process past the
+		// boundary the stop exists to enforce.
+		select {
+		case <-cancel:
+			return 0
+		default:
+		}
+
 		// --- (re)spawn ---
 		baseItem := freshItem(cfg, itemID)
 		if baseItem == nil {
 			fmt.Fprintf(os.Stderr, "coordinate: %s vanished from the store before spawn\n", itemID)
 			return 1
 		}
-		// Each worker spawns through its OWN store so the concurrent Start
-		// (which Spawn runs on attempt 1) mutates goroutine-local state, never
-		// the shared parent store — the disk write is the real source of truth
-		// that freshItem re-reads (T-364 concurrency-safety).
+		// Each worker spawns through its OWN in-memory store, but Spawn→Start is
+		// NOT fully isolated: it mutates process-global resources — the shared
+		// git index (`git worktree add` on the main repo) and the agent registry
+		// (a lock-free read-then-write of the next worker suffix). Concurrent
+		// Spawns would collide on .git/index.lock and clobber each other's
+		// registration files. So serialize the whole Spawn under the shared
+		// mutex: worktree creation + launch is brief (seconds), while the
+		// worker EXECUTION that follows runs fully concurrent (T-364).
 		gs, err := store.New(cfg)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "coordinate: %s store init failed before spawn: %v\n", itemID, err)
 			return 1
 		}
-		if rc := Spawn(gs, cfg, SpawnOpts{
+		mu.Lock()
+		rc := Spawn(gs, cfg, SpawnOpts{
 			Item:           itemID,
 			BudgetOverride: opts.BudgetOverride,
 			ExtraContext:   extraCtx,
-		}); rc != 0 {
+		})
+		mu.Unlock()
+		if rc != 0 {
 			fmt.Fprintf(os.Stderr, "coordinate: spawn %s failed (rc=%d) — nothing supervised\n", itemID, rc)
 			return rc
 		}
