@@ -479,6 +479,29 @@ func Close(s *store.Store, cfg *config.Config, id, resolution string, opts Close
 	newPath, _ := s.Path(id)
 	syncErr := autoSync(s, fmt.Sprintf("st close: %s (%s)", id, resolution), newPath)
 
+	// I-1439: the pre-sync RemoveStaleDuplicates above runs BEFORE
+	// autoSync's internal `git pull --ff-only`. A peer feature-branch
+	// created while this item was still active can resurrect
+	// issues/<id>-*.md (or tasks/<id>-*.md) when it merges to main —
+	// and that merge is pulled in DURING this close's sync, landing the
+	// duplicate in the close commit itself where the earlier sweep could
+	// not have seen it (this is exactly how I-1441 ended up with copies
+	// in both issues/ and archive/, surfacing as a `duplicate id` warning
+	// on every subsequent st invocation until a manual `st check --fix`).
+	// Re-sweep post-pull; if anything was resurrected, commit the cleanup
+	// so the collision never reaches `st check`. No-op (and no extra
+	// commit) in the common case where the pull brought nothing back.
+	if removed, derr := s.RemoveStaleDuplicates(id); derr != nil {
+		fmt.Fprintf(os.Stderr, "warning: post-sync cleanup of stale duplicates for %s failed: %v\n", id, derr)
+	} else if len(removed) > 0 {
+		for _, p := range removed {
+			fmt.Fprintf(os.Stderr, "removed stale duplicate (post-sync): %s\n", p)
+		}
+		if err := autoSync(s, fmt.Sprintf("st close: %s — sweep peer-resurrected duplicate", id)); err != nil {
+			syncErr = err
+		}
+	}
+
 	// Always run post-close cleanup even when sync failed — the item is
 	// already durably on disk, and skipping sprint/epic auto-archive or
 	// worktree cleanup would leave stale state that outlives the gate.

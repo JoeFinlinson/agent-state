@@ -13,12 +13,24 @@ import (
 // MigrateOpts configures the migrate command.
 type MigrateOpts struct {
 	DryRun bool
-	Scope  string // "archive", "active", or "" (all)
+	Scope  string   // "archive", "active", or "" (all)
+	IDs    []string // I-1439: when non-empty, restrict to these item IDs
+	// (targeted repair — re-serialize specific corrupt files through the
+	// typed struct without rewriting the whole corpus).
 }
 
 // Migrate normalizes all item files to canonical schema.
 func Migrate(s *store.Store, cfg *config.Config, opts MigrateOpts) int {
 	var totalFiles, changedFiles, errorFiles int
+
+	// I-1439: targeted-id set for surgical repair.
+	var idSet map[string]bool
+	if len(opts.IDs) > 0 {
+		idSet = make(map[string]bool, len(opts.IDs))
+		for _, id := range opts.IDs {
+			idSet[id] = true
+		}
+	}
 
 	for id, item := range s.All() {
 		path, ok := s.Path(id)
@@ -26,12 +38,20 @@ func Migrate(s *store.Store, cfg *config.Config, opts MigrateOpts) int {
 			continue
 		}
 
-		// Scope filter
-		if opts.Scope == "archive" && !strings.Contains(path, "/archive/") {
-			continue
-		}
-		if opts.Scope == "active" && strings.Contains(path, "/archive/") {
-			continue
+		// I-1439: targeted-id filter takes precedence — when a set is
+		// given, only those ids migrate and scope is ignored.
+		if idSet != nil {
+			if !idSet[id] {
+				continue
+			}
+		} else {
+			// Scope filter
+			if opts.Scope == "archive" && !strings.Contains(path, "/archive/") {
+				continue
+			}
+			if opts.Scope == "active" && strings.Contains(path, "/archive/") {
+				continue
+			}
 		}
 
 		totalFiles++

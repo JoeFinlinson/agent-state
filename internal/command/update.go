@@ -72,6 +72,18 @@ var listFields = map[string]bool{
 	"tags": true, "sessions": true, "goals": true,
 }
 
+// freeformDocFields are long-form body fields the parser does NOT surface
+// into a typed Item field but that DO round-trip in the raw document as
+// block scalars (SetField writes `key: |-` + indented body). They are the
+// documented long-form set (see Update's doc comment) minus `summary`
+// (shimmed to sbar.background above) and `context` (already a
+// CanonicalTopLevelKey). The I-1439 unknown-field guard must allow these
+// to be written/replaced; only genuine typos and bare SBAR sub-keys are
+// refused.
+var freeformDocFields = map[string]bool{
+	"description": true, "notes": true,
+}
+
 // listItemRaw formats v as a canonical YAML list-item line ("- v", or
 // "- \"v\"" when v needs quoting). The quoting predicate mirrors the
 // migrate builder's needsQuoting (`:` `+"`"+` #{}[]` or a leading quote) so a
@@ -170,6 +182,34 @@ func Update(s *store.Store, cfg *config.Config, id, field, value string, mode Up
 				return 2
 			}
 		}
+	}
+
+	// I-1439: refuse a write to an UNKNOWN top-level field rather than
+	// silently appending a new `field: value` line at EOF. The default
+	// branch of the mutate switch below routes any unmatched field to
+	// SetField, which APPENDS when the key is absent — so a typo or a
+	// bare SBAR sub-key (`situation` instead of `sbar.situation`) stacks
+	// a stray top-level key, reporting success while corrupting the file
+	// (and stacking duplicate keys on repeat calls). The dedicated
+	// branches handle list fields, dotted nested paths, the `stage`
+	// alias, and `sbar`/`sbar.*`; anything else reaching the scalar
+	// path must be a canonical top-level field. The bare SBAR sub-key is
+	// the common footgun, so name the dotted form explicitly.
+	if field != "stage" && !strings.Contains(field, ".") && !listFields[field] && !model.CanonicalTopLevelKeys[field] && !freeformDocFields[field] {
+		switch field {
+		case "situation", "background", "assessment", "recommendation":
+			fmt.Fprintf(os.Stderr,
+				"update: %q is an SBAR sub-section, not a top-level field — a bare write would append a stray top-level %q: key.\n"+
+					"  Use the dotted form:   st update %s sbar.%s --stdin\n"+
+					"  Or rewrite all four:   st update %s sbar --stdin < <four-section-buffer>\n",
+				field, field, id, field, id)
+		default:
+			fmt.Fprintf(os.Stderr,
+				"update: unknown field %q — refusing to append it as a new top-level key (would corrupt %s).\n"+
+					"  Nested fields use dotted paths (e.g. delivery.stage, sbar.situation, work_tracking.pr).\n",
+				field, id)
+		}
+		return 2
 	}
 
 	item, ok := s.Get(id)

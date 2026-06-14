@@ -3085,16 +3085,20 @@ Kinds:
 	root.AddCommand(indexCmd)
 
 	migrateCmd := &cobra.Command{
-		Use:   "migrate",
+		Use:   "migrate [id...]",
 		Short: "Normalize item file format",
+		Long: "Normalize item files to canonical schema (re-serialize through the typed struct).\n" +
+			"With no args, processes every file (optionally narrowed by --scope).\n" +
+			"With one or more item IDs, restricts to exactly those files — targeted\n" +
+			"surgical repair of specific corrupt files without rewriting the corpus (I-1439).",
 		Run: func(cmd *cobra.Command, args []string) {
 			dryRun, _ := cmd.Flags().GetBool("dry-run")
 			scope, _ := cmd.Flags().GetString("scope")
-			exitCode = command.Migrate(appStore, appCfg, command.MigrateOpts{DryRun: dryRun, Scope: scope})
+			exitCode = command.Migrate(appStore, appCfg, command.MigrateOpts{DryRun: dryRun, Scope: scope, IDs: args})
 		},
 	}
 	migrateCmd.Flags().Bool("dry-run", false, "show changes without applying")
-	migrateCmd.Flags().String("scope", "", "scope: archive, active, or empty for all")
+	migrateCmd.Flags().String("scope", "", "scope: archive, active, or empty for all (ignored when explicit ids are given)")
 	root.AddCommand(migrateCmd)
 
 	reconcileCmd := &cobra.Command{
