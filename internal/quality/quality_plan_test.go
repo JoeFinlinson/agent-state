@@ -109,6 +109,34 @@ func TestValidatePlan_AcceptsNoneOutOfScope(t *testing.T) {
 	}
 }
 
+func TestValidatePlan_FlagsScaffoldOutOfScope(t *testing.T) {
+	for _, scaffold := range []string{"TODO", "TBD", "N/A", "  todo  "} {
+		t.Run(scaffold, func(t *testing.T) {
+			p := &plan.Plan{
+				Approach:   "Real approach.",
+				Tests:      "Unit tests.",
+				OutOfScope: scaffold,
+				Risks:      "Low risk.",
+				ScopeRepos: []string{"as"},
+				ACs:        []string{"cmd: go test ./..."},
+			}
+			v := ValidatePlan(p)
+			if !HasError(v) {
+				t.Errorf("expected error on scaffold OutOfScope %q; got %v", scaffold, v)
+			}
+			found := false
+			for _, vi := range v {
+				if vi.Field == "plan.out_of_scope" {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("expected plan.out_of_scope violation for scaffold %q; got %v", scaffold, v)
+			}
+		})
+	}
+}
+
 // T-394: ## Risks section required.
 func TestValidatePlan_FlagsMissingRisks(t *testing.T) {
 	p := &plan.Plan{

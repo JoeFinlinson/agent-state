@@ -217,7 +217,9 @@ func ValidatePlan(p *plan.Plan) []Violation {
 		})
 	}
 	outOfScope := strings.TrimSpace(p.OutOfScope)
-	if outOfScope == "" {
+	outOfScopeLower := strings.ToLower(outOfScope)
+	// "None" is a valid explicit acknowledgment for Out-of-scope; only block empty + other scaffolds.
+	if outOfScope == "" || outOfScopeLower == "todo" || outOfScopeLower == "tbd" || outOfScopeLower == "n/a" {
 		out = append(out, Violation{
 			Severity: SeverityError,
 			Field:    "plan.out_of_scope",
