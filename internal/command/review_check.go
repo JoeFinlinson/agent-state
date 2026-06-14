@@ -22,6 +22,10 @@ func ReviewCheck(s *store.Store, cfg *config.Config, id string, opts ReviewCheck
 		fmt.Fprintf(os.Stderr, "not found: %s\n", id)
 		return 1
 	}
+	if item.Status != "active" {
+		fmt.Fprintf(os.Stderr, "%s: review-check on non-active item (status=%s) — stale evidence is not valid\n", id, item.Status)
+		return 1
+	}
 
 	// Read review_evidence field.
 	evField := ""

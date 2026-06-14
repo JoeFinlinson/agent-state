@@ -1,7 +1,6 @@
 package command
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/jfinlinson/agent-state/internal/model"
@@ -103,5 +102,11 @@ func TestReviewCheckMalformedEvidence(t *testing.T) {
 	}
 }
 
-// suppress unused import warning
-var _ = strings.HasPrefix
+func TestReviewCheckNonActive(t *testing.T) {
+	s, cfg := setupTestEnv(t)
+	// T-001 is queued — not active.
+	code := ReviewCheck(s, cfg, "T-001", ReviewCheckOpts{})
+	if code != 1 {
+		t.Errorf("ReviewCheck non-active item: got %d, want 1", code)
+	}
+}

@@ -22,9 +22,8 @@ const defaultReviewWallTimeout = 10 * time.Minute
 
 // ReviewOpts holds injectable dependencies for the review command.
 type ReviewOpts struct {
-	Engine     RunEngine
-	GitHeadSHA func(repoDir string) (string, error)
-	Backend    evidence.Backend
+	Engine  RunEngine
+	Backend evidence.Backend
 	// RunGit is injectable for tests; nil uses the real git binary.
 	RunGit func(dir string, args ...string) (string, error)
 	// CollectDiff overrides diff collection entirely for tests.
@@ -120,6 +119,10 @@ func Review(s *store.Store, cfg *config.Config, id string, opts ReviewOpts) int 
 		fmt.Fprintf(os.Stderr, "%s: no diff found against origin/main — nothing to review\n", id)
 		return 1
 	}
+	if sha == "" {
+		fmt.Fprintf(os.Stderr, "%s: no HEAD SHA resolved for the reviewed diff — cannot record evidence\n", id)
+		return 1
+	}
 
 	// Build and execute the review sub-agent prompt.
 	prompt := buildReviewPrompt(id, sha, diff)
@@ -133,7 +136,7 @@ func Review(s *store.Store, cfg *config.Config, id string, opts ReviewOpts) int 
 	step.SetName("as_review")
 
 	sr := executeClaude(s, cfg, id, "", step, RunOpts{NoCoordination: true}, opts.Engine, cwd, reviewSessionID, false)
-	if !sr.Passed && sr.FullOutput == "" {
+	if !sr.Passed {
 		fmt.Fprintf(os.Stderr, "%s: review sub-agent failed: %s\n", id, sr.Error)
 		return writeReviewEvidence(s, cfg, id, sha, "fail", nil, opts)
 	}
@@ -195,9 +198,6 @@ func collectItemDiff(cfg *config.Config, id string, opts ReviewOpts) (diff, sha 
 		if len(headSHA) > 7 {
 			headSHA = headSHA[:7]
 		}
-		if sha == "" {
-			sha = headSHA
-		}
 
 		// Prefer diff vs origin/main; fall back to HEAD^ for orphan branches.
 		diffOut, gitErr := gitFn(dir, "diff", "origin/main...HEAD")
@@ -209,6 +209,11 @@ func collectItemDiff(cfg *config.Config, id string, opts ReviewOpts) (diff, sha 
 		}
 		if strings.TrimSpace(diffOut) == "" {
 			continue
+		}
+		// Set SHA from the first repo that actually contributed to the diff,
+		// so the staleness sentinel tracks the reviewed code, not an unrelated repo.
+		if sha == "" {
+			sha = headSHA
 		}
 		parts = append(parts, fmt.Sprintf("=== Repo: %s (SHA: %s) ===\n%s", repo, headSHA, diffOut))
 	}
@@ -319,17 +324,18 @@ Rules:
 }
 
 // parseReviewReport extracts and validates a ReviewReport JSON from Claude's output.
-// Claude may include trailing prose; we extract the first complete JSON object.
+// Uses json.Decoder to read exactly one top-level JSON object starting from the
+// first '{', ignoring any leading prose or trailing content (including stray braces
+// that appear in diff context or Claude's annotations).
 func parseReviewReport(output string) (*ReviewReport, error) {
 	output = strings.TrimSpace(output)
 	start := strings.Index(output, "{")
-	end := strings.LastIndex(output, "}")
-	if start < 0 || end < 0 || end <= start {
+	if start < 0 {
 		return nil, fmt.Errorf("no JSON object found in output")
 	}
-	jsonStr := output[start : end+1]
+	dec := json.NewDecoder(strings.NewReader(output[start:]))
 	var report ReviewReport
-	if err := json.Unmarshal([]byte(jsonStr), &report); err != nil {
+	if err := dec.Decode(&report); err != nil {
 		return nil, fmt.Errorf("JSON parse error: %w", err)
 	}
 	return &report, nil
@@ -393,7 +399,8 @@ func writeReviewEvidence(s *store.Store, cfg *config.Config, id, sha, verdict st
 	})
 
 	if err := autoSync(s, fmt.Sprintf("st review: %s", id)); err != nil {
-		return 1
+		// Sync failure is non-fatal — evidence is already written; don't mask the verdict.
+		fmt.Fprintf(os.Stderr, "warning: %s: sync failed (evidence already written): %v\n", id, err)
 	}
 
 	if verdict == "pass" {

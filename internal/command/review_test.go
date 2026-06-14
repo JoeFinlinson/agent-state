@@ -237,6 +237,24 @@ func TestReviewNotFound(t *testing.T) {
 	}
 }
 
+func TestReviewEmptySHA(t *testing.T) {
+	s, cfg := setupTestEnv(t)
+	// CollectDiff returns a non-empty diff but empty SHA — e.g., all git rev-parse calls failed.
+	opts := ReviewOpts{
+		CollectDiff: syntheticDiff(""),
+	}
+	code := Review(s, cfg, "T-003", opts)
+	if code != 1 {
+		t.Errorf("Review with empty SHA: got %d, want 1", code)
+	}
+	// Evidence must NOT be written — an empty SHA would corrupt the field format.
+	item, _ := s.Get("T-003")
+	ev, _ := item.Doc.GetField("review_evidence")
+	if ev != "" {
+		t.Errorf("review_evidence should not be written on empty SHA: got %q", ev)
+	}
+}
+
 // --- parse tests ---
 
 func TestParseReviewReport(t *testing.T) {
