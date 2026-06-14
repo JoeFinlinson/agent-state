@@ -1933,6 +1933,60 @@ func TestGitSync_DropsLockFileFromIndex_I1451(t *testing.T) {
 	}
 }
 
+// TestGitSync_FeatureBranch_LockNotRestagedAfterReset_I1451 verifies that
+// .st-git.lock is not re-staged into the real index after git reset -q on a
+// feature branch. Before the fix, commitStagedOntoMain advanced refs/heads/main
+// but NOT HEAD; git reset -q then reset the index to HEAD (feature branch tip)
+// which still had .st-git.lock tracked, causing every sync to dirty the index
+// and block session-stop.
+func TestGitSync_FeatureBranch_LockNotRestagedAfterReset_I1451(t *testing.T) {
+	workspace, asDir := setupI807Workspace(t, false)
+	itemDir := filepath.Join(workspace, "agent-state")
+
+	// Force .st-git.lock into the index on main and commit it.
+	lockPath := filepath.Join(itemDir, ".st-git.lock")
+	if err := os.WriteFile(lockPath, []byte("pid=12345\n"), 0644); err != nil {
+		t.Fatalf("write lock fixture: %v", err)
+	}
+	gitRun(t, workspace, "add", "-f", "agent-state/.st-git.lock")
+	gitRun(t, workspace, "commit", "-m", "accidentally track .st-git.lock on main")
+
+	// Switch to a feature branch. The feature branch tip still has
+	// .st-git.lock tracked because it branched from the above commit.
+	gitRun(t, workspace, "checkout", "-b", "fix/I-1451-feature-branch-test")
+
+	// Mutate the lock file (acquireGitLock rewrites it every sync).
+	if err := os.WriteFile(lockPath, []byte("pid=99999\n"), 0644); err != nil {
+		t.Fatalf("update lock fixture: %v", err)
+	}
+
+	// Mutate a state item so GitSync has something to commit to main.
+	s := loadI807Store(t, asDir)
+	item, _ := s.Get("T-001")
+	item.Doc.SetField("status", "active")
+	s.write(item)
+
+	if err := s.GitSync("test: update T-001 (I-1451 feature-branch test)"); err != nil {
+		t.Fatalf("GitSync failed: %v", err)
+	}
+
+	// After GitSync, .st-git.lock must NOT be in the real index — even
+	// though we are on a feature branch whose HEAD still has it tracked.
+	// Without the fix, git reset -q would have restored it.
+	lsCmd := exec.Command("git", "ls-files", "--error-unmatch", "agent-state/.st-git.lock")
+	lsCmd.Dir = workspace
+	if err := lsCmd.Run(); err == nil {
+		t.Error("I-1451 regression (feature branch): .st-git.lock is tracked in real index after GitSync on feature branch")
+	}
+
+	// Verify the committed tree on main also excludes it.
+	showCmd := exec.Command("git", "show", "refs/heads/main:agent-state/.st-git.lock")
+	showCmd.Dir = workspace
+	if showCmd.Run() == nil {
+		t.Error("I-1451 regression: .st-git.lock is in refs/heads/main tree after GitSync")
+	}
+}
+
 // gitRun is a test helper that runs `git <args>` in dir and t.Fatals
 // on failure with the combined output for diagnostics.
 //

@@ -700,6 +700,12 @@ func (s *Store) GitSync(message string, newPaths ...string) error {
 		return fmt.Errorf("git reset after main commit: %w", err)
 	}
 
+	// I-1451: on feature branches, git reset -q resets the real index to the
+	// feature branch HEAD, which may still have .st-git.lock tracked (the
+	// deletion was committed only onto refs/heads/main). Remove it again so
+	// git add -u on the next sync doesn't re-stage it and dirty the index.
+	_ = gitCmdQuiet(root, "rm", "--cached", "--ignore-unmatch", "--", ".st-git.lock")
+
 	// Push with retry
 	if s.cfg.Git.AutoPush {
 		if err := s.pushWithRetry(root, 3); err != nil {
