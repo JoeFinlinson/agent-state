@@ -1795,6 +1795,34 @@ Example:
 
 	root.AddCommand(statsCmd)
 
+	metricsCmd := &cobra.Command{
+		Use:   "metrics",
+		Short: "Show per-item cost, LOC, and duration metrics",
+		Run: func(cmd *cobra.Command, args []string) {
+			typeF, _ := cmd.Flags().GetString("type")
+			tagF, _ := cmd.Flags().GetString("tag")
+			goalF, _ := cmd.Flags().GetString("goal")
+			sprintF, _ := cmd.Flags().GetString("sprint")
+			sinceF, _ := cmd.Flags().GetString("since")
+			sortF, _ := cmd.Flags().GetString("sort")
+			topF, _ := cmd.Flags().GetInt("top")
+			fmtF, _ := cmd.Flags().GetString("format")
+			exitCode = command.Metrics(appStore, appCfg, command.MetricsOpts{
+				Type: typeF, Tag: tagF, Goal: goalF, Sprint: sprintF,
+				Since: sinceF, Sort: sortF, Top: topF, Format: fmtF,
+			})
+		},
+	}
+	metricsCmd.Flags().String("type", "", "filter by item type (issue|task|goal)")
+	metricsCmd.Flags().String("tag", "", "filter by tag")
+	metricsCmd.Flags().String("goal", "", "filter by goal ID")
+	metricsCmd.Flags().String("sprint", "", "filter by sprint name")
+	metricsCmd.Flags().String("since", "", "only items completed on or after this date (YYYY-MM-DD or RFC3339)")
+	metricsCmd.Flags().String("sort", "cost", "sort by: cost|loc|duration|tokens")
+	metricsCmd.Flags().Int("top", 0, "limit to top N rows (0 = no limit)")
+	metricsCmd.Flags().String("format", "", "output format: '' (table), json, csv")
+	root.AddCommand(metricsCmd)
+
 	depCmd := &cobra.Command{
 		Use:   "dep",
 		Short: "Manage dependencies between items",
@@ -3556,6 +3584,7 @@ var commandGroupAssignments = map[string]string{
 	"watch":      "querying",
 	"tui":        "querying",
 	"cost":       "querying",
+	"metrics":    "querying",
 	"model-rec":  "querying",
 	"files":      "querying",
 	"transcript": "querying",
