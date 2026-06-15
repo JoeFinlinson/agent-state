@@ -703,7 +703,7 @@ func TestDecideTier_OpusSecondOpinion_Triggers(t *testing.T) {
 type: issue
 title: Auth session change
 status: queued
-priority: p1
+priority: 1
 tags: [auth]
 sbar:
   situation: Fix session expiry in internal/auth/session.go
@@ -748,7 +748,7 @@ func TestDecideTier_OpusSecondOpinion_SkipsP2(t *testing.T) {
 type: issue
 title: Auth cleanup (low priority)
 status: queued
-priority: p2
+priority: 2
 tags: [auth]
 sbar:
   situation: Low-priority refactor of internal/auth/ helpers.
@@ -785,7 +785,7 @@ func TestDecideTier_OpusSecondOpinion_SkipsNonRisk(t *testing.T) {
 type: issue
 title: Tooling update
 status: queued
-priority: p1
+priority: 1
 tags: [st-tooling]
 sbar:
   situation: Update the CLI help text.
@@ -821,7 +821,7 @@ func TestModelRecConfirmOpus_ForcesCheck(t *testing.T) {
 type: issue
 title: Auth token validation
 status: queued
-priority: p1
+priority: 1
 tags: [auth]
 sbar:
   situation: Strengthen token validation in internal/auth/jwt.go
@@ -834,9 +834,9 @@ sbar:
 
 	engine := RunEngine{
 		RunClaude: func(cwd string, args []string, env []string) ([]byte, int, error) {
-			// decideTier calls haiku first, then opus second-opinion (predicate fires).
-			// ModelRecConfirmOpus then calls opus again as the forced confirm pass.
-			// Return sonnet for haiku call (first), opus for all subsequent calls.
+			// decideTier calls haiku first, then fires the Opus gate (p1+auth predicate).
+			// ModelRecConfirmOpus detects "SECOND-OPINION" in the base output and skips
+			// the redundant second Opus call.
 			joined := strings.Join(args, " ")
 			if strings.Contains(joined, "claude-haiku") {
 				return []byte(haikuEnvelope), 0, nil
@@ -851,13 +851,63 @@ sbar:
 		t.Errorf("exit = %d, want 0", code)
 	}
 	outStr := out.String()
+	// The automatic gate already escalated to opus; confirm-opus detects this and
+	// skips the redundant Opus call. Output should show the gate result.
+	if !strings.Contains(outStr, "opus") {
+		t.Errorf("expected opus in output, got:\n%s", outStr)
+	}
+
+	// The early-return path ("automatic gate already escalated") skips the Mutate,
+	// so model_tier_rec may be set by the internal stampModelRec path but not here.
+	// The important assertion is that opus was returned and code==0 (above).
+}
+
+// TestModelRecConfirmOpus_PersistsWhenNotAutoEscalated tests the path where
+// ModelRec returns sonnet (no automatic escalation) and --confirm-opus forces
+// the check and persists the result.
+func TestModelRecConfirmOpus_PersistsWhenNotAutoEscalated(t *testing.T) {
+	root := modelRecTestEnv(t)
+	// p2 item with auth tag: itemPriorityIsHighRisk returns false (priority=2),
+	// so the automatic gate in decideTier does NOT fire. ModelRec returns sonnet.
+	// ModelRecConfirmOpus then forces the Opus check and persists opus.
+	body := `id: I-931
+type: issue
+title: Auth cleanup (low priority confirm-opus test)
+status: queued
+priority: 2
+tags: [auth]
+sbar:
+  situation: Refactor session handling in internal/auth/.
+`
+	writeItemFile(t, root, "issues", "I-931", body)
+	s, cfg := loadStore(t, root)
+
+	haikuEnvelope := `{"type":"result","subtype":"success","is_error":false,"result":"{\"tier\":\"sonnet\",\"reason\":\"multi-file\"}"}`
+	opusEnvelope := `{"type":"result","subtype":"success","is_error":false,"result":"{\"tier\":\"opus\",\"reason\":\"auth correctness critical\"}"}`
+
+	engine := RunEngine{
+		RunClaude: func(cwd string, args []string, env []string) ([]byte, int, error) {
+			joined := strings.Join(args, " ")
+			if strings.Contains(joined, "claude-haiku") {
+				return []byte(haikuEnvelope), 0, nil
+			}
+			return []byte(opusEnvelope), 0, nil
+		},
+	}
+
+	var out bytes.Buffer
+	code := ModelRecConfirmOpus(s, cfg, "I-931", engine, true, &out)
+	if code != 0 {
+		t.Errorf("exit = %d, want 0", code)
+	}
+	outStr := out.String()
 	if !strings.Contains(outStr, "escalated to opus") {
 		t.Errorf("expected escalation message, got:\n%s", outStr)
 	}
 
 	// Reload and confirm model_tier_rec was persisted.
 	s2, _ := loadStore(t, root)
-	item, _ := s2.Get("I-930")
+	item, _ := s2.Get("I-931")
 	rec, ok := item.Doc.GetField("model_tier_rec")
 	if !ok || strings.TrimSpace(rec) != "opus" {
 		t.Errorf("model_tier_rec = %q, want opus", rec)
