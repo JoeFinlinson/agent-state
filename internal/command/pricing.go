@@ -68,6 +68,11 @@ func PricingRefresh(cfg *config.Config, opts PricingRefreshOpts) int {
 		return 0
 	}
 
+	if opts.DryRun {
+		fmt.Println("dry run — no files modified")
+		return 0
+	}
+
 	// Resolve the command runner once for all subsequent exec operations.
 	runner := opts.RunCmd
 	if runner == nil {
@@ -80,11 +85,6 @@ func PricingRefresh(cfg *config.Config, opts PricingRefreshOpts) int {
 		fmt.Fprintf(os.Stderr, "pricing refresh: rate change exceeds %.0f%% sanity bound — filing issue for manual review\n", opts.SanityPct)
 		_ = createSanityIssue(diffText, opts.SanityPct, runner)
 		return 1
-	}
-
-	if opts.DryRun {
-		fmt.Println("dry run — no files modified")
-		return 0
 	}
 
 	// Rewrite table.go

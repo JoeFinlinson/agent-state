@@ -205,6 +205,11 @@ func TestAnthropicNameToID(t *testing.T) {
 		{"GPT-4", ""},           // not claude
 		{"", ""},                // empty
 		{"Claude Opus", "claude-opus"}, // no version
+		// Annotation stripping
+		{"Claude Haiku 3.5 (retired, except on Bedrock and Vertex AI)", "claude-haiku-3-5"},
+		{"Claude Opus 4 (deprecated)", "claude-opus-4"},
+		// Slash-combined entries are rejected
+		{"Claude Opus 4.6 / Claude Opus 4.7", ""},
 	}
 	for _, tc := range cases {
 		got := anthropicNameToID(tc.in)

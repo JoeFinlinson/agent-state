@@ -180,7 +180,13 @@ func parseAnthropicHTML(body string) (map[string]Rate, error) {
 
 // anthropicNameToID converts Anthropic display names to internal model IDs.
 // "Claude Opus 4.7" → "claude-opus-4-7", "Claude Haiku 3.5" → "claude-haiku-3-5"
+// Rows with parenthesized annotations ("retired", "deprecated") or slash-combined
+// entries ("Claude Opus 4.6 / Claude Opus 4.7") return "" and are skipped.
 func anthropicNameToID(name string) string {
+	// Strip parenthesized annotations (e.g. " (retired, except on Bedrock and Vertex AI)")
+	if i := strings.Index(name, "("); i >= 0 {
+		name = name[:i]
+	}
 	lower := strings.ToLower(strings.TrimSpace(name))
 	if !strings.HasPrefix(lower, "claude") {
 		return ""
@@ -190,7 +196,12 @@ func anthropicNameToID(name string) string {
 	for strings.Contains(id, "--") {
 		id = strings.ReplaceAll(id, "--", "-")
 	}
-	return strings.TrimRight(id, "-")
+	id = strings.TrimRight(id, "-")
+	// Reject slash-combined entries like "claude-opus-4-6-/-claude-opus-4-7"
+	if strings.ContainsAny(id, "/,") {
+		return ""
+	}
+	return id
 }
 
 // DiffRates returns per-model per-field deltas between old and updated rate

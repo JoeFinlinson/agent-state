@@ -92,6 +92,36 @@ func TestPricingRefreshDryRun(t *testing.T) {
 	}
 }
 
+func TestPricingRefreshDryRunBypassesSanity(t *testing.T) {
+	cfg, tablePath := pricingTestSetup(t)
+	original, _ := os.ReadFile(tablePath)
+
+	// 60% increase exceeds the sanity bound — dry-run must still exit 0 without
+	// filing a GitHub issue or modifying the table.
+	exploded := pricing.KnownRates()
+	for k, r := range exploded {
+		r.Input = r.Input * 1.60
+		exploded[k] = r
+	}
+
+	code := PricingRefresh(cfg, PricingRefreshOpts{
+		DryRun:    true,
+		SanityPct: 50,
+		TablePath: tablePath,
+		AsDir:     filepath.Dir(tablePath),
+		Fetcher:   pricingTestFetcher(exploded),
+		// No RunCmd — if the sanity path were hit it would call gh issue create
+		// via exec.Command, which would fail loudly. RunCmd is intentionally nil.
+	})
+	if code != 0 {
+		t.Errorf("dry run must exit 0 regardless of sanity bound, got %d", code)
+	}
+	after, _ := os.ReadFile(tablePath)
+	if string(after) != string(original) {
+		t.Error("dry run must not modify table.go")
+	}
+}
+
 func TestPricingRefreshSanityBlock(t *testing.T) {
 	cfg, tablePath := pricingTestSetup(t)
 
