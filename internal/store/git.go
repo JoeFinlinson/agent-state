@@ -687,7 +687,12 @@ func (s *Store) GitSync(message string, newPaths ...string) error {
 	// may have staged OTHER items' files alongside this call's intended changes.
 	// When detected, replace the caller's single-item message with a bundle
 	// message listing all staged files so git history stays accurate.
-	message = synthesizeBundleMessage(message, cached)
+	//
+	// Pass `root` so the function can normalize git-toplevel-relative paths
+	// (e.g. "agent-state/tasks/I-123.md") to ItemDir-relative paths
+	// ("tasks/I-123.md") before classifying them — required for nested-layout
+	// workspaces where ItemDir is a subdirectory of the git repository root.
+	message = synthesizeBundleMessage(root, message, cached)
 
 	// I-1313: commit the staged agent-state onto refs/heads/main via
 	// plumbing, NEVER `git commit` onto HEAD. When a code feature branch is
@@ -1436,14 +1441,19 @@ func gitOutputStdin(dir, stdin string, args ...string) (string, error) {
 // Cross-attribution occurs when parallel `st update` processes each write to
 // the working tree before acquiring the git lock, causing `git add -u` to
 // stage multiple items' changes together. The resulting commit message must
-// name all staged files — not just the one the caller intended to write —
+// name all staged items — not just the one the caller intended to write —
 // so git history stays auditable.
+//
+// root is passed so the function can strip the git-toplevel-relative prefix
+// (e.g. "agent-state/") that git diff --name-only always emits, normalizing
+// paths to ItemDir-relative form before classification. This is required in
+// nested-layout workspaces where ItemDir is a subdirectory of the git root.
 //
 // Detection heuristic: for "st update: <id>.*" messages, any item file in
 // tasks/, issues/, or archive/ whose base name doesn't match <id> is
 // unexpected. Auto-stage subdirs (.plans/, .changelog/, .as/, .locks/) are
 // always expected and never count as cross-attribution.
-func synthesizeBundleMessage(message, cached string) string {
+func synthesizeBundleMessage(root, message, cached string) string {
 	// Only inspect single-item "st update: <id>.*" messages.
 	if !strings.HasPrefix(message, "st update: ") {
 		return message
@@ -1454,27 +1464,54 @@ func synthesizeBundleMessage(message, cached string) string {
 		expectedID = suffix[:dot]
 	}
 
+	// Strip the git-root prefix so all path comparisons use bare names like
+	// "tasks/I-123.md" regardless of nested-layout depth. In flat layout
+	// (ItemDir == git root) the prefix is "." and no stripping is needed.
+	prefix := ""
+	if top, err := gitOutput(root, "rev-parse", "--show-toplevel"); err == nil {
+		top = strings.TrimSpace(top)
+		if rel, err := filepath.Rel(top, root); err == nil && rel != "." && rel != "" {
+			prefix = rel + "/"
+		}
+	}
+
+	stripPrefix := func(p string) string {
+		if prefix != "" {
+			return strings.TrimPrefix(p, prefix)
+		}
+		return p
+	}
+
+	// isAutoStageDir returns true for directories that are always expected
+	// alongside any single-item update (plan files, changelogs, sessions, locks).
+	isAutoStageDir := func(dir string) bool {
+		for _, known := range []string{".plans", ".changelog", ".as", ".locks"} {
+			if dir == known || strings.HasPrefix(dir, known+"/") {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Single pass: collect unexpected item files and all item IDs for the message.
 	var unexpected []string
+	var itemIDs []string
 	for _, line := range strings.Split(strings.TrimSpace(cached), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
-		// These auto-stage subdirs are always expected regardless of caller.
-		dir := filepath.Dir(line)
-		switch dir {
-		case ".plans", ".changelog", ".as", ".locks":
+		rel := stripPrefix(line)
+		dir := filepath.Dir(rel)
+		if isAutoStageDir(dir) {
 			continue
 		}
-		if strings.HasPrefix(dir, ".plans/") || strings.HasPrefix(dir, ".changelog/") ||
-			strings.HasPrefix(dir, ".as/") || strings.HasPrefix(dir, ".locks/") {
-			continue
-		}
-		// Item files live in tasks/, issues/, archive/.
 		switch dir {
 		case "tasks", "issues", "archive":
-			if !matchesItemID(filepath.Base(line), expectedID) {
-				unexpected = append(unexpected, line)
+			id := strings.TrimSuffix(filepath.Base(rel), ".md")
+			itemIDs = append(itemIDs, id)
+			if !matchesItemID(filepath.Base(rel), expectedID) {
+				unexpected = append(unexpected, rel)
 			}
 		}
 	}
@@ -1483,19 +1520,13 @@ func synthesizeBundleMessage(message, cached string) string {
 		return message
 	}
 
-	// Cross-attribution detected: the staged set includes files not written
-	// by this call. Warn and build a bundle message naming everything staged.
+	// Cross-attribution detected: the staged set includes item files not written
+	// by this call. Warn and build a bundle message listing all staged item IDs.
 	fmt.Fprintf(os.Stderr,
 		"[st sync] WARNING: cross-attribution detected — %d unexpected item file(s) staged alongside %q: %s; synthesizing bundle commit message\n",
 		len(unexpected), message, strings.Join(unexpected, ", "))
 
-	var bases []string
-	for _, line := range strings.Split(strings.TrimSpace(cached), "\n") {
-		if line = strings.TrimSpace(line); line != "" {
-			bases = append(bases, filepath.Base(line))
-		}
-	}
-	return "st sync batch: " + strings.Join(bases, ", ")
+	return "st sync batch: " + strings.Join(itemIDs, ", ")
 }
 
 // matchesItemID reports whether the file base name (e.g. "T-123-foo-bar.md")

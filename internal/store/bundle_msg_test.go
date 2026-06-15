@@ -36,7 +36,7 @@ func TestMatchesItemID(t *testing.T) {
 func TestSynthesizeBundleMessage_NoChange(t *testing.T) {
 	// Only the expected item file is staged → message unchanged.
 	cached := "tasks/T-100-alpha.md"
-	msg := synthesizeBundleMessage("st update: T-100.sbar.situation", cached)
+	msg := synthesizeBundleMessage(t.TempDir(), "st update: T-100.sbar.situation", cached)
 	if msg != "st update: T-100.sbar.situation" {
 		t.Errorf("expected unchanged message, got %q", msg)
 	}
@@ -45,13 +45,13 @@ func TestSynthesizeBundleMessage_NoChange(t *testing.T) {
 func TestSynthesizeBundleMessage_ExtraItems(t *testing.T) {
 	// Two unexpected item files staged alongside the expected one.
 	cached := "tasks/T-100-alpha.md\nissues/I-200-beta.md\ntasks/T-300-gamma.md"
-	msg := synthesizeBundleMessage("st update: T-100.sbar.situation", cached)
+	msg := synthesizeBundleMessage(t.TempDir(), "st update: T-100.sbar.situation", cached)
 
 	if !strings.HasPrefix(msg, "st sync batch: ") {
 		t.Errorf("expected bundle message prefix, got %q", msg)
 	}
-	// All three files must appear in the bundle message.
-	for _, want := range []string{"T-100-alpha.md", "I-200-beta.md", "T-300-gamma.md"} {
+	// All three item IDs must appear in the bundle message (bare IDs, no .md).
+	for _, want := range []string{"T-100-alpha", "I-200-beta", "T-300-gamma"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("bundle message missing %q: %q", want, msg)
 		}
@@ -61,7 +61,7 @@ func TestSynthesizeBundleMessage_ExtraItems(t *testing.T) {
 func TestSynthesizeBundleMessage_OnlyAutoStage(t *testing.T) {
 	// Only auto-stage subdirs alongside the expected item — no cross-attribution.
 	cached := "tasks/T-100-alpha.md\n.plans/I-594.md\n.changelog/2026-06-14.md"
-	msg := synthesizeBundleMessage("st update: T-100.sbar.situation", cached)
+	msg := synthesizeBundleMessage(t.TempDir(), "st update: T-100.sbar.situation", cached)
 	if msg != "st update: T-100.sbar.situation" {
 		t.Errorf("auto-stage dirs should not trigger bundle, got %q", msg)
 	}
@@ -70,7 +70,7 @@ func TestSynthesizeBundleMessage_OnlyAutoStage(t *testing.T) {
 func TestSynthesizeBundleMessage_NonUpdateMessage(t *testing.T) {
 	// Non "st update:" message — function is a no-op.
 	cached := "tasks/T-100-alpha.md\ntasks/T-200-beta.md"
-	msg := synthesizeBundleMessage("st sync", cached)
+	msg := synthesizeBundleMessage(t.TempDir(), "st sync", cached)
 	if msg != "st sync" {
 		t.Errorf("non-update message should pass through unchanged, got %q", msg)
 	}
@@ -79,7 +79,7 @@ func TestSynthesizeBundleMessage_NonUpdateMessage(t *testing.T) {
 func TestSynthesizeBundleMessage_SingleItemMultipleAutoStage(t *testing.T) {
 	// Multiple .plans files staged with one item update — still fine.
 	cached := "issues/I-594-foo.md\n.plans/I-594.md\n.as/sessions/abc.yaml"
-	msg := synthesizeBundleMessage("st update: I-594.sbar.assessment", cached)
+	msg := synthesizeBundleMessage(t.TempDir(), "st update: I-594.sbar.assessment", cached)
 	if msg != "st update: I-594.sbar.assessment" {
 		t.Errorf("auto-stage dirs should not trigger bundle, got %q", msg)
 	}
