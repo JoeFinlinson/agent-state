@@ -148,8 +148,8 @@ func TestDiffRates_NewModel(t *testing.T) {
 
 func TestSanityCheck_Within(t *testing.T) {
 	diffs := []RateDiff{
-		{PctChange: 30},
-		{PctChange: -20},
+		{Old: 5, New: 6.5, PctChange: 30},
+		{Old: 5, New: 4, PctChange: -20},
 	}
 	if !SanityCheck(diffs, 50) {
 		t.Error("expected sanity check to pass for changes ≤50%")
@@ -158,8 +158,8 @@ func TestSanityCheck_Within(t *testing.T) {
 
 func TestSanityCheck_Over(t *testing.T) {
 	diffs := []RateDiff{
-		{PctChange: 30},
-		{PctChange: 60}, // exceeds 50%
+		{Old: 5, New: 6.5, PctChange: 30},
+		{Old: 5, New: 8, PctChange: 60}, // exceeds 50%
 	}
 	if SanityCheck(diffs, 50) {
 		t.Error("expected sanity check to fail for change >50%")
@@ -169,6 +169,27 @@ func TestSanityCheck_Over(t *testing.T) {
 func TestSanityCheck_Empty(t *testing.T) {
 	if !SanityCheck(nil, 50) {
 		t.Error("empty diffs should always pass sanity check")
+	}
+}
+
+func TestSanityCheck_NewModelAlwaysAllowed(t *testing.T) {
+	// New model: Old==0, PctChange==100; must never block regardless of maxPct.
+	diffs := []RateDiff{
+		{Old: 0, New: 5, PctChange: 100},
+		{Old: 0, New: 25, PctChange: 100},
+	}
+	if !SanityCheck(diffs, 50) {
+		t.Error("new model additions (Old==0) must always pass SanityCheck")
+	}
+}
+
+func TestSanityCheck_ZeroPctDisables(t *testing.T) {
+	// maxPct <= 0 means no limit — everything passes.
+	diffs := []RateDiff{
+		{Old: 5, New: 500, PctChange: 9900},
+	}
+	if !SanityCheck(diffs, 0) {
+		t.Error("SanityCheck with maxPct=0 should always pass (no limit)")
 	}
 }
 

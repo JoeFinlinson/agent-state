@@ -119,13 +119,7 @@ func KnownModels() []string {
 	for k := range table {
 		out = append(out, k)
 	}
-	// Simple sort without pulling in sort package — table is small and order
-	// matters mainly for deterministic test output.
-	for i := 1; i < len(out); i++ {
-		for j := i; j > 0 && out[j] < out[j-1]; j-- {
-			out[j], out[j-1] = out[j-1], out[j]
-		}
-	}
+	sort.Strings(out)
 	return out
 }
 

@@ -14,8 +14,11 @@ import (
 
 // PricingRefreshOpts controls st pricing refresh behaviour.
 type PricingRefreshOpts struct {
-	DryRun    bool
-	SanityPct float64 // max allowed per-field % change; default 50
+	// DryRun prints the diff without writing any files.
+	DryRun bool
+	// SanityPct is the max allowed per-field % change for existing models.
+	// 0 or negative disables the sanity check (any change is accepted).
+	SanityPct float64
 
 	// TablePath overrides the default resolved path to table.go (for tests).
 	TablePath string
@@ -31,10 +34,6 @@ type PricingRefreshOpts struct {
 // diffs against the hardcoded table, and auto-commits updates within the
 // sanity bound. Returns a shell exit code (0 = success, 1 = error/blocked).
 func PricingRefresh(cfg *config.Config, opts PricingRefreshOpts) int {
-	if opts.SanityPct == 0 {
-		opts.SanityPct = 50.0
-	}
-
 	// Resolve paths
 	asDir := opts.AsDir
 	if asDir == "" {
@@ -61,9 +60,10 @@ func PricingRefresh(cfg *config.Config, opts PricingRefreshOpts) int {
 		return 1
 	}
 
-	// Diff against hardcoded table
+	// Diff against the hardcoded table and show to the operator
 	diffs := pricing.DiffRates(pricing.KnownRates(), fetched)
-	fmt.Print(pricing.FormatDiff(diffs))
+	diffText := pricing.FormatDiff(diffs)
+	fmt.Print(diffText)
 	if len(diffs) == 0 {
 		return 0
 	}
@@ -74,10 +74,11 @@ func PricingRefresh(cfg *config.Config, opts PricingRefreshOpts) int {
 		runner = runExec
 	}
 
-	// Sanity check — block if any field changed >SanityPct%
+	// Sanity check — block if any existing-model field changed beyond SanityPct.
+	// New-model additions (Old==0) are always allowed; see SanityCheck docs.
 	if !pricing.SanityCheck(diffs, opts.SanityPct) {
 		fmt.Fprintf(os.Stderr, "pricing refresh: rate change exceeds %.0f%% sanity bound — filing issue for manual review\n", opts.SanityPct)
-		_ = createSanityIssue(pricing.FormatDiff(diffs), runner)
+		_ = createSanityIssue(diffText, opts.SanityPct, runner)
 		return 1
 	}
 
@@ -93,21 +94,19 @@ func PricingRefresh(cfg *config.Config, opts PricingRefreshOpts) int {
 		return 1
 	}
 
-	// Verify the generated file compiles
+	// Verify the generated file compiles; restore on failure.
 	if err := runner(asDir, "go", "build", "./..."); err != nil {
 		fmt.Fprintf(os.Stderr, "pricing refresh: go build failed after table update: %v — restoring original\n", err)
-		// Best-effort restore; ignore error
-		_ = exec.Command("git", "-C", asDir, "checkout", "--", tablePath).Run()
+		if restErr := runner(asDir, "git", "checkout", "--", tablePath); restErr != nil {
+			fmt.Fprintf(os.Stderr, "pricing refresh: restore failed: %v — table.go may be inconsistent\n", restErr)
+		}
 		return 1
 	}
 
-	// Commit and push
-	if err := runner(asDir, "git", "add", tablePath); err != nil {
-		fmt.Fprintf(os.Stderr, "pricing refresh: git add: %v\n", err)
-		return 1
-	}
+	// Commit table.go only (using positional path to avoid sweeping pre-staged changes)
+	// and push.
 	commitMsg := "chore: update pricing table via st pricing refresh"
-	if err := runner(asDir, "git", "commit", "-m", commitMsg); err != nil {
+	if err := runner(asDir, "git", "commit", tablePath, "-m", commitMsg); err != nil {
 		fmt.Fprintf(os.Stderr, "pricing refresh: git commit: %v\n", err)
 		return 1
 	}
@@ -136,11 +135,15 @@ func runExec(dir string, args ...string) error {
 }
 
 // createSanityIssue files a GitHub issue in JoeFinlinson/agent-state with the
-// diff body using the provided runner. Failures are non-fatal — the command
-// still returns 1. Pass runExec as runner in production.
-func createSanityIssue(diffBody string, runner func(dir string, args ...string) error) error {
-	title := "Pricing sanity: >50% rate change detected — manual review required"
-	body := "Automated `st pricing refresh` detected a rate change exceeding the 50% sanity bound.\n\n```\n" + strings.TrimSpace(diffBody) + "\n```\n\nVerify against https://docs.anthropic.com/en/docs/about-claude/pricing and update table.go manually."
+// diff body using the provided runner. The sanityPct is included in the title
+// and body so the issue accurately reflects the configured threshold.
+// Failures are non-fatal — the command still returns 1.
+func createSanityIssue(diffText string, sanityPct float64, runner func(dir string, args ...string) error) error {
+	title := fmt.Sprintf("Pricing sanity: >%.0f%% rate change detected — manual review required", sanityPct)
+	body := fmt.Sprintf(
+		"Automated `st pricing refresh` detected a rate change exceeding the %.0f%% sanity bound.\n\n```\n%s\n```\n\nVerify against https://docs.anthropic.com/en/docs/about-claude/pricing and update table.go manually.",
+		sanityPct, strings.TrimSpace(diffText),
+	)
 	return runner("", "gh", "issue", "create",
 		"--repo", "JoeFinlinson/agent-state",
 		"--title", title,
