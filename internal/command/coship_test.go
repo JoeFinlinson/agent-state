@@ -59,6 +59,42 @@ func TestCoShip_ActiveRefPrintsStackTop(t *testing.T) {
 	}
 }
 
+// --active-ref scans below the stack top, so a co-ship flag keeps working when
+// an unrelated blocker is pushed on top of the co-shipped item.
+func TestCoShip_ActiveRefScansBelowTop(t *testing.T) {
+	s, cfg := setupTestEnv(t)
+	if code := captureRC(t, func() int {
+		return CoShip(s, cfg, []string{"T-002"}, CoShipOpts{APIRef: "fix/contract"})
+	}); code != 0 {
+		t.Fatalf("coship set returned %d", code)
+	}
+	// T-002 flagged and pushed, then an unrelated blocker T-001 pushed on top.
+	if code := StackPush(s, cfg, "T-002", StackPushOpts{}); code != 0 {
+		t.Fatalf("push T-002 returned %d", code)
+	}
+	if code := StackPush(s, cfg, "T-001", StackPushOpts{Reason: "blocks T-002"}); code != 0 {
+		t.Fatalf("push T-001 returned %d", code)
+	}
+	out := captureStdout(t, func() {
+		if code := CoShip(s, cfg, nil, CoShipOpts{ActiveRef: true}); code != 0 {
+			t.Fatalf("--active-ref returned %d, want 0", code)
+		}
+	})
+	if strings.TrimSpace(out) != "fix/contract" {
+		t.Errorf("--active-ref output = %q, want \"fix/contract\" (should scan below the blocker)", out)
+	}
+}
+
+// Conflicting flags are rejected rather than silently resolved by check order.
+func TestCoShip_ConflictingFlags(t *testing.T) {
+	s, cfg := setupTestEnv(t)
+	if code := captureRC(t, func() int {
+		return CoShip(s, cfg, []string{"T-001"}, CoShipOpts{Off: true, APIRef: "fix/x"})
+	}); code != 2 {
+		t.Errorf("coship --off --api-ref returned %d, want 2", code)
+	}
+}
+
 // --active-ref prints nothing (and exits 0) when the stack top has no co-ship
 // ref, and when the stack is empty.
 func TestCoShip_ActiveRefEmptyWhenInactive(t *testing.T) {

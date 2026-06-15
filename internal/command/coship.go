@@ -39,6 +39,23 @@ type CoShipOpts struct {
 //	st coship <ID> --api-ref <ref>  -> flag an existing item with the paired ref
 //	st coship --off <ID>            -> clear the flag
 func CoShip(s *store.Store, cfg *config.Config, args []string, opts CoShipOpts) int {
+	// Reject conflicting flags rather than silently resolving by check order
+	// (e.g. `--off --api-ref foo` must not quietly clear and ignore the ref).
+	set := 0
+	if opts.Off {
+		set++
+	}
+	if opts.APIRef != "" {
+		set++
+	}
+	if opts.ActiveRef {
+		set++
+	}
+	if set > 1 {
+		fmt.Fprintln(os.Stderr, "coship: --off, --api-ref, and --active-ref are mutually exclusive")
+		return 2
+	}
+
 	// Machine accessor for check-openapi-sync.sh: print only the active item's
 	// ref (or nothing) and always exit 0 so a `$(...)` capture stays clean.
 	if opts.ActiveRef {
@@ -75,17 +92,19 @@ func CoShip(s *store.Store, cfg *config.Config, args []string, opts CoShipOpts) 
 	return 2
 }
 
-// coshipActiveRef prints the coship ref of the stack-top (active) item, or
-// nothing if there is none. Always exits 0 — the web check captures stdout and
-// must not be broken by a non-zero status when co-ship is simply inactive.
+// coshipActiveRef prints the coship ref of the active item, or nothing if none
+// is in co-ship mode. It scans the stack top-down so the flag keeps working
+// even when an unrelated blocker is pushed on top of the co-shipped item (a
+// realistic interruption in this workflow); the topmost flagged item wins.
+// Always exits 0 — the web check captures stdout and must not be broken by a
+// non-zero status when co-ship is simply inactive.
 func coshipActiveRef(s *store.Store, cfg *config.Config) int {
 	entries := LoadStack(cfg)
-	if len(entries) == 0 {
-		return 0
-	}
-	top := entries[len(entries)-1]
-	if item, ok := s.Get(top.ID); ok && item.CoShipAPIRef != "" {
-		fmt.Println(item.CoShipAPIRef)
+	for i := len(entries) - 1; i >= 0; i-- {
+		if item, ok := s.Get(entries[i].ID); ok && item.CoShipAPIRef != "" {
+			fmt.Println(item.CoShipAPIRef)
+			return 0
+		}
 	}
 	return 0
 }
