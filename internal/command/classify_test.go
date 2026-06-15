@@ -242,3 +242,37 @@ func TestClassifyConfigDenyList(t *testing.T) {
 		t.Errorf("classification.classified_by = %q; want deny-list", classifiedBy)
 	}
 }
+
+// TestClassifyConfigDenyList_BasenameGlobs verifies that project-specific
+// basename-glob patterns from config.ClassifyConfig are merged into the
+// deny list and force a hard-red verdict without calling the model.
+func TestClassifyConfigDenyList_BasenameGlobs(t *testing.T) {
+	s, cfg := setupTestEnv(t)
+
+	cfg.Classify = &config.ClassifyConfig{
+		DenyBasenameGlobs: []string{"private_*.json"},
+	}
+
+	stub := &stubClassifyModel{res: classify.Result{
+		Verdict: classify.VerdictGreen,
+		Reason:  "stub: model should not be reached",
+	}}
+
+	rc := Classify(s, cfg, "T-001", ClassifyOpts{
+		Files: []string{"config/private_keys.json"},
+		Model: stub,
+	})
+	if rc != 0 {
+		t.Fatalf("Classify rc = %d; want 0", rc)
+	}
+
+	item, _ := s.Get("T-001")
+	verdict, _ := item.Doc.GetNestedField("classification.verdict")
+	if verdict != string(classify.VerdictRed) {
+		t.Errorf("classification.verdict = %q; want red (basename-glob deny-list must force red)", verdict)
+	}
+	classifiedBy, _ := item.Doc.GetNestedField("classification.classified_by")
+	if classifiedBy != "deny-list" {
+		t.Errorf("classification.classified_by = %q; want deny-list", classifiedBy)
+	}
+}

@@ -75,10 +75,10 @@ func Classify(s *store.Store, cfg *config.Config, id string, opts ClassifyOpts) 
 	denyList := append([]classify.DenyPattern(nil), classify.HardRedPatterns...)
 	if cfg.Classify != nil {
 		for _, p := range cfg.Classify.DenyPathPrefixes {
-			denyList = append(denyList, classify.DenyPattern{PathPrefix: p, Reason: "project deny-list"})
+			denyList = append(denyList, classify.DenyPattern{PathPrefix: p, Reason: "project path-prefix deny-list"})
 		}
 		for _, g := range cfg.Classify.DenyBasenameGlobs {
-			denyList = append(denyList, classify.DenyPattern{BasenameGlob: g, Reason: "project deny-list"})
+			denyList = append(denyList, classify.DenyPattern{BasenameGlob: g, Reason: "project basename-glob deny-list"})
 		}
 	}
 

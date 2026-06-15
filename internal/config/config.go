@@ -1632,9 +1632,7 @@ func applyInlineList(cfg *Config, levels [4]string, key string, items []string) 
 			}
 		}
 	case "classify":
-		if cfg.Classify == nil {
-			cfg.Classify = &ClassifyConfig{}
-		}
+		ensureClassify(cfg)
 		switch key {
 		case "deny_path_prefixes":
 			cfg.Classify.DenyPathPrefixes = append(cfg.Classify.DenyPathPrefixes, items...)
@@ -1690,15 +1688,19 @@ func applyInlineList(cfg *Config, levels [4]string, key string, items []string) 
 func applyListItem(cfg *Config, levels [4]string, val string) {
 	switch levels[0] {
 	case "classify":
-		if cfg.Classify == nil {
-			cfg.Classify = &ClassifyConfig{}
-		}
+		ensureClassify(cfg)
 		switch levels[1] {
 		case "deny_path_prefixes":
 			cfg.Classify.DenyPathPrefixes = append(cfg.Classify.DenyPathPrefixes, val)
 		case "deny_basename_globs":
 			cfg.Classify.DenyBasenameGlobs = append(cfg.Classify.DenyBasenameGlobs, val)
 		}
+	}
+}
+
+func ensureClassify(cfg *Config) {
+	if cfg.Classify == nil {
+		cfg.Classify = &ClassifyConfig{}
 	}
 }
 
