@@ -1,8 +1,13 @@
 package store
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/jfinlinson/agent-state/internal/config"
 )
 
 func TestMatchesItemID(t *testing.T) {
@@ -77,5 +82,62 @@ func TestSynthesizeBundleMessage_SingleItemMultipleAutoStage(t *testing.T) {
 	msg := synthesizeBundleMessage("st update: I-594.sbar.assessment", cached)
 	if msg != "st update: I-594.sbar.assessment" {
 		t.Errorf("auto-stage dirs should not trigger bundle, got %q", msg)
+	}
+}
+
+// TestGitSync_CrossAttributionBundlesMessage is the integration-level guard for
+// I-594: when parallel agents each write their item file before the git lock is
+// acquired, `git add -u` stages both. GitSync must synthesize a bundle commit
+// message that names all staged files instead of mis-attributing the commit to
+// only the calling agent's item.
+func TestGitSync_CrossAttributionBundlesMessage(t *testing.T) {
+	root, _ := setupTestDir(t)
+	asDir := filepath.Join(root, ".as")
+	os.MkdirAll(asDir, 0755)
+	os.WriteFile(filepath.Join(asDir, "config.yaml"), []byte("paths:\n  root: .\n"), 0644)
+	initGitRepo(t, root)
+
+	gitT := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return string(out)
+	}
+
+	// commitStagedOntoMain advances refs/heads/main; ensure the branch is main.
+	gitT("branch", "-M", "main")
+
+	cfg, _ := config.Load(root)
+	cfg.Git = &config.GitConfig{AutoCommit: true, AutoPush: false}
+	s, _ := New(cfg)
+
+	// Simulate parallel agents: both T-001 and T-002 are modified in the
+	// working tree before the lock is acquired. git add -u will stage both.
+	item1, _ := s.Get("T-001")
+	item1.Doc.SetField("status", "active")
+	s.write(item1)
+
+	item2, _ := s.Get("T-002")
+	item2.Doc.SetField("status", "queued")
+	s.write(item2)
+
+	// GitSync is called with a message that only names T-001.
+	if err := s.GitSync("st update: T-001.sbar.situation"); err != nil {
+		t.Fatalf("GitSync: %v", err)
+	}
+
+	msg := gitT("log", "-1", "--format=%B")
+	if !strings.HasPrefix(msg, "st sync batch: ") {
+		t.Errorf("expected bundle commit message starting with 'st sync batch: ', got %q", msg)
+	}
+	if !strings.Contains(msg, "T-001") {
+		t.Errorf("bundle message should mention T-001, got %q", msg)
+	}
+	if !strings.Contains(msg, "T-002") {
+		t.Errorf("bundle message should mention T-002, got %q", msg)
 	}
 }
