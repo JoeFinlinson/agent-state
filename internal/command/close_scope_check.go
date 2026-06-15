@@ -2,9 +2,6 @@ package command
 
 import (
 	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -17,10 +14,10 @@ import (
 type CloseScopeCheckOpts struct {
 	// ResolveWorktree returns the worktree path for (itemID, repo).
 	// Returning "" signals "worktree not found" — that repo is skipped.
-	// Nil: uses the default I-407 lookup (agent-root/worktrees/<id>/<repo>).
+	// Nil: uses resolveRepoDirForItem (I-407 lookup with RepoMap support).
 	ResolveWorktree func(cfg *config.Config, itemID, repo string) string
-	// RunGit runs git in dir with args and returns trimmed stdout.
-	// Nil: uses a real git exec.
+	// RunGit runs git in dir with args and returns stdout.
+	// Nil: uses the package-level runGit from gitdiff.go.
 	RunGit func(dir string, args ...string) (string, error)
 	// Skip bypasses the entire check (--skip-tier2-revalidation flag).
 	Skip bool
@@ -47,14 +44,17 @@ func closeScopeSuiteCheck(item *model.Item, cfg *config.Config, opts CloseScopeC
 
 	resolveWt := opts.ResolveWorktree
 	if resolveWt == nil {
-		resolveWt = defaultResolveWorktree
+		resolveWt = resolveRepoDirForItem
 	}
-	runGit := opts.RunGit
-	if runGit == nil {
-		runGit = defaultScopeRunGit
+	gitRunner := opts.RunGit
+	if gitRunner == nil {
+		gitRunner = runGit
 	}
 
 	// Collect which repos have changes and all changed file paths.
+	// changedFiles is a combined list across repos; Triggers patterns are
+	// matched against all files since they express file-path intent without
+	// an implicit repo restriction.
 	reposWithChanges := map[string]bool{}
 	var changedFiles []string
 
@@ -63,16 +63,20 @@ func closeScopeSuiteCheck(item *model.Item, cfg *config.Config, opts CloseScopeC
 		if wt == "" {
 			continue
 		}
-		out, err := runGit(wt, "diff", "--name-only", "origin/main...HEAD")
+		out, err := gitRunner(wt, "diff", "--name-only", "origin/main...HEAD")
 		if err != nil {
-			continue // git unavailable or no remote — skip this repo
+			continue // git unavailable or no remote — skip this repo conservatively
 		}
+		repoHasChanges := false
 		for _, f := range strings.Split(out, "\n") {
 			if f == "" {
 				continue
 			}
-			reposWithChanges[repo] = true
+			repoHasChanges = true
 			changedFiles = append(changedFiles, f)
+		}
+		if repoHasChanges {
+			reposWithChanges[repo] = true
 		}
 	}
 
@@ -88,7 +92,7 @@ func closeScopeSuiteCheck(item *model.Item, cfg *config.Config, opts CloseScopeC
 		}
 		val := scopeEvidence(item, name)
 		if strings.HasPrefix(val, "pass") ||
-			strings.HasPrefix(val, "skip") ||
+			strings.HasPrefix(val, "skip:") ||
 			strings.HasPrefix(val, "auto-skip") {
 			continue
 		}
@@ -115,9 +119,11 @@ func scopeSuiteApplicable(sc config.ScopeSuiteConfig, reposWithChanges map[strin
 		return true
 	}
 	// triggers: glob patterns — applicable when any changed file matches.
+	// Uses autoGlobMatch (shared with test_auto.go) for consistent ** semantics,
+	// including correct handling of patterns like **/*.go.
 	for _, pattern := range sc.Triggers {
 		for _, f := range changedFiles {
-			if matchScopeGlob(pattern, f) {
+			if autoGlobMatch(pattern, f) {
 				return true
 			}
 		}
@@ -125,37 +131,8 @@ func scopeSuiteApplicable(sc config.ScopeSuiteConfig, reposWithChanges map[strin
 	return false
 }
 
-// matchScopeGlob matches a file path against a glob pattern, with support
-// for `**` (match any sequence of path components). For example:
-//
-//	"src/app/**"       matches "src/app/page.tsx", "src/app/deep/file.ts"
-//	"src/components/**" does NOT match "src/lib/utils.ts"
-//	"*.go"             uses filepath.Match semantics (no ** expansion)
-func matchScopeGlob(pattern, path string) bool {
-	idx := strings.Index(pattern, "**")
-	if idx < 0 {
-		// No **: use filepath.Match for standard glob semantics.
-		ok, _ := filepath.Match(pattern, path)
-		return ok
-	}
-	// Split on the first `**`: everything before it is a required prefix.
-	prefix := pattern[:idx]
-	if prefix != "" && !strings.HasPrefix(path, prefix) {
-		return false
-	}
-	// Everything after `**` (stripped of leading /) is an optional suffix.
-	suffix := strings.TrimPrefix(pattern[idx+2:], "/")
-	if suffix == "" {
-		// "prefix/**": any file under that directory.
-		return true
-	}
-	// "prefix/**/suffix": suffix must appear somewhere in the remaining path.
-	remaining := path[len(prefix):]
-	return strings.HasSuffix(remaining, suffix) || strings.Contains(remaining, "/"+suffix)
-}
-
 // scopeEvidence reads the testing evidence string for a suite from the item.
-// Mirrors the getTestingEvidence helper in gates.go.
+// Mirrors getTestingEvidence in internal/validate/gates.go (unexported there).
 func scopeEvidence(item *model.Item, suite string) string {
 	if item.TestingEvidence == nil {
 		return ""
@@ -164,35 +141,9 @@ func scopeEvidence(item *model.Item, suite string) string {
 	if !ok {
 		return ""
 	}
-	s, _ := v.(string)
+	s, ok := v.(string)
+	if !ok {
+		return ""
+	}
 	return s
-}
-
-// defaultResolveWorktree looks up the worktree path using the I-407 order:
-//  1. <agent-root>/worktrees/<id>/<repo>
-//  2. <workspace-root>/worktrees/<id>/<repo>  (legacy fallback)
-func defaultResolveWorktree(cfg *config.Config, itemID, repo string) string {
-	agentRoot := cfg.AgentRoot()
-	candidates := []string{
-		filepath.Join(agentRoot, "worktrees", itemID, repo),
-	}
-	// Legacy: workspace-root may differ from agent-root (pre-I-418 layout).
-	wsRoot := cfg.Root()
-	if wsRoot != agentRoot {
-		candidates = append(candidates, filepath.Join(wsRoot, "worktrees", itemID, repo))
-	}
-	for _, c := range candidates {
-		// Mirrors branchExistsAnywhere: .git file or dir is the existence check.
-		if _, err := os.Stat(filepath.Join(c, ".git")); err == nil {
-			return c
-		}
-	}
-	return ""
-}
-
-// defaultScopeRunGit runs git in dir and returns trimmed stdout.
-func defaultScopeRunGit(dir string, args ...string) (string, error) {
-	fullArgs := append([]string{"-C", dir}, args...) //nolint:gosec
-	out, err := exec.Command("git", fullArgs...).Output()
-	return strings.TrimSpace(string(out)), err
 }

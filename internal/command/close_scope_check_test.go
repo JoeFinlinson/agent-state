@@ -226,27 +226,40 @@ func TestCloseScopeSuiteCheck_BothSuitesMissing(t *testing.T) {
 	}
 }
 
-// ── matchScopeGlob unit tests ─────────────────────────────────────────────────
+// ── autoGlobMatch regression tests for scope-suite trigger patterns ──────────
+// matchScopeGlob was removed in favour of autoGlobMatch (test_auto.go).
+// These cases cover patterns relevant to scope suites, including the
+// previously-broken **/*.go form where the suffix contains a glob wildcard.
 
-func TestMatchScopeGlob(t *testing.T) {
+func TestScopeGlobViaAutoGlobMatch(t *testing.T) {
 	cases := []struct {
 		pattern string
 		path    string
 		want    bool
 	}{
+		// suffix-free prefix/** patterns (the common case in workspace config)
 		{"src/app/**", "src/app/page.tsx", true},
 		{"src/app/**", "src/app/deep/nested/file.ts", true},
 		{"src/app/**", "src/lib/utils.ts", false},
 		{"src/components/**", "src/components/Button.tsx", true},
 		{"src/components/**", "src/app/page.tsx", false},
+		{"src/app/**", "other/src/app/page.tsx", false},
+		// standard glob (no **) — filepath.Match semantics
 		{"*.go", "main.go", true},
 		{"*.go", "cmd/main.go", false},
-		{"src/app/**", "other/src/app/page.tsx", false},
+		// **/*.go — suffix contains a wildcard; was silently broken in the old
+		// matchScopeGlob (treated *.go as a literal string).
+		{"**/*.go", "internal/auth/rbac.go", true},
+		{"**/*.go", "cmd/as/app.go", true},
+		{"**/*.go", "internal/auth/rbac.ts", false},
+		// multi-segment suffix — should not false-positive on partial component match
+		{"src/**/components/Button.tsx", "src/components/Button.tsx", true},
+		{"src/**/components/Button.tsx", "src/app/more-components/Button.tsx", false},
 	}
 	for _, c := range cases {
-		got := matchScopeGlob(c.pattern, c.path)
+		got := autoGlobMatch(c.pattern, c.path)
 		if got != c.want {
-			t.Errorf("matchScopeGlob(%q, %q) = %v, want %v", c.pattern, c.path, got, c.want)
+			t.Errorf("autoGlobMatch(%q, %q) = %v, want %v", c.pattern, c.path, got, c.want)
 		}
 	}
 }
