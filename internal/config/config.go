@@ -188,29 +188,41 @@ func (t *TestingConfig) RequiredSuitesFor(scopeClass string) (map[string]SuiteCo
 	return class.RequiredSuites, true
 }
 
-// ScopeClassForGoalTags returns the first scope class name whose AppliesToGoals
-// list contains a slug matching a "goal:<slug>" tag in tags. Returns "" if none
-// match. I-830: used by create/start to auto-assign scope_class from goal tags.
-func (t *TestingConfig) ScopeClassForGoalTags(tags []string) string {
+// ScopeClassForItem returns the first scope class (by sorted class name, for
+// deterministic precedence) whose AppliesToGoals list matches the item. A class
+// target matches when it appears in the item's goal IDs (e.g. "G-014") OR is the
+// slug of a "goal:<slug>" tag. Returns "" if none match. I-830 introduced
+// goal-tag matching; I-987 added goal-ID membership (item.Goals) because items
+// reliably carry their goal IDs but inconsistently carry goal:<slug> tags,
+// leaving auto-assign dormant.
+//
+// Bare (non-"goal:"-prefixed) tags are deliberately NOT matched: applies_to_goals
+// entries are goal identifiers, not the free-form tag namespace, so a label tag
+// that merely happens to equal a goal slug must not silently swap an item's
+// required-suite set (I-987 review finding D1).
+func (t *TestingConfig) ScopeClassForItem(tags, goals []string) string {
 	if t == nil {
 		return ""
+	}
+	// Match set is goal IDs plus goal:-stripped tag slugs — never bare tags.
+	matchSet := make(map[string]bool, len(tags)+len(goals))
+	for _, g := range goals {
+		matchSet[g] = true
+	}
+	for _, tag := range tags {
+		if slug, ok := strings.CutPrefix(tag, "goal:"); ok {
+			matchSet[slug] = true
+		}
 	}
 	classNames := make([]string, 0, len(t.ScopeClasses))
 	for cn := range t.ScopeClasses {
 		classNames = append(classNames, cn)
 	}
 	sort.Strings(classNames)
-	for _, tag := range tags {
-		slug, ok := strings.CutPrefix(tag, "goal:")
-		if !ok {
-			continue
-		}
-		for _, className := range classNames {
-			class := t.ScopeClasses[className]
-			for _, g := range class.AppliesToGoals {
-				if g == slug {
-					return className
-				}
+	for _, className := range classNames {
+		for _, target := range t.ScopeClasses[className].AppliesToGoals {
+			if matchSet[target] {
+				return className
 			}
 		}
 	}
