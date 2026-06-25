@@ -73,6 +73,26 @@ type PrepOpts struct {
 	Review bool
 }
 
+// clearStaleReviewArtifacts removes review artifacts left by a prior --review
+// run when prep runs WITHOUT --review (I-933): it clears the prep_reviewed_at
+// stamp (so `st plan approve` doesn't skip review via the I-992 short-circuit)
+// and deletes the now-outdated .report.md sidecar (so `st plan show` and the
+// UAT artifact facet don't surface a review of a superseded plan). Best-effort
+// — warns on failure but never aborts prep.
+func clearStaleReviewArtifacts(cfg *config.Config, itemID string, p *plan.Plan) {
+	if p != nil && p.PrepReviewedAt != "" {
+		p.PrepReviewedAt = ""
+		if err := plan.Save(cfg.PlansDir(), itemID, p); err != nil {
+			fmt.Fprintf(os.Stderr, "[%s] Warning: failed to clear stale prep_reviewed_at: %v\n", itemID, err)
+		}
+	}
+	if plan.ReportExists(cfg.PlansDir(), itemID) {
+		if err := plan.DeleteReport(cfg.PlansDir(), itemID); err != nil {
+			fmt.Fprintf(os.Stderr, "[%s] Warning: failed to remove stale review report: %v\n", itemID, err)
+		}
+	}
+}
+
 // sbarLooksThin is a deterministic heuristic for the I-933 --review nudge: a
 // sparse SBAR (little Background/Assessment depth) is exactly the case where
 // an independent scope re-explore can still earn its cost. Returns a short
@@ -728,10 +748,19 @@ func prepItem(s *store.Store, cfg *config.Config, itemID string, item *model.Ite
 			// I-933: only stamp when the review sub-agent actually ran
 			// (--review); otherwise a later `st plan approve --review` would
 			// be wrongly skipped by the I-992 prep_reviewed_at short-circuit.
+			// When not reviewing, scrub any stale stamp/report carried by a
+			// resumed draft from a prior --review run.
 			p.Approved = true
 			p.ApprovedAt = plan.Now()
 			if opts.Review {
 				p.PrepReviewedAt = plan.Now()
+			} else {
+				p.PrepReviewedAt = ""
+				if plan.ReportExists(cfg.PlansDir(), itemID) {
+					if err := plan.DeleteReport(cfg.PlansDir(), itemID); err != nil {
+						fmt.Fprintf(os.Stderr, "[%s] Warning: failed to remove stale review report: %v\n", itemID, err)
+					}
+				}
 			}
 			if err := plan.Save(cfg.PlansDir(), itemID, p); err != nil {
 				fmt.Fprintf(os.Stderr, "saving plan: %v\n", err)
@@ -1014,12 +1043,20 @@ func prepItemWriteOnly(s *store.Store, cfg *config.Config, itemID string, item *
 		if err := plan.Save(cfg.PlansDir(), itemID, p); err != nil {
 			fmt.Fprintf(os.Stderr, "[%s] Warning: failed to stamp prep_reviewed_at: %v — approve will fall back to full review\n", itemID, err)
 		}
-	} else if thin, why := sbarLooksThin(item); thin {
-		// I-933: deterministic, non-blocking nudge — when scope is genuinely
-		// uncertain, an independent re-explore may still earn its cost.
-		fmt.Fprintf(os.Stderr,
-			"[%s] hint: SBAR looks thin (%s) — consider `st plan prep %s --review` (or `st plan approve %s --review`) for an independent scope check.\n",
-			itemID, why, itemID, itemID)
+	} else {
+		// I-933: no review this run — scrub any stale review artifacts from a
+		// PRIOR --review run on this draft. Otherwise (a) `st plan approve`'s
+		// I-992 short-circuit would skip review on a stale prep_reviewed_at
+		// stamp, and (b) `st plan show` / the UAT artifact facet would surface
+		// an outdated .report.md as if it reviewed the current plan.
+		clearStaleReviewArtifacts(cfg, itemID, p)
+		if thin, why := sbarLooksThin(item); thin {
+			// Deterministic, non-blocking nudge — when scope is genuinely
+			// uncertain, an independent re-explore may still earn its cost.
+			fmt.Fprintf(os.Stderr,
+				"[%s] hint: SBAR looks thin (%s) — consider `st plan prep %s --review` (or `st plan approve %s --review`) for an independent scope check.\n",
+				itemID, why, itemID, itemID)
+		}
 	}
 
 	// I-833: stamp plan_written_at BEFORE the final GitSync so the field is
