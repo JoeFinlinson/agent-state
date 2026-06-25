@@ -77,41 +77,32 @@ func ValidateACs(acs []string) []ACFinding {
 
 	// Pass 3: hollow / false-pass detection (I-933). A full-corpus audit of
 	// the plan-review sub-agent showed ~half its value was catching one
-	// recurring shape — an AC that exits 0 without actually exercising the
-	// behavior it claims to verify. These patterns are mechanizable, so they
-	// move from a 4-6min LLM re-explore into this <1s deterministic gate.
+	// recurring shape — an AC that exits 0 regardless of the real result, so
+	// it "passes" without exercising the behavior it claims to verify. That
+	// pattern is mechanizable, moving it from a 4-6min LLM re-explore into
+	// this <1s deterministic gate.
 	//
-	// The checks are deliberately HIGH-PRECISION (only unambiguous
-	// always-pass shapes are errors). The fuzzier semantic case — a
-	// `go test -run X` / `pytest -k X` filter that silently matches zero
-	// tests — is NOT flagged here because a static check cannot tell a typo
-	// from a legitimate filter without false-flagging good ACs; that judgment
-	// is left to the opt-in `--review` sub-agent. Keeping this gate correct
-	// (no new flaky friction) is the governing constraint (I-1478).
+	// Correctness is the governing constraint (I-1478): a false positive
+	// hard-blocks a valid plan with no override, which is worse than the
+	// latency this gate removes. So acExitAlwaysZero is shell-aware — it
+	// tokenizes quote-respectingly and evaluates the &&/||/;/| operator chain
+	// by real exit-code semantics, rather than regex-matching tokens that may
+	// live inside quoted arguments. The fuzzier semantic cases (a
+	// `go test -run X` filter that matches zero tests; a disabled test inside
+	// a spec file the AC text never shows) are deliberately NOT flagged — a
+	// static check cannot judge them without false-flagging good ACs; that is
+	// what the opt-in `--review` sub-agent is for.
 	for i, ac := range acs {
 		trimmed := strings.TrimSpace(ac)
 		if !strings.HasPrefix(strings.ToLower(trimmed), "cmd:") {
 			continue
 		}
 		cmd := strings.TrimSpace(trimmed[4:])
-		switch {
-		case isFailureMasked(cmd):
+		if acExitAlwaysZero(cmd) {
 			findings = append(findings, ACFinding{
 				Index:  i + 1,
 				AC:     trimmed,
-				Reason: "hollow AC — failure is masked by an always-succeeding fallback (`|| true`, `|| :`, `|| echo`, `; true`, `; exit 0`); the check passes regardless of the real result. Remove the fallback so a failure actually fails the AC",
-			})
-		case isNoOpVerification(cmd):
-			findings = append(findings, ACFinding{
-				Index:  i + 1,
-				AC:     trimmed,
-				Reason: "hollow AC — every command always exits 0 (true/:/echo/printf/pwd) so nothing is actually asserted. Replace with a check that fails when the behavior is wrong (run a test, grep with a non-zero-on-absence assertion, or compare output)",
-			})
-		case hasDisabledTestMarker(cmd):
-			findings = append(findings, ACFinding{
-				Index:  i + 1,
-				AC:     trimmed,
-				Reason: "hollow AC — invokes a disabled/skipped test (`xit(`, `it.skip`, `describe.skip`, `t.Skip(`, `@pytest.mark.skip`); a skipped test verifies nothing. Enable the test or point the AC at one that runs",
+				Reason: "hollow AC — this command exits 0 regardless of the real result (failure masked by a `|| <no-op>` / `; <no-op>` / `| <no-op>` terminal, or no command that can actually fail). Make the AC fail when the behavior is wrong (run a test, grep with non-zero-on-absence, or compare output)",
 			})
 		}
 	}
@@ -119,62 +110,153 @@ func ValidateACs(acs []string) []ACFinding {
 	return findings
 }
 
-// failureMaskPattern matches always-succeeding fallbacks that make a cmd:
-// AC pass regardless of the real result. `|| true|:|exit 0|echo` mask
-// failure wherever they appear (they are the error branch); `; true|:|exit 0`
-// mask only as the terminal command, so they are anchored to end-of-string.
-var failureMaskPattern = regexp.MustCompile(`(?i)\|\|\s*(?::|true\b|echo\b|exit\s+0\b)|;\s*(?::|true|exit\s+0)\s*$`)
-
-func isFailureMasked(cmd string) bool {
-	return failureMaskPattern.MatchString(cmd)
-}
-
-// disabledTestPattern matches references to a disabled/skipped test.
-var disabledTestPattern = regexp.MustCompile(`(?i)\bx(?:it|describe|test)\s*\(|\b(?:it|test|describe)\.skip\b|\.skip\s*\(|@pytest\.mark\.skip|\bt\.Skip\s*\(`)
-
-// testSearchTool matches commands that SEARCH for a pattern (rather than run
-// it) — an AC that greps for skip markers to PROVE their absence must not be
-// flagged as invoking one. Carve-out keeps hasDisabledTestMarker precise.
-var testSearchTool = regexp.MustCompile(`\b(?:grep|rg|ag|ripgrep|find|ack)\b`)
-
-func hasDisabledTestMarker(cmd string) bool {
-	if testSearchTool.MatchString(cmd) {
-		return false
-	}
-	return disabledTestPattern.MatchString(cmd)
-}
-
-// alwaysZeroExitHeads are command heads that always exit 0 (or are pure
-// shell builtins with no observable assertion). An AC whose every
-// pipeline/sequence segment begins with one of these asserts nothing.
+// alwaysZeroExitHeads are command heads whose exit status is 0 regardless of
+// the work an AC claims to verify — a segment headed by one of these (and
+// with no redirection that could itself fail) asserts nothing. `cd`/`export`
+// are intentionally absent: `cd missing` / `export` can legitimately fail and
+// be the real assertion (I-933 review false-positive fix).
 var alwaysZeroExitHeads = map[string]bool{
 	"true": true, ":": true, "echo": true, "printf": true,
-	"pwd": true, "cd": true, "export": true, "sleep": true,
+	"pwd": true, "sleep": true,
 }
 
-// segmentSplitter splits a shell command into segments on the operators that
-// separate distinct commands. If even one segment is a "real" command (its
-// head is not in alwaysZeroExitHeads), the AC can fail and is not hollow.
-var segmentSplitter = regexp.MustCompile(`&&|\|\||;|\|`)
-
-func isNoOpVerification(cmd string) bool {
-	segments := segmentSplitter.Split(cmd, -1)
-	sawSegment := false
-	for _, seg := range segments {
+// acExitAlwaysZero reports whether a cmd: AC always exits 0 — i.e. no shell
+// path through it can produce a non-zero status, so it can never fail.
+//
+// It splits the command into top-level segments (quote-aware) and walks the
+// joining operators by their real exit semantics:
+//
+//	A ; B   → exit B            (A's status discarded)
+//	A | B   → exit B            (no pipefail; A's status discarded)
+//	A && B  → exit A if A!=0 else B
+//	A || B  → 0 if A==0 else B  (B masks A's failure)
+//
+// An AC is hollow when, after the full chain, no segment that can fail
+// determines the result.
+func acExitAlwaysZero(cmd string) bool {
+	segs, ops := splitTopLevel(cmd)
+	sawCmd := false
+	nonzeroPossible := false
+	for i, seg := range segs {
 		seg = strings.TrimSpace(seg)
 		if seg == "" {
+			continue // empty / trailing-operator segment
+		}
+		canFail := !segmentAlwaysZero(seg)
+		if !sawCmd {
+			sawCmd = true
+			nonzeroPossible = canFail
 			continue
 		}
-		sawSegment = true
-		fields := strings.Fields(seg)
-		if len(fields) == 0 {
-			continue
-		}
-		if !alwaysZeroExitHeads[strings.ToLower(fields[0])] {
-			return false // a segment that can fail — not hollow
+		switch ops[i] {
+		case ";", "|":
+			nonzeroPossible = canFail // left status discarded
+		case "&&":
+			nonzeroPossible = nonzeroPossible || canFail
+		case "||":
+			nonzeroPossible = nonzeroPossible && canFail
+		default:
+			nonzeroPossible = canFail
 		}
 	}
-	return sawSegment
+	if !sawCmd {
+		return false
+	}
+	return !nonzeroPossible
+}
+
+// segmentAlwaysZero reports whether a single command segment's exit status is
+// always 0. True only when its head is in alwaysZeroExitHeads AND it carries
+// no unquoted redirection (`>`/`<` can fail on permission / missing dir, so a
+// redirecting segment can in fact fail).
+func segmentAlwaysZero(seg string) bool {
+	if hasUnquotedRedirect(seg) {
+		return false
+	}
+	fields := strings.Fields(seg)
+	if len(fields) == 0 {
+		return false
+	}
+	head := strings.ToLower(fields[0])
+	// `exit 0` always succeeds; `exit <n>` / bare `exit` (exits last status)
+	// can be non-zero, so they are real terminals.
+	if head == "exit" {
+		return len(fields) >= 2 && fields[1] == "0"
+	}
+	return alwaysZeroExitHeads[head]
+}
+
+// hasUnquotedRedirect reports whether seg contains a `<` or `>` outside of
+// single/double quotes (a real shell redirection, not literal text).
+func hasUnquotedRedirect(seg string) bool {
+	var quote rune
+	for _, r := range seg {
+		switch {
+		case quote != 0:
+			if r == quote {
+				quote = 0
+			}
+		case r == '\'' || r == '"':
+			quote = r
+		case r == '<' || r == '>':
+			return true
+		}
+	}
+	return false
+}
+
+// splitTopLevel splits a shell command into segments separated by the
+// top-level control operators `&&`, `||`, `;`, and `|`, ignoring any that
+// appear inside single or double quotes. ops[k] is the operator that precedes
+// segs[k] (ops[0] == ""). Escaped quotes and here-docs are not handled — good
+// enough for AC linting, where the goal is detecting always-zero-exit shapes.
+func splitTopLevel(cmd string) (segs []string, ops []string) {
+	var cur strings.Builder
+	op := ""
+	var quote rune
+	runes := []rune(cmd)
+	flush := func(next string) {
+		segs = append(segs, cur.String())
+		ops = append(ops, op)
+		cur.Reset()
+		op = next
+	}
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		if quote != 0 {
+			cur.WriteRune(r)
+			if r == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch r {
+		case '\'', '"':
+			quote = r
+			cur.WriteRune(r)
+		case '&':
+			if i+1 < len(runes) && runes[i+1] == '&' {
+				flush("&&")
+				i++
+			} else {
+				cur.WriteRune(r)
+			}
+		case '|':
+			if i+1 < len(runes) && runes[i+1] == '|' {
+				flush("||")
+				i++
+			} else {
+				flush("|")
+			}
+		case ';':
+			flush(";")
+		default:
+			cur.WriteRune(r)
+		}
+	}
+	segs = append(segs, cur.String())
+	ops = append(ops, op)
+	return segs, ops
 }
 
 // bareWorkspacePathPatterns are substrings whose presence in a cmd: AC

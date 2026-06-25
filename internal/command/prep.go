@@ -446,6 +446,17 @@ func prepItem(s *store.Store, cfg *config.Config, itemID string, item *model.Ite
 		cwd = cfg.Root()
 	}
 
+	// I-933: when not opting into the review sub-agent, nudge toward --review
+	// on genuinely thin SBARs (same heuristic as the write-only path). Printed
+	// once, before the decision loop; non-blocking.
+	if !opts.Review {
+		if thin, why := sbarLooksThin(item); thin {
+			fmt.Fprintf(os.Stderr,
+				"[%s] hint: SBAR looks thin (%s) — consider `st plan prep %s --review` for an independent scope check.\n",
+				itemID, why, itemID)
+		}
+	}
+
 	// Check for an existing draft plan — resume review instead of re-running Claude
 	var p *plan.Plan
 	if plan.Exists(cfg.PlansDir(), itemID) {
@@ -1024,8 +1035,16 @@ func prepItemWriteOnly(s *store.Store, cfg *config.Config, itemID string, item *
 	}
 
 	planRel := relativePlanPath(cfg.PlansDir(), cfg.Root(), itemID)
-	reportRel := relativeReportPath(cfg.PlansDir(), cfg.Root(), itemID)
-	fmt.Printf("[%s] plan saved (%s), report saved (%s), pending approval\n", itemID, planRel, reportRel)
+	// I-933: a report sidecar is only written when the review sub-agent ran
+	// (--review). Don't claim "report saved" on the default path — that would
+	// point the operator at an absent (or stale, from a prior --review run)
+	// .report.md.
+	if opts.Review {
+		reportRel := relativeReportPath(cfg.PlansDir(), cfg.Root(), itemID)
+		fmt.Printf("[%s] plan saved (%s), report saved (%s), pending approval\n", itemID, planRel, reportRel)
+	} else {
+		fmt.Printf("[%s] plan saved (%s), pending approval (no review report — re-run with --review for an independent check)\n", itemID, planRel)
+	}
 	return "accepted"
 }
 

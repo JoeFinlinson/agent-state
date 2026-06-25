@@ -34,8 +34,10 @@ func TestValidateACs_VerifiableShapes(t *testing.T) {
 }
 
 func TestValidateACsHollow(t *testing.T) {
-	// Each of these is a cmd: AC that passes without actually testing
-	// anything — the I-933 hollow/false-pass shapes the linter must catch.
+	// Each of these is a cmd: AC that exits 0 regardless of the real result
+	// — the I-933 hollow/false-pass shapes the linter must catch. Includes
+	// the failure-mask terminals AND the pipe/sequence variants the code
+	// review flagged as previously-missed (`; echo`, `| true`).
 	hollow := []string{
 		"cmd: go test ./... || true",
 		"cmd: npm run build || echo failed",
@@ -45,8 +47,9 @@ func TestValidateACsHollow(t *testing.T) {
 		"cmd: echo done",
 		"cmd: true",
 		"cmd: pwd && echo ok",
-		"cmd: ./run.sh && it.skip('regression')",
-		"cmd: node -e \"xdescribe('suite', () => {})\"",
+		"cmd: go test ./...; echo done", // ; discards exit code (review FN)
+		"cmd: go test ./... | true",     // pipe terminal always 0 (review FN)
+		`cmd: echo "a; b"`,              // quoted ; is not an operator — still just echo
 	}
 	for _, ac := range hollow {
 		t.Run("hollow/"+ac, func(t *testing.T) {
@@ -58,14 +61,19 @@ func TestValidateACsHollow(t *testing.T) {
 	}
 
 	// These are legitimate cmd: ACs that exit non-zero on real failure —
-	// the linter must NOT flag them as hollow (precision over recall).
+	// the linter must NOT flag them as hollow (precision over recall). The
+	// quote-aware / exit-semantics cases were code-review false positives.
 	legit := []string{
 		"cmd: go test -run TestFoo -count=1",
 		"cmd: cd as && go build ./...",
 		"cmd: go run ./cmd/as plan approve --help 2>&1 | grep -q -- --review",
 		`cmd: rg "\.skip\(" src/ && exit 1`, // searches for skips to prove absence
 		"cmd: ls dist/ && cat dist/out.txt",
-		"cmd: ./check.sh && echo ok", // && echo: echo only runs on success, prior already passed
+		"cmd: ./check.sh && echo ok",                // && echo: echo only runs after prior passed
+		`cmd: ! grep -rn '|| true' .as/plans/`,      // mask token inside a search pattern, not an operator
+		`cmd: cd "$ST_WORKSPACE_ROOT/out" && pwd`,   // cd can fail (missing dir) — real assertion
+		"cmd: echo done > /tmp/marker",              // redirect can fail (no-write) — not always-zero
+		`cmd: python3 -c "assert 'it.skip(' not in open('a.js').read()"`, // asserts skip absence
 	}
 	for _, ac := range legit {
 		t.Run("legit/"+ac, func(t *testing.T) {
