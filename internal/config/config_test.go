@@ -125,9 +125,12 @@ func TestDiscoverWalksUp(t *testing.T) {
 	os.MkdirAll(deep, 0755)
 
 	// Discover from deep should find root/.as/config.yaml
-	path, found := discover(deep)
+	path, found, viaRedirect := discover(deep)
 	if !found {
 		t.Fatal("discover did not find config.yaml")
+	}
+	if viaRedirect {
+		t.Error("discover reported viaRedirect for a direct .as/config.yaml hit")
 	}
 	wantPath := filepath.Join(asDir, "config.yaml")
 	if path != wantPath {
@@ -138,7 +141,7 @@ func TestDiscoverWalksUp(t *testing.T) {
 func TestDiscoverNotFound(t *testing.T) {
 	// TempDir won't have .as/config.yaml anywhere up to root
 	dir := t.TempDir()
-	_, found := discover(dir)
+	_, found, _ := discover(dir)
 	if found {
 		t.Error("discover should not find config in temp dir")
 	}
@@ -426,6 +429,106 @@ func TestCanonicalStateRoot_NoMarkerIsNoOp(t *testing.T) {
 	}
 	if got := cfg.Root(); got != proj {
 		t.Errorf("Root() = %q, want unchanged %q (no marker → no-op)", got, proj)
+	}
+}
+
+// canonAgentTree builds a minimal agent tree under t.TempDir() and returns the
+// agent root plus the canonical and worktree-snapshot workspace dirs. The
+// identity marker lives at the agent root; both workspaces carry their own
+// .as/config.yaml (a real, discoverable store) unless withCanonical is false,
+// in which case the canonical workspace dir is left absent.
+func canonAgentTree(t *testing.T, withCanonical bool) (agentRoot, canonicalWS, worktreeWS string) {
+	t.Helper()
+	clearHeritage(t)
+	t.Setenv("AS_AGENT_ID", "")
+	t.Setenv("ST_ROOT", "")
+
+	agentRoot = filepath.Join(t.TempDir(), "theraprac-agent-a")
+	writeFileMk(t, filepath.Join(agentRoot, ".as", "agent-workspace.yaml"),
+		"agent_id: agent-a\npath: "+agentRoot+"\n")
+
+	canonicalWS = filepath.Join(agentRoot, "theraprac-workspace")
+	worktreeWS = filepath.Join(agentRoot, "worktrees", "T-1", "theraprac-workspace")
+	if withCanonical {
+		writeFileMk(t, filepath.Join(canonicalWS, ".as", "config.yaml"), "")
+	}
+	writeFileMk(t, filepath.Join(worktreeWS, ".as", "config.yaml"), "")
+	return agentRoot, canonicalWS, worktreeWS
+}
+
+// TestCanonicalStateRoot_ExplicitConfigNotHijacked: `--config <path>` (LoadFrom)
+// is an explicit operator override and must NEVER be canonicalized, even when the
+// target sits inside the agent tree and a canonical sibling exists. Closes the
+// CONFIRMED finding on PR #296.
+func TestCanonicalStateRoot_ExplicitConfigNotHijacked(t *testing.T) {
+	_, _, worktreeWS := canonAgentTree(t, true)
+
+	cfg, err := LoadFrom(filepath.Join(worktreeWS, ".as", "config.yaml"))
+	if err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+	if got := cfg.Root(); got != worktreeWS {
+		t.Errorf("Root() = %q, want explicit --config target %q (override must win)", got, worktreeWS)
+	}
+}
+
+// TestCanonicalStateRoot_CanonicalMissingIsNoOp: when the canonical workspace
+// (<agentRoot>/<base>) does not exist on disk, the redirect must NOT fire —
+// repointing root at a phantom directory would hide all existing state behind an
+// empty/stray store. Closes the phantom-directory PLAUSIBLE findings.
+func TestCanonicalStateRoot_CanonicalMissingIsNoOp(t *testing.T) {
+	_, _, worktreeWS := canonAgentTree(t, false) // canonical clone absent
+
+	cfg, err := Load(worktreeWS)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Root(); got != worktreeWS {
+		t.Errorf("Root() = %q, want unchanged %q (canonical absent → no phantom redirect)", got, worktreeWS)
+	}
+}
+
+// TestCanonicalStateRoot_StRootRedirectRespected: a `.st-root` redirect file is an
+// explicit operator indirection; discovery via that file must NOT be canonicalized
+// away, even when the redirect target is a worktree snapshot under the agent root
+// with a canonical sibling that exists.
+func TestCanonicalStateRoot_StRootRedirectRespected(t *testing.T) {
+	agentRoot, _, worktreeWS := canonAgentTree(t, true)
+
+	// A bare dir under the agent root whose only marker is a .st-root pointing at
+	// the worktree snapshot — discover() must follow it and report viaRedirect.
+	redirector := filepath.Join(agentRoot, "redirector")
+	writeFileMk(t, filepath.Join(redirector, ".st-root"), worktreeWS+"\n")
+
+	cfg, err := Load(redirector)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Root(); got != worktreeWS {
+		t.Errorf("Root() = %q, want .st-root target %q (redirect override must win)", got, worktreeWS)
+	}
+}
+
+// TestCanonicalStateRoot_NoConfigFallbackNotHijacked: when no config is discovered
+// and cfg.root falls back to the bare startDir, the redirect must NOT fire — even
+// if startDir's basename collides with the canonical workspace dir name and that
+// canonical store exists. Closes the no-config-branch PLAUSIBLE findings.
+func TestCanonicalStateRoot_NoConfigFallbackNotHijacked(t *testing.T) {
+	agentRoot, _, _ := canonAgentTree(t, true)
+
+	// A config-less dir under the agent root, basename "theraprac-workspace" so a
+	// naive redirect would collapse it onto the existing canonical store.
+	startDir := filepath.Join(agentRoot, "worktrees", "T-2", "theraprac-workspace")
+	if err := os.MkdirAll(startDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(startDir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Root(); got != startDir {
+		t.Errorf("Root() = %q, want unchanged %q (no-config fallback must not redirect)", got, startDir)
 	}
 }
 
