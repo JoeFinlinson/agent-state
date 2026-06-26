@@ -96,11 +96,12 @@ func AutoTest(s *store.Store, cfg *config.Config, id string, opts TestRecordOpts
 // allows the testing_complete gate to pass without running suites that don't
 // apply. Unlike user --skip, auto-skip is a system determination — it bypasses
 // the user-skip guard in TestRecord intentionally.
+//
+// I-1597 (Inv 5/6): class items are NOT exempt. A class-required suite whose
+// mapped repo is untouched is not-applicable and recorded auditable here, the
+// same as a default-class suite. Unmapped class suites (repo == "", e.g.
+// hook_test) can't be impact-scoped, so they record nothing and still run.
 func autoRecordSkips(s *store.Store, cfg *config.Config, id string, item *model.Item, touched map[string][]string) int {
-	if item.ScopeClass != "" {
-		// Class items have a fixed required-suite set; no auto-skip applies.
-		return 0
-	}
 	now := time.Now().Format(time.RFC3339)
 	var skipped []string
 
@@ -135,19 +136,25 @@ func autoRecordSkips(s *store.Store, cfg *config.Config, id string, item *model.
 	// Scope suites: auto-skip any suite whose scoped repo has no changes.
 	// Suites with trigger patterns but no prefix mapping (repo == "") are
 	// omitted silently — no UAT gate pressure for those.
-	for name := range cfg.Testing.ScopeSuites {
-		if name == "live_acceptance" {
-			continue // manual gate — never auto-skipped
-		}
-		repo := autoScopeRepo(name)
-		if repo == "" {
-			continue // prefix unmapped — can't determine applicability
-		}
-		if _, changed := touched[repo]; changed {
-			continue // repo changed — suite will run (or trigger didn't match, but not our call)
-		}
-		if !recordSkip(name, repo) {
-			return 1
+	//
+	// Only default-class items observe scope suites — when an item declares a
+	// scope_class, the class IS the complete required-set and the gate ignores
+	// scope suites (gates.go testing_complete), so don't record skips for them.
+	if item.ScopeClass == "" {
+		for name := range cfg.Testing.ScopeSuites {
+			if name == "live_acceptance" {
+				continue // manual gate — never auto-skipped
+			}
+			repo := autoScopeRepo(name)
+			if repo == "" {
+				continue // prefix unmapped — can't determine applicability
+			}
+			if _, changed := touched[repo]; changed {
+				continue // repo changed — suite will run (or trigger didn't match, but not our call)
+			}
+			if !recordSkip(name, repo) {
+				return 1
+			}
 		}
 	}
 
@@ -249,8 +256,12 @@ func detectTouchedRepos(cfg *config.Config, id string) (map[string][]string, err
 // selectAutoSuites returns (tier1, tier2) suite lists based on which repos have
 // changes and whether the item has a scope_class override.
 //
-//   - Tier 1 (required suites): filtered by suite-name prefix → repo mapping,
-//     unless scope_class is set (class suites run regardless of file scope).
+//   - Tier 1 (required suites): impact-scoped by suite-name prefix → repo
+//     mapping. A suite whose mapped repo is untouched is omitted (it is recorded
+//     auto-skip by autoRecordSkips). Suites with no repo mapping (repo == "",
+//     e.g. hook_test) can't be scoped and always run. This applies to class
+//     items too (I-1597, Inv 5) — a scope_class no longer forces every class
+//     suite to run regardless of which files changed.
 //   - Tier 2 (scope suites): filtered by prefix AND trigger glob patterns.
 //   - live_acceptance is always excluded — it is a manual gate, not auto-runnable.
 func selectAutoSuites(cfg *config.Config, item *model.Item, touched map[string][]string) (tier1, tier2 []string) {
@@ -262,14 +273,23 @@ func selectAutoSuites(cfg *config.Config, item *model.Item, touched map[string][
 		if seen[name] {
 			continue
 		}
-		if item.ScopeClass != "" {
-			// Class suites are defined by item type, not by which files changed.
+		if name == "live_acceptance" {
+			// live_acceptance is a manual gate — never auto-runnable, even if a
+			// class declares it required. Leaving it out of tier1 (and it is also
+			// not auto-skipped, since repo=="") forces an explicit operator
+			// `st test … live_acceptance` record rather than a silent auto-satisfy.
+			seen[name] = true
+			continue
+		}
+		repo := autoScopeRepo(name)
+		if repo == "" {
+			// No repo mapping — can't impact-scope. Run it (self-scoping suites
+			// like hook_test no-op fast when nothing applicable changed).
 			seen[name] = true
 			tier1 = append(tier1, name)
 			continue
 		}
-		repo := autoScopeRepo(name)
-		if _, changed := touched[repo]; changed && repo != "" {
+		if _, changed := touched[repo]; changed {
 			seen[name] = true
 			tier1 = append(tier1, name)
 		}
@@ -298,6 +318,17 @@ func selectAutoSuites(cfg *config.Config, item *model.Item, touched map[string][
 
 // autoScopeRepo maps a suite name to its worktree repo directory name using the
 // suite-name prefix convention: api_* → theraprac-api, web_* → theraprac-web, etc.
+// Suites with no repo mapping return "" and are treated as un-impact-scopable
+// (always run; never auto-skipped) by the callers.
+//
+// I-1597: `workspace_*` is deliberately NOT mapped. `workspace_test`
+// (`run-changed-hook-tests.sh`) verifies claude-config hooks in the
+// theraprac-workspace repo — which is not in worktree.repos and is unrelated to
+// the `as` Go repo. Mapping it to `as` made impact-scoping auto-skip it whenever
+// `as` was untouched, producing a false-green gate that ran zero suites for a
+// workspace-config item whose hooks actually changed. Leaving it unmapped makes
+// it self-scoping (always runs; the script no-ops fast when no hooks changed),
+// identical to the equivalent `hook_test` suite.
 func autoScopeRepo(suiteName string) string {
 	prefix, _, _ := strings.Cut(suiteName, "_")
 	switch prefix {
@@ -307,7 +338,7 @@ func autoScopeRepo(suiteName string) string {
 		return "theraprac-web"
 	case "infra":
 		return "theraprac-infra"
-	case "workspace", "as":
+	case "as":
 		return "as"
 	default:
 		return ""
