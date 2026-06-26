@@ -1155,6 +1155,7 @@ func Load(startDir string) (*Config, error) {
 		cfg.root = startDir
 	}
 
+	cfg.canonicalizeStateRoot() // I-1596: identity-anchored state root (Inv 1/2)
 	return cfg, nil
 }
 
@@ -1173,7 +1174,97 @@ func LoadFrom(configPath string) (*Config, error) {
 	} else {
 		cfg.startDir = cfg.root
 	}
+	cfg.canonicalizeStateRoot() // I-1596: identity-anchored state root (Inv 1/2)
 	return cfg, nil
+}
+
+// canonicalizeStateRoot redirects cfg.root from the CWD-discovered location to
+// the canonical per-agent workspace resolved from the agent-workspace identity
+// (.as/agent-workspace.yaml at the agent root). I-1596 / Inv 1/2.
+//
+// discover() walks up from CWD for .as/config.yaml, so running st from inside a
+// worktree (<agent-root>/worktrees/<id>/theraprac-workspace) resolves cfg.root to
+// the worktree's FROZEN agent-state snapshot. Because every state accessor
+// (ItemDir/ChangelogDir/PlansDir/...) joins cfg.root, all reads/writes would then
+// hit the snapshot instead of the one canonical store. Re-anchor cfg.root to the
+// workspace directly under the identity-resolved agent root.
+//
+// AgentRoot() walks .as/agent-workspace.yaml from startDir (ST_ROOT-immune,
+// agent_id-validated). The marker lives at the agent root, not inside the
+// theraprac-workspace repo, so a worktree checkout never carries it — AgentRoot()
+// resolves the real agent root even from a worktree CWD.
+//
+// The redirect fires ONLY when cfg.root is a nested descendant of the resolved
+// agent root — i.e. an actual per-agent worktree snapshot of THIS agent. This
+// guard is essential: AgentRoot() resolves from startDir/CWD, which (e.g. under
+// `go test`, or `st --config <tmp>`) can be inside a real agent tree while
+// cfg.root points at an unrelated temp workspace. Without the descendant check
+// we would hijack that unrelated cfg.root into a bogus <realAgentRoot>/<base>.
+//
+//   - cfg.root NOT under agentRoot (unrelated temp / --config elsewhere / a
+//     peer's tree under a DIFFERENT agent root): skip — never our state.
+//   - cfg.root already the canonical workspace (main clone): no-op.
+//   - cfg.root nested below agentRoot (a worktree snapshot of THIS agent, the
+//     I-1596 / J1 case): redirect to <agentRoot>/<base>.
+//
+// All "is X the same dir as / under Y" checks compare by INODE (os.SameFile),
+// not by string prefix: the agent-workspace marker's path: and the discovered
+// cfg.root routinely differ in string form (case-insensitive macOS — Dev vs dev
+// — and the I-418 workspace symlink) while naming the same directory. A
+// string HasPrefix check silently fails to fire in exactly those cases (caught
+// in live acceptance: a worktree-cwd record still landed in the frozen copy).
+func (c *Config) canonicalizeStateRoot() {
+	if c.root == "" {
+		return
+	}
+	agentRoot := c.AgentRoot()
+	if agentRoot == "" {
+		return
+	}
+	canonical := filepath.Join(agentRoot, filepath.Base(c.root))
+	if sameDir(canonical, c.root) {
+		return // already the one canonical workspace (inode-equal)
+	}
+	if !dirIsUnder(c.root, agentRoot) {
+		return // cfg.root lives outside this agent's tree — never touch it
+	}
+	c.root = canonical
+	// Re-resolve AgentRoot lazily so its Dir(c.root) fallback stays consistent
+	// with the corrected root; the primary startDir walk yields the same result.
+	c.ResetAgentRootCache()
+}
+
+// sameDir reports whether a and b name the same directory by inode, tolerating
+// case-insensitive and symlinked path-string differences. False if either is
+// unstat-able.
+func sameDir(a, b string) bool {
+	fa, err1 := os.Stat(a)
+	fb, err2 := os.Stat(b)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return os.SameFile(fa, fb)
+}
+
+// dirIsUnder reports whether dir is a strict descendant of ancestor, comparing
+// each parent by inode (os.SameFile) rather than string prefix — immune to
+// case/symlink path-string differences. I-1596.
+func dirIsUnder(dir, ancestor string) bool {
+	aStat, err := os.Stat(ancestor)
+	if err != nil {
+		return false
+	}
+	cur := dir
+	for {
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return false // reached filesystem root without matching
+		}
+		if pStat, err := os.Stat(parent); err == nil && os.SameFile(pStat, aStat) {
+			return true
+		}
+		cur = parent
+	}
 }
 
 // discover walks up from dir looking for .as/config.yaml.

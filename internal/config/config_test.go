@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -336,6 +337,95 @@ func TestIdentitySTRootLeakResolvesFromCWD(t *testing.T) {
 
 	if got := cfg.AgentID(); got != "agent-d" {
 		t.Errorf("AgentID() = %q under ST_ROOT leak, want %q", got, "agent-d")
+	}
+}
+
+// writeFileMk writes data to path, creating parent dirs. Test helper.
+func writeFileMk(t *testing.T, path, data string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestCanonicalStateRoot_WorktreeResolvesToCanonical is the I-1596 Inv 1/2
+// contract test: st run from inside a worktree (whose CWD walk-up discovers a
+// FROZEN .as/config.yaml) must resolve its state root to the ONE canonical
+// per-agent workspace, never the worktree snapshot — and the main clone must
+// resolve to the same location (Inv 1: one authority from identity, not CWD).
+func TestCanonicalStateRoot_WorktreeResolvesToCanonical(t *testing.T) {
+	clearHeritage(t)
+	t.Setenv("AS_AGENT_ID", "")
+	t.Setenv("ST_ROOT", "")
+
+	tmp := t.TempDir()
+	agentRoot := filepath.Join(tmp, "theraprac-agent-a")
+
+	// Identity marker lives at the AGENT ROOT, not inside the workspace repo —
+	// so a worktree checkout never carries it.
+	writeFileMk(t, filepath.Join(agentRoot, ".as", "agent-workspace.yaml"),
+		"agent_id: agent-a\npath: "+agentRoot+"\n")
+
+	// Canonical workspace + its frozen worktree copy (same basename, no marker).
+	canonicalWS := filepath.Join(agentRoot, "theraprac-workspace")
+	worktreeWS := filepath.Join(agentRoot, "worktrees", "T-1", "theraprac-workspace")
+	writeFileMk(t, filepath.Join(canonicalWS, ".as", "config.yaml"), "")
+	writeFileMk(t, filepath.Join(worktreeWS, ".as", "config.yaml"), "")
+
+	for _, tc := range []struct {
+		name, loadFrom string
+	}{
+		{"from worktree CWD", worktreeWS},
+		{"from main clone", canonicalWS},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := Load(tc.loadFrom)
+			if err != nil {
+				t.Fatalf("Load(%s): %v", tc.loadFrom, err)
+			}
+			if got := cfg.Root(); got != canonicalWS {
+				t.Errorf("Root() = %q, want canonical %q (must not be worktree snapshot)", got, canonicalWS)
+			}
+			// Every state accessor inherits the corrected root: rooted at the
+			// canonical workspace and never inside the worktree snapshot.
+			worktreeMark := filepath.Join("worktrees", "T-1")
+			for _, p := range []struct{ name, val string }{
+				{"ItemDir", cfg.ItemDir()},
+				{"ChangelogDir", cfg.ChangelogDir()},
+				{"PlansDir", cfg.PlansDir()},
+			} {
+				if !strings.HasPrefix(p.val, canonicalWS) {
+					t.Errorf("%s() = %q, want rooted at canonical %q", p.name, p.val, canonicalWS)
+				}
+				if strings.Contains(p.val, worktreeMark) {
+					t.Errorf("%s() = %q resolves into the worktree snapshot", p.name, p.val)
+				}
+			}
+		})
+	}
+}
+
+// TestCanonicalStateRoot_NoMarkerIsNoOp guards the provable no-op: with no
+// agent-workspace.yaml on the path (standalone `as` dev / unit tests), cfg.root
+// must be left exactly as discovered. filepath.Join(Dir(x), Base(x)) == x.
+func TestCanonicalStateRoot_NoMarkerIsNoOp(t *testing.T) {
+	clearHeritage(t)
+	t.Setenv("AS_AGENT_ID", "")
+	t.Setenv("ST_ROOT", "")
+
+	tmp := t.TempDir()
+	proj := filepath.Join(tmp, "some-project")
+	writeFileMk(t, filepath.Join(proj, ".as", "config.yaml"), "")
+
+	cfg, err := Load(proj)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Root(); got != proj {
+		t.Errorf("Root() = %q, want unchanged %q (no marker → no-op)", got, proj)
 	}
 }
 
