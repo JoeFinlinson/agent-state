@@ -444,6 +444,8 @@ func TestSelectAutoSuites_LiveAcceptanceNeverAutoRun(t *testing.T) {
 		},
 	}
 	item := &model.Item{ScopeClass: "manual-gated"}
+
+	// selectAutoSuites must never schedule live_acceptance to auto-run.
 	tier1, _ := selectAutoSuites(cfg, item, map[string][]string{"as": {"x.go"}})
 	for _, n := range tier1 {
 		if n == "live_acceptance" {
@@ -452,6 +454,23 @@ func TestSelectAutoSuites_LiveAcceptanceNeverAutoRun(t *testing.T) {
 	}
 	if len(tier1) != 1 || tier1[0] != "as_test" {
 		t.Errorf("tier1 = %v, want [as_test] only", tier1)
+	}
+
+	// autoRecordSkips must never auto-skip live_acceptance either — exercise it
+	// with `as` untouched so as_test would auto-skip but live_acceptance must
+	// not, leaving the manual gate to force an explicit operator record.
+	s, scfg := setupTestEnvWithChangelog(t)
+	scfg.Testing = cfg.Testing
+	if code := autoRecordSkips(s, scfg, "T-001", item, map[string][]string{}); code != 0 {
+		t.Fatalf("autoRecordSkips returned %d, want 0", code)
+	}
+	stored, _ := s.Get("T-001")
+	if _, ok := getNestedField(stored, "testing_evidence", "live_acceptance"); ok {
+		t.Error("live_acceptance must not be auto-skipped — it is a manual gate")
+	}
+	// Sanity: as_test (mapped, untouched) IS auto-skipped, proving the loop ran.
+	if ev, ok := getNestedField(stored, "testing_evidence", "as_test"); !ok || !strings.HasPrefix(ev, "auto-skip:") {
+		t.Errorf("as_test evidence = %q, want auto-skip (loop must have executed)", ev)
 	}
 }
 
