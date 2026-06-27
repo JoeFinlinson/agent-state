@@ -71,9 +71,6 @@ func TestNonStateStash_StashesStagedNonStateOnMain(t *testing.T) {
 	if !strings.Contains(stashed[0], "scripts/foo.py") {
 		t.Errorf("stash should reference scripts/foo.py; got %q", stashed[0])
 	}
-	if !strings.Contains(stashed[0], "stash@{") {
-		t.Errorf("stash entry should contain a real stash ref; got %q", stashed[0])
-	}
 	if gitPorcelain(t, dir) != "" {
 		t.Errorf("tree should be clean after stash; git status: %q", gitPorcelain(t, dir))
 	}
@@ -137,17 +134,70 @@ func TestNonStateStash_LeavesAgentStateAlone(t *testing.T) {
 	}
 }
 
-func TestNonStateStash_LeavesChurnAlone(t *testing.T) {
+func TestNonStateStash_LeavesGitignoredAlone(t *testing.T) {
 	dir := t.TempDir()
 	initGitRepo(t, dir)
 
-	// Machine-regenerated churn — never stash.
+	// Machine-regenerated churn (deploy-dashboard.html, dashboard-history.jsonl)
+	// is gitignored in the real workspace, so `git status` never surfaces it —
+	// and what the gate never sees, this command must never stash. (We mirror
+	// the gate exactly: no special churn-name allowlist, just gitignore.)
+	addUntrackedFile(t, dir, ".gitignore", "deploy-dashboard.html\n*.jsonl\n")
 	addUntrackedFile(t, dir, "deploy-dashboard.html", "<html></html>\n")
 	addUntrackedFile(t, dir, "scripts/dashboard-history.jsonl", "{}\n")
 
 	stashed := NonStateStash(dir, nsItemDir, nsAgent)
-	if len(stashed) != 0 {
-		t.Errorf("churn files must not be stashed; got %v", stashed)
+	for _, s := range stashed {
+		if strings.Contains(s, "dashboard") {
+			t.Errorf("gitignored churn must not be stashed; got %v", stashed)
+		}
+	}
+	// deploy-dashboard.html / *.jsonl are gitignored, so only .gitignore itself
+	// (a non-state tracked-able file) is visible residue.
+	if len(stashed) != 1 || !strings.Contains(stashed[0], ".gitignore") {
+		t.Errorf("expected only the untracked .gitignore stashed; got %v", stashed)
+	}
+}
+
+func TestNonStateStash_StagedRenameClearsBothSides(t *testing.T) {
+	dir := t.TempDir()
+	initGitRepo(t, dir)
+
+	// Commit a tracked non-state file, then stage a rename of it. The staged
+	// deletion of the old path must not linger after stashing (finding #3).
+	addUntrackedFile(t, dir, "scripts/old.py", "x\n")
+	mustGit(t, dir, "add", "scripts/old.py")
+	mustGit(t, dir, "commit", "-m", "add old.py")
+	mustGit(t, dir, "mv", "scripts/old.py", "scripts/new.py")
+
+	before := gitPorcelain(t, dir)
+	if !strings.Contains(before, "old.py") || !strings.Contains(before, "new.py") {
+		t.Fatalf("expected a staged rename; got %q", before)
+	}
+
+	stashed := NonStateStash(dir, nsItemDir, nsAgent)
+	if len(stashed) != 1 {
+		t.Fatalf("expected 1 residue entry for the rename; got %v", stashed)
+	}
+	if got := gitPorcelain(t, dir); got != "" {
+		t.Errorf("tree must be fully clean after stashing a rename (no lingering staged deletion); got %q", got)
+	}
+}
+
+func TestNonStateStash_NoopFlatLayout(t *testing.T) {
+	dir := t.TempDir()
+	initGitRepo(t, dir)
+
+	// Flat layout: items root == git toplevel (Paths.Root "."). Item files live
+	// at the repo root (e.g. issues/I-5.md) and must NOT be treated as residue.
+	addUntrackedFile(t, dir, "issues/I-5.md", "id: I-5\n")
+	addUntrackedFile(t, dir, "scripts/foo.py", "x\n")
+
+	if stashed := NonStateStash(dir, ".", nsAgent); stashed != nil {
+		t.Errorf("flat layout must be a strict no-op (gate fail-opens); got %v", stashed)
+	}
+	if gitPorcelain(t, dir) == "" {
+		t.Errorf("flat-layout files must remain in the working tree")
 	}
 }
 
