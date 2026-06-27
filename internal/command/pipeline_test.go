@@ -8,9 +8,15 @@ import (
 
 	"github.com/theraprac/agent-state/internal/config"
 	"github.com/theraprac/agent-state/internal/evidence"
+	"github.com/theraprac/agent-state/internal/manifest"
 	"github.com/theraprac/agent-state/internal/model"
 	"github.com/theraprac/agent-state/internal/store"
 )
+
+// stubGitRemoteURL returns a github slug so slugForRepo resolves without a real remote.
+func stubGitRemoteURL(string) (string, error) {
+	return "git@github.com:TheraPrac/theraprac-api.git", nil
+}
 
 func setupPipelineTestEnv(t *testing.T) (*store.Store, *config.Config) {
 	t.Helper()
@@ -52,6 +58,11 @@ func setupPipelineTestEnv(t *testing.T) (*store.Store, *config.Config) {
 		t.Fatalf("mutate T-003: %v", err)
 	}
 
+	// Record a PR in the manifest sidecar so Merge can resolve a repo-qualified target.
+	if err := manifest.AppendPR(cfg.ManifestDir(), "T-003", manifest.PRRecord{Repo: "api", PRNumber: 42}); err != nil {
+		t.Fatalf("append manifest PR: %v", err)
+	}
+
 	return s, cfg
 }
 
@@ -60,7 +71,8 @@ func mockPipelineOpts(t *testing.T) PipelineOpts {
 		RunCmd: func(cmd string) ([]byte, int, error) {
 			return []byte(fmt.Sprintf("executed: %s\n", cmd)), 0, nil
 		},
-		Backend: &evidence.LocalBackend{Dir: t.TempDir()},
+		Backend:      &evidence.LocalBackend{Dir: t.TempDir()},
+		GitRemoteURL: stubGitRemoteURL,
 	}
 }
 
@@ -114,7 +126,8 @@ func TestMergePreCheckFail(t *testing.T) {
 			}
 			return []byte("ok\n"), 0, nil
 		},
-		Backend: &evidence.LocalBackend{Dir: t.TempDir()},
+		Backend:      &evidence.LocalBackend{Dir: t.TempDir()},
+		GitRemoteURL: stubGitRemoteURL,
 	}
 
 	code := Merge(s, cfg, "T-003", opts)
