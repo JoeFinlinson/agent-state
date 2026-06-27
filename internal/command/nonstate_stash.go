@@ -9,28 +9,33 @@ import (
 	"github.com/theraprac/agent-state/internal/store"
 )
 
-// NonStateStash parks uncommitted NON-state residue (scripts/, docs/, etc.)
-// left in the SHARED theraprac-workspace main checkout by a peer, so it cannot
-// silently block the next agent's state sync (I-1594). Two failure modes it
-// clears: (A) staged non-state edits that trip checkNonStateGate and refuse
-// `st sync`; (B) untracked non-state files that block the session-start
-// `git pull --ff-only` ("untracked working tree files would be overwritten").
+// NonStateStash parks STAGED non-state residue (scripts/, docs/, etc.) left in
+// the SHARED theraprac-workspace main checkout, so it cannot silently block the
+// next agent's state sync (I-1594): staged non-state edits are exactly what
+// checkNonStateGate refuses `st sync` on (failure-mode A).
 //
-// Mirrors OrphanStash, with two deliberate differences:
+// It mirrors checkNonStateGate EXACTLY — both the path allowlist
+// (store.IsManagedStatePath) and the porcelain skips: pure-untracked (`??`) and
+// working-tree-only / unstaged (` M`, ` D`) entries are LEFT ALONE, just as the
+// gate skips them (I-442/I-1472). This is deliberate and load-bearing: the
+// shared main checkout legitimately holds untracked/unstaged non-state content
+// (e.g. agent-memory/ files, work-in-progress docs/) that is NOT residue and
+// must never be stashed away. Stashing only what the gate blocks on — staged
+// changes — keeps this safe: the set parked here is identical to the set the
+// gate refuses, so `st sync` is unblocked without touching legitimate content.
 //
-//   - It is a STRICT NO-OP unless the checkout is on main/master. Feature-branch
-//     worktrees carry the agent's own legitimate uncommitted non-state WIP; only
-//     the shared main checkout should never hold non-state dirt. This branch
-//     guard — NOT a per-file ownership check — is the peer-WIP-protection
-//     boundary. It is why this command intentionally captures untracked (`??`)
-//     and unstaged (` M`) files that checkNonStateGate deliberately skips
-//     (I-442/I-1472): on the shared main checkout those are residue, and the
-//     untracked ones are exactly failure-mode B.
-//   - It captures untracked files too (git stash push -u).
+// NOTE: failure-mode B (an UNTRACKED file blocking `git pull --ff-only` with
+// "untracked working tree files would be overwritten") is intentionally NOT
+// handled here — blanket-stashing untracked files is destructive (it would
+// remove agent-memory/docs WIP). That case needs precise, reactive handling at
+// pull time (stash only the specific paths the incoming merge would overwrite);
+// it is tracked as a follow-up (see I-1594 out-of-scope).
 //
-// Path classification reuses the gate's own store.IsManagedStatePath so the set
-// of "non-state" paths stashed here is identical to the set checkNonStateGate
-// blocks on — no classifier drift.
+// Mirrors OrphanStash, with one deliberate difference: it is a STRICT NO-OP
+// unless the checkout is on main/master. Feature-branch worktrees carry the
+// agent's own legitimate uncommitted non-state WIP; only the shared main
+// checkout should never hold STAGED non-state dirt. This branch guard is an
+// extra safety boundary on top of the staged-only rule.
 //
 // Staged RENAMES are deliberately NOT auto-parked. Clearing a staged rename
 // safely requires mutating the index/working tree (the deleted old side cannot
@@ -69,16 +74,14 @@ func NonStateStash(workspaceRoot, itemsPrefix, agentID string) []string {
 	}
 
 	// -z: NUL-terminated, raw bytes, no path quoting. Rename/copy entries
-	// arrive as two NUL tokens: "<XY> <new>\0<old>\0".
-	// --untracked-files=all: list individual untracked FILES, not collapsed
-	// directories, so per-file classification (and per-file stashing) works for
-	// wholly-untracked dirs like docs/ or scripts/.
-	out, err := execGitOrphan(workspaceRoot, "status", "--porcelain", "-z", "--untracked-files=all")
+	// arrive as two NUL tokens: "<XY> <new>\0<old>\0". No --untracked-files=all:
+	// untracked entries are skipped below, so there is no need to expand them.
+	out, err := execGitOrphan(workspaceRoot, "status", "--porcelain", "-z")
 	if err != nil || len(out) == 0 {
 		return nil
 	}
 
-	var residues []string // non-state, non-rename paths to park
+	var residues []string // staged, non-state, non-rename paths to park
 	seen := make(map[string]bool)
 	tokens := strings.Split(string(out), "\x00")
 	for i := 0; i < len(tokens); i++ {
@@ -95,6 +98,14 @@ func NonStateStash(workspaceRoot, itemsPrefix, agentID string) []string {
 			if i+1 < len(tokens) {
 				i++
 			}
+			continue
+		}
+		// Mirror checkNonStateGate's skips EXACTLY (git.go): skip pure-untracked
+		// (`??`) and working-tree-only / unstaged (`code[0] == ' '`) entries.
+		// The gate never blocks on these, and the shared main checkout
+		// legitimately holds untracked/unstaged non-state content (agent-memory/,
+		// WIP docs/) — stashing it would be destructive, not residue-clearing.
+		if code == "??" || code[0] == ' ' {
 			continue
 		}
 		if path == "" || seen[path] {
@@ -114,8 +125,9 @@ func NonStateStash(workspaceRoot, itemsPrefix, agentID string) []string {
 	for _, p := range residues {
 		label := fmt.Sprintf("st-nonstate-residue: %s dropped-by:%s date:%s",
 			p, agentID, today)
-		// -u captures untracked paths (failure-mode B); harmless for tracked.
-		if _, stashErr := execGitOrphanCapture(workspaceRoot, "stash", "push", "-u",
+		// No -u: only staged (tracked) changes reach here, so untracked capture
+		// is neither needed nor wanted.
+		if _, stashErr := execGitOrphanCapture(workspaceRoot, "stash", "push",
 			"-m", label, "--", p); stashErr != nil {
 			fmt.Fprintf(os.Stderr, "nonstate-stash: failed to stash %s: %v\n", p, stashErr)
 			continue

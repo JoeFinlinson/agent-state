@@ -81,24 +81,39 @@ func TestNonStateStash_StashesStagedNonStateOnMain(t *testing.T) {
 	}
 }
 
-func TestNonStateStash_StashesUntrackedNonStateOnMain(t *testing.T) {
+func TestNonStateStash_LeavesUntrackedAlone(t *testing.T) {
 	dir := t.TempDir()
 	initGitRepo(t, dir)
 
-	// An untracked non-state file — this is what blocks the session-start
-	// `git pull --ff-only` (failure-mode B). The agent-state gate skips it,
-	// so only this stash clears it.
-	addUntrackedFile(t, dir, "docs/junk.md", "redundant\n")
+	// Untracked non-state files (agent-memory/, WIP docs/) legitimately live in
+	// the shared main checkout. The gate skips `??`, so this command must too —
+	// stashing them would be destructive, not residue-clearing.
+	addUntrackedFile(t, dir, "docs/junk.md", "wip doc\n")
+	addUntrackedFile(t, dir, "agent-memory/note.md", "a note\n")
 
 	stashed := NonStateStash(dir, nsItemDir, nsAgent)
-	if len(stashed) != 1 {
-		t.Fatalf("expected 1 stash for untracked file, got %d: %v", len(stashed), stashed)
+	if len(stashed) != 0 {
+		t.Fatalf("untracked non-state must be left alone; got %v", stashed)
 	}
-	if !strings.Contains(stashed[0], "docs/junk.md") {
-		t.Errorf("stash should reference docs/junk.md; got %q", stashed[0])
+	if gitPorcelain(t, dir) == "" {
+		t.Errorf("untracked files must remain in the working tree")
 	}
-	if gitPorcelain(t, dir) != "" {
-		t.Errorf("tree should be clean after stashing untracked file; git status: %q", gitPorcelain(t, dir))
+}
+
+func TestNonStateStash_LeavesUnstagedAlone(t *testing.T) {
+	dir := t.TempDir()
+	initGitRepo(t, dir)
+
+	// A tracked non-state file modified but NOT staged (` M`). The gate skips
+	// working-tree-only changes (I-1472), so this command must too.
+	addTrackedDirtyFile(t, dir, "scripts/foo.py", "print('unstaged edit')\n")
+
+	stashed := NonStateStash(dir, nsItemDir, nsAgent)
+	if len(stashed) != 0 {
+		t.Fatalf("unstaged non-state must be left alone; got %v", stashed)
+	}
+	if gitPorcelain(t, dir) == "" {
+		t.Errorf("unstaged edit must remain in the working tree")
 	}
 }
 
@@ -125,37 +140,15 @@ func TestNonStateStash_LeavesAgentStateAlone(t *testing.T) {
 	dir := t.TempDir()
 	initGitRepo(t, dir)
 
-	// Dirty agent-state file — handled by OrphanStash, not this function.
-	addTrackedDirtyFile(t, dir, filepath.Join(nsItemDir, "tasks", "T-1.md"), "id: T-1\nstatus: coding\n")
+	// A STAGED agent-state file — handled by OrphanStash, not this function.
+	// (Staged so we exercise the managed-path skip, not the unstaged skip.)
+	rel := filepath.Join(nsItemDir, "tasks", "T-1.md")
+	addTrackedDirtyFile(t, dir, rel, "id: T-1\nstatus: coding\n")
+	mustGit(t, dir, "add", rel)
 
 	stashed := NonStateStash(dir, nsItemDir, nsAgent)
 	if len(stashed) != 0 {
-		t.Errorf("agent-state dirt must be left for OrphanStash; got %v", stashed)
-	}
-}
-
-func TestNonStateStash_LeavesGitignoredAlone(t *testing.T) {
-	dir := t.TempDir()
-	initGitRepo(t, dir)
-
-	// Machine-regenerated churn (deploy-dashboard.html, dashboard-history.jsonl)
-	// is gitignored in the real workspace, so `git status` never surfaces it —
-	// and what the gate never sees, this command must never stash. (We mirror
-	// the gate exactly: no special churn-name allowlist, just gitignore.)
-	addUntrackedFile(t, dir, ".gitignore", "deploy-dashboard.html\n*.jsonl\n")
-	addUntrackedFile(t, dir, "deploy-dashboard.html", "<html></html>\n")
-	addUntrackedFile(t, dir, "scripts/dashboard-history.jsonl", "{}\n")
-
-	stashed := NonStateStash(dir, nsItemDir, nsAgent)
-	for _, s := range stashed {
-		if strings.Contains(s, "dashboard") {
-			t.Errorf("gitignored churn must not be stashed; got %v", stashed)
-		}
-	}
-	// deploy-dashboard.html / *.jsonl are gitignored, so only .gitignore itself
-	// (a non-state tracked-able file) is visible residue.
-	if len(stashed) != 1 || !strings.Contains(stashed[0], ".gitignore") {
-		t.Errorf("expected only the untracked .gitignore stashed; got %v", stashed)
+		t.Errorf("staged agent-state must be left for OrphanStash; got %v", stashed)
 	}
 }
 
@@ -275,7 +268,9 @@ func TestNonStateStash_Idempotent(t *testing.T) {
 	initGitRepo(t, dir)
 	_ = currentBranchName(t, dir) // sanity: ensure we are on a real branch
 
-	addUntrackedFile(t, dir, "docs/junk.md", "redundant\n")
+	// Staged non-state residue (the gate-blocking case this clears).
+	addTrackedDirtyFile(t, dir, "scripts/foo.py", "staged change\n")
+	mustGit(t, dir, "add", "scripts/foo.py")
 
 	first := NonStateStash(dir, nsItemDir, nsAgent)
 	if len(first) != 1 {
