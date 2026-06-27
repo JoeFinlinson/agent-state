@@ -4,50 +4,53 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/theraprac/agent-state/internal/store"
 )
 
-// NonStateStash parks STAGED non-state residue (scripts/, docs/, etc.) left in
-// the SHARED theraprac-workspace main checkout, so it cannot silently block the
-// next agent's state sync (I-1594): staged non-state edits are exactly what
-// checkNonStateGate refuses `st sync` on (failure-mode A).
+// ClearStagedNonState un-stages STAGED non-state changes (scripts/, docs/, etc.)
+// left in the SHARED theraprac-workspace main checkout, so they no longer trip
+// checkNonStateGate and silently block the next agent's `st sync` (I-1594).
 //
-// It mirrors checkNonStateGate EXACTLY — both the path allowlist
-// (store.IsManagedStatePath) and the porcelain skips: pure-untracked (`??`) and
-// working-tree-only / unstaged (` M`, ` D`) entries are LEFT ALONE, just as the
-// gate skips them (I-442/I-1472). This is deliberate and load-bearing: the
-// shared main checkout legitimately holds untracked/unstaged non-state content
-// (e.g. agent-memory/ files, work-in-progress docs/) that is NOT residue and
-// must never be stashed away. Stashing only what the gate blocks on — staged
-// changes — keeps this safe: the set parked here is identical to the set the
-// gate refuses, so `st sync` is unblocked without touching legitimate content.
+// Staged non-state is exactly — and only — what the gate refuses `st sync` on:
+// the gate skips pure-untracked (`??`) and working-tree-only / unstaged (` M`)
+// entries (store.IsGateSkippedStatus, mirrored from checkNonStateGate). This
+// command clears precisely that staged set by UN-STAGING it
+// (`git reset -q -- <paths>`), never by deleting or stashing. Un-staging:
 //
-// NOTE: failure-mode B (an UNTRACKED file blocking `git pull --ff-only` with
-// "untracked working tree files would be overwritten") is intentionally NOT
-// handled here — blanket-stashing untracked files is destructive (it would
-// remove agent-memory/docs WIP). That case needs precise, reactive handling at
-// pull time (stash only the specific paths the incoming merge would overwrite);
-// it is tracked as a follow-up (see I-1594 out-of-scope).
+//   - is non-destructive: the file content stays in the working tree exactly as
+//     it was — a partially-staged file keeps its unstaged hunks, a staged
+//     deletion stays deleted-but-unstaged, a staged add becomes untracked. The
+//     gate skips all of those, so `st sync` is unblocked without losing a byte
+//     of anyone's work. (The first cut stashed files and removed them from the
+//     tree, which destroyed legitimate untracked/unstaged content in the shared
+//     checkout — see I-1594 history.)
+//   - handles staged deletions uniformly: a staged deletion un-stages to a
+//     worktree-only deletion (gate-skipped). No fragile stash-by-pathspec.
+//   - un-stages a staged rename only when BOTH sides are non-state (decomposing
+//     it into a worktree deletion + untracked file, both gate-skipped). A rename
+//     touching agent-state on either side is left entirely for the gate +
+//     OrphanStash — un-staging one side would lose an agent-state item or leave
+//     the gate blocked.
 //
-// Mirrors OrphanStash, with one deliberate difference: it is a STRICT NO-OP
-// unless the checkout is on main/master. Feature-branch worktrees carry the
-// agent's own legitimate uncommitted non-state WIP; only the shared main
-// checkout should never hold STAGED non-state dirt. This branch guard is an
-// extra safety boundary on top of the staged-only rule.
+// STRICT NO-OP unless the checkout is on main/master: feature-branch worktrees
+// carry the agent's own legitimate staged non-state WIP; only the shared main
+// checkout should never hold staged non-state dirt. This branch guard is an
+// extra boundary on top of the staged-only rule.
 //
-// Staged RENAMES are deliberately NOT auto-parked. Clearing a staged rename
-// safely requires mutating the index/working tree (the deleted old side cannot
-// be named as a stash pathspec), and a half-cleared rename risks either leaving
-// the gate blocked or committing an agent-state deletion. A staged non-state
-// rename in the shared main checkout is rare; the gate flags BOTH rename sides,
-// so it is surfaced for the operator to resolve rather than auto-mutated here.
+// NOT handled here (both tracked as I-1620, since each needs touching state the
+// gate deliberately leaves alone, or rewriting history):
+//   - failure-mode B: an UNTRACKED / unstaged-tracked file blocking
+//     `git pull --ff-only` — needs reactive, pull-time handling of only the
+//     paths an incoming merge would overwrite (never blanket-touch agent-memory/
+//     or WIP docs/).
+//   - committed-but-unpushed non-state on local main (which checkNonStateGate
+//     ALSO refuses sync on): un-staging cannot clear a commit; that needs a
+//     separate, careful reset/relocate of the offending commit.
 //
-// Nothing is deleted — every parked file is recoverable via `git stash` /
-// `st orphan list`. Best-effort: any git error logs to stderr and processing
-// continues; it never aborts startup.
-func NonStateStash(workspaceRoot, itemsPrefix, agentID string) []string {
+// Best-effort: a git error logs to stderr and the function continues; it never
+// aborts startup. Returns the list of un-staged paths.
+func ClearStagedNonState(workspaceRoot, itemsPrefix, agentID string) []string {
 	// Branch guard: only the shared main checkout. symbolic-ref returns
 	// refs/heads/<branch> on a branch, non-zero on detached HEAD. A detached
 	// HEAD (mid-rebase/merge) deliberately no-ops — never mutate a checkout
@@ -58,7 +61,7 @@ func NonStateStash(workspaceRoot, itemsPrefix, agentID string) []string {
 	}
 	branch := strings.TrimPrefix(strings.TrimSpace(string(refOut)), "refs/heads/")
 	if branch != "main" && branch != "master" {
-		return nil // feature branch — legitimate non-state WIP, leave it
+		return nil // feature branch — legitimate staged non-state WIP, leave it
 	}
 
 	// Flat layout (items root == git toplevel, Paths.Root "." or ""): the gate
@@ -73,16 +76,32 @@ func NonStateStash(workspaceRoot, itemsPrefix, agentID string) []string {
 		itemsPrefix += "/"
 	}
 
-	// -z: NUL-terminated, raw bytes, no path quoting. Rename/copy entries
-	// arrive as two NUL tokens: "<XY> <new>\0<old>\0". No --untracked-files=all:
-	// untracked entries are skipped below, so there is no need to expand them.
-	out, err := execGitOrphan(workspaceRoot, "status", "--porcelain", "-z")
+	// -z: NUL-terminated, raw bytes, no path quoting. Rename/copy entries arrive
+	// as two NUL tokens: "<XY> <new>\0<old>\0". --untracked-files=no: every
+	// untracked entry is skipped below (the gate skips `??`), so there is no
+	// reason to pay for the untracked working-tree walk on the startup hot path.
+	out, err := execGitOrphan(workspaceRoot, "status", "--porcelain", "-z", "--untracked-files=no")
 	if err != nil || len(out) == 0 {
 		return nil
 	}
 
-	var residues []string // staged, non-state, non-rename paths to park
+	var paths []string  // staged non-state paths to un-stage (incl. both rename sides)
+	var labels []string // primary paths, for the report
 	seen := make(map[string]bool)
+	markSeen := func(p string) {
+		if p != "" {
+			seen[p] = true
+		}
+	}
+	// addPath queues p to be un-staged; returns true if newly queued.
+	addPath := func(p string) bool {
+		if p == "" || seen[p] {
+			return false
+		}
+		seen[p] = true
+		paths = append(paths, p)
+		return true
+	}
 	tokens := strings.Split(string(out), "\x00")
 	for i := 0; i < len(tokens); i++ {
 		tok := tokens[i]
@@ -91,24 +110,40 @@ func NonStateStash(workspaceRoot, itemsPrefix, agentID string) []string {
 		}
 		code := tok[:2]
 		path := tok[3:]
-		// Rename/copy: the OLD path is the next NUL token (no XY prefix).
-		// Consume it to keep parsing aligned, then skip the whole entry — see
-		// the "Staged RENAMES are deliberately NOT auto-parked" note above.
+
+		// Rename/copy: the OLD path is the next NUL token (no XY prefix). A
+		// rename is staged (code[0] is R/C, never gate-skipped), so handle it
+		// here before the staged/managed checks below.
 		if code[0] == 'R' || code[0] == 'C' {
+			oldPath := ""
 			if i+1 < len(tokens) {
+				oldPath = tokens[i+1]
 				i++
 			}
+			newManaged := store.IsManagedStatePath(path, itemsPrefix)
+			oldManaged := oldPath != "" && store.IsManagedStatePath(oldPath, itemsPrefix)
+			// A rename touching agent-state on EITHER side is left ENTIRELY for
+			// the gate to flag and OrphanStash / the operator to resolve.
+			// Un-staging only the non-state side would either leave a staged
+			// agent-state deletion that st sync then commits (item data loss) or
+			// leave the gate blocked on the non-state side. checkNonStateGate
+			// gates both rename sides, so the rename is surfaced, not auto-mutated.
+			// Only renames whose BOTH sides are non-state are un-staged.
+			if newManaged || oldManaged {
+				markSeen(path)
+				markSeen(oldPath)
+				continue
+			}
+			if addPath(path) {
+				labels = append(labels, path)
+			}
+			addPath(oldPath)
 			continue
 		}
-		// Mirror checkNonStateGate's skips EXACTLY (git.go): skip pure-untracked
-		// (`??`) and working-tree-only / unstaged (`code[0] == ' '`) entries.
-		// The gate never blocks on these, and the shared main checkout
-		// legitimately holds untracked/unstaged non-state content (agent-memory/,
-		// WIP docs/) — stashing it would be destructive, not residue-clearing.
-		if code == "??" || code[0] == ' ' {
-			continue
-		}
-		if path == "" || seen[path] {
+
+		// Mirror checkNonStateGate's skips EXACTLY via the shared predicate:
+		// only STAGED (index-side) entries reach the gate's offender list.
+		if store.IsGateSkippedStatus(code) {
 			continue
 		}
 		// Leave agent-state (.as/ + itemsPrefix) for OrphanStash's ownership-
@@ -116,36 +151,27 @@ func NonStateStash(workspaceRoot, itemsPrefix, agentID string) []string {
 		if store.IsManagedStatePath(path, itemsPrefix) {
 			continue
 		}
-		seen[path] = true
-		residues = append(residues, path)
+		if addPath(path) {
+			labels = append(labels, path)
+		}
 	}
 
-	today := time.Now().UTC().Format("2006-01-02")
-	var stashed []string
-	for _, p := range residues {
-		label := fmt.Sprintf("st-nonstate-residue: %s dropped-by:%s date:%s",
-			p, agentID, today)
-		// No -u: only staged (tracked) changes reach here, so untracked capture
-		// is neither needed nor wanted.
-		if _, stashErr := execGitOrphanCapture(workspaceRoot, "stash", "push",
-			"-m", label, "--", p); stashErr != nil {
-			fmt.Fprintf(os.Stderr, "nonstate-stash: failed to stash %s: %v\n", p, stashErr)
-			continue
-		}
-		stashed = append(stashed, p)
+	if len(paths) == 0 {
+		return nil
 	}
 
-	if len(stashed) > 0 {
-		fmt.Printf("nonstate-stash: parked %d non-state file(s) from the shared main checkout (dropped-by %s):\n", len(stashed), agentID)
-		for _, p := range stashed {
-			fmt.Printf("  %s\n", p)
-		}
-		// Each file is parked in its OWN git stash. Do NOT print stash@{N} refs
-		// here — every push shifts earlier stashes down, so a ref captured at
-		// push time is stale by the end. `st orphan list` reads the live stash
-		// list and prints the authoritative ref per file.
-		fmt.Printf("  each is parked in its own git stash labeled 'st-nonstate-residue: <path>'\n")
-		fmt.Printf("  recover: st orphan list --workspace %q   (then git -C %q stash apply <ref>)\n", workspaceRoot, workspaceRoot)
+	// Un-stage all collected paths in one `git reset` (reset each index entry to
+	// HEAD). Non-destructive — working-tree content is untouched.
+	args := append([]string{"reset", "-q", "--"}, paths...)
+	if _, resetErr := execGitOrphanCapture(workspaceRoot, args...); resetErr != nil {
+		fmt.Fprintf(os.Stderr, "clear-nonstate: failed to un-stage non-state residue: %v\n", resetErr)
+		return nil
 	}
-	return stashed
+
+	fmt.Printf("clear-nonstate: un-staged %d staged non-state file(s) in the shared main checkout (by %s) so they no longer block st sync:\n", len(labels), agentID)
+	for _, p := range labels {
+		fmt.Printf("  %s\n", p)
+	}
+	fmt.Printf("  (content left untouched in the working tree; re-stage with `git add` if intended)\n")
+	return labels
 }

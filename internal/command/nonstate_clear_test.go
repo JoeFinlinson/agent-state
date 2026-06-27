@@ -21,14 +21,16 @@ func addUntrackedFile(t *testing.T, repoDir, rel, content string) {
 	}
 }
 
-// gitPorcelain returns `git status --porcelain` for repoDir (whole tree).
+// gitPorcelain returns `git status --porcelain --untracked-files=all` for repoDir.
 func gitPorcelain(t *testing.T, repoDir string) string {
 	t.Helper()
-	out, err := exec.Command("git", "-C", repoDir, "status", "--porcelain").Output()
+	out, err := exec.Command("git", "-C", repoDir, "status", "--porcelain", "--untracked-files=all").Output()
 	if err != nil {
 		t.Fatal(err)
 	}
-	return strings.TrimSpace(string(out))
+	// Trim only the trailing newline — the leading XY space (e.g. ` D`) is
+	// significant (unstaged vs staged), so TrimSpace would corrupt it.
+	return strings.Trim(string(out), "\n")
 }
 
 // checkoutBranch creates and switches to a feature branch in repoDir.
@@ -39,246 +41,268 @@ func checkoutBranch(t *testing.T, repoDir, branch string) {
 	}
 }
 
-// currentBranchName returns the checked-out branch (initGitRepo's default may
-// be main or master depending on the host git config).
-func currentBranchName(t *testing.T, repoDir string) string {
+// commitFile creates, stages and commits dir/rel so it is tracked at HEAD.
+func commitFile(t *testing.T, repoDir, rel, content string) {
 	t.Helper()
-	out, err := exec.Command("git", "-C", repoDir, "symbolic-ref", "--short", "HEAD").Output()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return strings.TrimSpace(string(out))
+	addUntrackedFile(t, repoDir, rel, content)
+	mustGit(t, repoDir, "add", rel)
+	mustGit(t, repoDir, "commit", "-m", "add "+rel)
 }
 
 const nsItemDir = "agent-state"
 const nsAgent = "agent-a"
 
-func TestNonStateStash_StashesStagedNonStateOnMain(t *testing.T) {
+func TestClearStagedNonState_UnstagesStagedNonState(t *testing.T) {
 	dir := t.TempDir()
 	initGitRepo(t, dir)
+	commitFile(t, dir, "scripts/foo.py", "base\n")
 
-	// A tracked, staged non-state edit — this is the case that trips the
-	// checkNonStateGate and refuses `st sync` (failure-mode A).
-	addTrackedDirtyFile(t, dir, "scripts/foo.py", "print('changed')\n")
-	if out, err := exec.Command("git", "-C", dir, "add", "scripts/foo.py").CombinedOutput(); err != nil {
-		t.Fatalf("git add: %v\n%s", err, out)
+	// Stage a non-state edit — this is the gate-blocking case.
+	if err := os.WriteFile(filepath.Join(dir, "scripts/foo.py"), []byte("staged change\n"), 0644); err != nil {
+		t.Fatal(err)
 	}
+	mustGit(t, dir, "add", "scripts/foo.py")
 
-	stashed := NonStateStash(dir, nsItemDir, nsAgent)
-	if len(stashed) != 1 {
-		t.Fatalf("expected 1 stash, got %d: %v", len(stashed), stashed)
+	cleared := ClearStagedNonState(dir, nsItemDir, nsAgent)
+	if len(cleared) != 1 || !strings.Contains(cleared[0], "scripts/foo.py") {
+		t.Fatalf("expected scripts/foo.py un-staged; got %v", cleared)
 	}
-	if !strings.Contains(stashed[0], "scripts/foo.py") {
-		t.Errorf("stash should reference scripts/foo.py; got %q", stashed[0])
+	// After: the change is now UNSTAGED (` M`) — the gate skips it — and content
+	// is preserved (non-destructive).
+	st := gitPorcelain(t, dir)
+	if st != "M scripts/foo.py" && st != " M scripts/foo.py" {
+		t.Errorf("expected unstaged ` M scripts/foo.py`; got %q", st)
 	}
-	if gitPorcelain(t, dir) != "" {
-		t.Errorf("tree should be clean after stash; git status: %q", gitPorcelain(t, dir))
-	}
-	// The stash carries attribution.
-	out, _ := exec.Command("git", "-C", dir, "stash", "list").Output()
-	if !strings.Contains(string(out), "st-nonstate-residue: scripts/foo.py dropped-by:"+nsAgent) {
-		t.Errorf("stash label missing attribution; got:\n%s", out)
+	body, _ := os.ReadFile(filepath.Join(dir, "scripts/foo.py"))
+	if string(body) != "staged change\n" {
+		t.Errorf("content must be preserved in the working tree; got %q", body)
 	}
 }
 
-func TestNonStateStash_LeavesUntrackedAlone(t *testing.T) {
+func TestClearStagedNonState_PartiallyStagedKeepsUnstagedHunk(t *testing.T) {
 	dir := t.TempDir()
 	initGitRepo(t, dir)
+	commitFile(t, dir, "scripts/mm.py", "base\n")
 
-	// Untracked non-state files (agent-memory/, WIP docs/) legitimately live in
-	// the shared main checkout. The gate skips `??`, so this command must too —
-	// stashing them would be destructive, not residue-clearing.
-	addUntrackedFile(t, dir, "docs/junk.md", "wip doc\n")
-	addUntrackedFile(t, dir, "agent-memory/note.md", "a note\n")
-
-	stashed := NonStateStash(dir, nsItemDir, nsAgent)
-	if len(stashed) != 0 {
-		t.Fatalf("untracked non-state must be left alone; got %v", stashed)
+	// Stage one version, then edit again so the file is partially staged (MM).
+	if err := os.WriteFile(filepath.Join(dir, "scripts/mm.py"), []byte("staged\n"), 0644); err != nil {
+		t.Fatal(err)
 	}
-	if gitPorcelain(t, dir) == "" {
-		t.Errorf("untracked files must remain in the working tree")
+	mustGit(t, dir, "add", "scripts/mm.py")
+	if err := os.WriteFile(filepath.Join(dir, "scripts/mm.py"), []byte("staged+unstaged\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cleared := ClearStagedNonState(dir, nsItemDir, nsAgent)
+	if len(cleared) != 1 {
+		t.Fatalf("expected mm.py un-staged; got %v", cleared)
+	}
+	// The peer's unstaged hunk must survive intact (the bug the stash approach hit).
+	body, _ := os.ReadFile(filepath.Join(dir, "scripts/mm.py"))
+	if string(body) != "staged+unstaged\n" {
+		t.Errorf("peer's unstaged work must be preserved; got %q", body)
 	}
 }
 
-func TestNonStateStash_LeavesUnstagedAlone(t *testing.T) {
+func TestClearStagedNonState_StagedDeletionUnstaged(t *testing.T) {
 	dir := t.TempDir()
 	initGitRepo(t, dir)
+	commitFile(t, dir, "scripts/del.py", "base\n")
+	mustGit(t, dir, "rm", "scripts/del.py") // staged deletion `D `
 
-	// A tracked non-state file modified but NOT staged (` M`). The gate skips
-	// working-tree-only changes (I-1472), so this command must too.
-	addTrackedDirtyFile(t, dir, "scripts/foo.py", "print('unstaged edit')\n")
-
-	stashed := NonStateStash(dir, nsItemDir, nsAgent)
-	if len(stashed) != 0 {
-		t.Fatalf("unstaged non-state must be left alone; got %v", stashed)
+	cleared := ClearStagedNonState(dir, nsItemDir, nsAgent)
+	if len(cleared) != 1 {
+		t.Fatalf("expected del.py un-staged; got %v", cleared)
 	}
-	if gitPorcelain(t, dir) == "" {
-		t.Errorf("unstaged edit must remain in the working tree")
+	// After: deletion is unstaged (` D`), which the gate skips — sync unblocked.
+	if got := gitPorcelain(t, dir); !strings.Contains(got, " D scripts/del.py") {
+		t.Errorf("staged deletion must become unstaged ` D`; got %q", got)
 	}
 }
 
-func TestNonStateStash_NoopOffMain(t *testing.T) {
+func TestClearStagedNonState_StagedRenameBothSidesUnstaged(t *testing.T) {
 	dir := t.TempDir()
 	initGitRepo(t, dir)
-	checkoutBranch(t, dir, "fix/I-999-feature")
+	commitFile(t, dir, "scripts/ren.py", "x\n")
+	mustGit(t, dir, "mv", "scripts/ren.py", "scripts/ren2.py") // staged rename
 
-	// Dirty non-state files on a feature branch are the agent's OWN legitimate
-	// WIP — must never be stashed.
-	addTrackedDirtyFile(t, dir, "scripts/foo.py", "print('wip')\n")
-	addUntrackedFile(t, dir, "docs/junk.md", "wip\n")
-
-	stashed := NonStateStash(dir, nsItemDir, nsAgent)
-	if len(stashed) != 0 {
-		t.Errorf("expected no stashes off main (peer-WIP protection); got %v", stashed)
+	cleared := ClearStagedNonState(dir, nsItemDir, nsAgent)
+	if len(cleared) != 1 {
+		t.Fatalf("expected the rename un-staged (one residue entry); got %v", cleared)
 	}
-	if gitPorcelain(t, dir) == "" {
-		t.Errorf("feature-branch WIP should remain dirty (not stashed)")
+	// After: rename decomposes into a worktree deletion + untracked file — both
+	// gate-skipped, so no lingering staged deletion blocks the gate.
+	got := gitPorcelain(t, dir)
+	if !strings.Contains(got, " D scripts/ren.py") || !strings.Contains(got, "?? scripts/ren2.py") {
+		t.Errorf("rename must un-stage to ` D old` + `?? new`; got %q", got)
 	}
 }
 
-func TestNonStateStash_LeavesAgentStateAlone(t *testing.T) {
+func TestClearStagedNonState_RenameOutOfAgentStateLeftAlone(t *testing.T) {
 	dir := t.TempDir()
 	initGitRepo(t, dir)
 
-	// A STAGED agent-state file — handled by OrphanStash, not this function.
-	// (Staged so we exercise the managed-path skip, not the unstaged skip.)
-	rel := filepath.Join(nsItemDir, "tasks", "T-1.md")
-	addTrackedDirtyFile(t, dir, rel, "id: T-1\nstatus: coding\n")
-	mustGit(t, dir, "add", rel)
-
-	stashed := NonStateStash(dir, nsItemDir, nsAgent)
-	if len(stashed) != 0 {
-		t.Errorf("staged agent-state must be left for OrphanStash; got %v", stashed)
-	}
-}
-
-func TestNonStateStash_RenameLeftAlone(t *testing.T) {
-	dir := t.TempDir()
-	initGitRepo(t, dir)
-
-	// A staged non-state rename is deliberately NOT auto-parked — clearing it
-	// safely needs index/worktree mutation, it is rare, and the gate flags both
-	// sides so it surfaces for the operator. The rename must be left intact
-	// (not half-cleared into a lingering staged deletion).
-	addUntrackedFile(t, dir, "scripts/old.py", "x\n")
-	mustGit(t, dir, "add", "scripts/old.py")
-	mustGit(t, dir, "commit", "-m", "add old.py")
-	mustGit(t, dir, "mv", "scripts/old.py", "scripts/new.py")
-
-	before := gitPorcelain(t, dir)
-	if !strings.Contains(before, "old.py") || !strings.Contains(before, "new.py") {
-		t.Fatalf("expected a staged rename; got %q", before)
-	}
-
-	stashed := NonStateStash(dir, nsItemDir, nsAgent)
-	if len(stashed) != 0 {
-		t.Fatalf("staged rename must not be auto-parked; got %v", stashed)
-	}
-	if got := gitPorcelain(t, dir); got != before {
-		t.Errorf("rename must be left fully intact; before=%q after=%q", before, got)
-	}
-}
-
-func TestNonStateStash_RenameOutOfAgentStateLeftAlone(t *testing.T) {
-	dir := t.TempDir()
-	initGitRepo(t, dir)
-
-	// A staged rename of an agent-state item OUT to a non-state path. Auto-
-	// clearing only the non-state new side would leave the item's staged
-	// DELETION, which st sync would commit → silent data loss (finding #1).
-	// The whole rename must be left untouched for the gate / OrphanStash.
+	// Staged rename of an agent-state item OUT to a non-state path. Un-staging
+	// the non-state side would leave the item's staged DELETION, which st sync
+	// would commit → silent data loss. The whole rename must be left intact.
 	rel := filepath.Join(nsItemDir, "issues", "I-9.md")
-	addUntrackedFile(t, dir, rel, "id: I-9\n")
-	mustGit(t, dir, "add", rel)
-	mustGit(t, dir, "commit", "-m", "add item")
+	commitFile(t, dir, rel, "id: I-9\n")
 	if err := os.MkdirAll(filepath.Join(dir, "scripts"), 0755); err != nil {
 		t.Fatal(err)
 	}
 	mustGit(t, dir, "mv", rel, "scripts/leaked.md")
 
 	before := gitPorcelain(t, dir)
-	stashed := NonStateStash(dir, nsItemDir, nsAgent)
-	if len(stashed) != 0 {
-		t.Fatalf("cross-boundary rename (agent-state→non-state) must not be auto-stashed; got %v", stashed)
+	cleared := ClearStagedNonState(dir, nsItemDir, nsAgent)
+	if cleared != nil {
+		t.Fatalf("cross-boundary rename (agent-state→non-state) must be left alone; got %v", cleared)
 	}
 	if gitPorcelain(t, dir) != before {
 		t.Errorf("rename must be left fully intact; before=%q after=%q", before, gitPorcelain(t, dir))
 	}
-	// Critically: the item's staged deletion must still be present (not silently
-	// cleared in a way that st sync would then commit).
 	if !strings.Contains(gitPorcelain(t, dir), "I-9.md") {
-		t.Errorf("agent-state item rename source must remain visible to the gate; got %q", gitPorcelain(t, dir))
+		t.Errorf("agent-state rename source must stay visible to the gate; got %q", gitPorcelain(t, dir))
 	}
 }
 
-func TestNonStateStash_RenameIntoAgentStateLeftAlone(t *testing.T) {
+func TestClearStagedNonState_RenameIntoAgentStateLeftAlone(t *testing.T) {
 	dir := t.TempDir()
 	initGitRepo(t, dir)
 
-	// A staged rename of a non-state file INTO agent-state. The new side is a
-	// legitimate staged agent-state add that st sync should commit; the non-
-	// state old side must not be half-cleared. Leave the whole rename (finding #2).
-	addUntrackedFile(t, dir, "scripts/foo.py", "x\n")
-	mustGit(t, dir, "add", "scripts/foo.py")
-	mustGit(t, dir, "commit", "-m", "add foo")
+	// Staged rename of a non-state file INTO agent-state. The new side is a
+	// legitimate staged agent-state add; the non-state old side must not be
+	// half-cleared. Leave the whole rename.
+	commitFile(t, dir, "scripts/foo.py", "x\n")
 	if err := os.MkdirAll(filepath.Join(dir, nsItemDir, "issues"), 0755); err != nil {
 		t.Fatal(err)
 	}
 	mustGit(t, dir, "mv", "scripts/foo.py", filepath.Join(nsItemDir, "issues", "foo.py"))
 
 	before := gitPorcelain(t, dir)
-	stashed := NonStateStash(dir, nsItemDir, nsAgent)
-	if len(stashed) != 0 {
-		t.Fatalf("cross-boundary rename (non-state→agent-state) must not be auto-stashed; got %v", stashed)
+	cleared := ClearStagedNonState(dir, nsItemDir, nsAgent)
+	if cleared != nil {
+		t.Fatalf("cross-boundary rename (non-state→agent-state) must be left alone; got %v", cleared)
 	}
 	if gitPorcelain(t, dir) != before {
 		t.Errorf("rename must be left fully intact; before=%q after=%q", before, gitPorcelain(t, dir))
 	}
 }
 
-func TestNonStateStash_NoopFlatLayout(t *testing.T) {
+func TestClearStagedNonState_LeavesUntrackedAlone(t *testing.T) {
 	dir := t.TempDir()
 	initGitRepo(t, dir)
 
-	// Flat layout: items root == git toplevel (Paths.Root "."). Item files live
-	// at the repo root (e.g. issues/I-5.md) and must NOT be treated as residue.
-	addUntrackedFile(t, dir, "issues/I-5.md", "id: I-5\n")
-	addUntrackedFile(t, dir, "scripts/foo.py", "x\n")
+	// Untracked non-state (agent-memory/, WIP docs/) legitimately lives in the
+	// shared main checkout — the gate skips `??`, so this must too.
+	addUntrackedFile(t, dir, "docs/junk.md", "wip\n")
+	addUntrackedFile(t, dir, "agent-memory/note.md", "a note\n")
 
-	if stashed := NonStateStash(dir, ".", nsAgent); stashed != nil {
-		t.Errorf("flat layout must be a strict no-op (gate fail-opens); got %v", stashed)
+	cleared := ClearStagedNonState(dir, nsItemDir, nsAgent)
+	if cleared != nil {
+		t.Fatalf("untracked non-state must be left alone; got %v", cleared)
 	}
 	if gitPorcelain(t, dir) == "" {
-		t.Errorf("flat-layout files must remain in the working tree")
+		t.Errorf("untracked files must remain")
 	}
 }
 
-func TestNonStateStash_NoopWhenClean(t *testing.T) {
+func TestClearStagedNonState_LeavesUnstagedAlone(t *testing.T) {
 	dir := t.TempDir()
 	initGitRepo(t, dir)
 
-	stashed := NonStateStash(dir, nsItemDir, nsAgent)
-	if stashed != nil {
-		t.Errorf("expected nil on clean tree; got %v", stashed)
+	// Tracked non-state file modified but NOT staged (` M`) — gate skips it.
+	addTrackedDirtyFile(t, dir, "scripts/foo.py", "print('unstaged')\n")
+
+	cleared := ClearStagedNonState(dir, nsItemDir, nsAgent)
+	if cleared != nil {
+		t.Fatalf("unstaged non-state must be left alone; got %v", cleared)
 	}
 }
 
-func TestNonStateStash_Idempotent(t *testing.T) {
+func TestClearStagedNonState_LeavesStagedAgentStateAlone(t *testing.T) {
 	dir := t.TempDir()
 	initGitRepo(t, dir)
-	_ = currentBranchName(t, dir) // sanity: ensure we are on a real branch
 
-	// Staged non-state residue (the gate-blocking case this clears).
-	addTrackedDirtyFile(t, dir, "scripts/foo.py", "staged change\n")
+	// A STAGED agent-state file — handled by OrphanStash + normal st sync, never
+	// un-staged here (exercises the managed-path skip on a staged entry).
+	rel := filepath.Join(nsItemDir, "tasks", "T-1.md")
+	commitFile(t, dir, rel, "id: T-1\n")
+	if err := os.WriteFile(filepath.Join(dir, rel), []byte("id: T-1\nstatus: coding\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, dir, "add", rel)
+
+	cleared := ClearStagedNonState(dir, nsItemDir, nsAgent)
+	if cleared != nil {
+		t.Errorf("staged agent-state must be left alone; got %v", cleared)
+	}
+	if !strings.Contains(gitPorcelain(t, dir), "M  "+rel) {
+		t.Errorf("agent-state file must remain STAGED; got %q", gitPorcelain(t, dir))
+	}
+}
+
+func TestClearStagedNonState_NoopOffMain(t *testing.T) {
+	dir := t.TempDir()
+	initGitRepo(t, dir)
+	checkoutBranch(t, dir, "fix/I-999-feature")
+
+	// Staged non-state on a feature branch is the agent's OWN legitimate WIP.
+	commitFile(t, dir, "scripts/foo.py", "base\n")
+	if err := os.WriteFile(filepath.Join(dir, "scripts/foo.py"), []byte("wip\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
 	mustGit(t, dir, "add", "scripts/foo.py")
 
-	first := NonStateStash(dir, nsItemDir, nsAgent)
-	if len(first) != 1 {
-		t.Fatalf("first run should stash 1 file; got %v", first)
+	cleared := ClearStagedNonState(dir, nsItemDir, nsAgent)
+	if cleared != nil {
+		t.Errorf("off main must be a strict no-op; got %v", cleared)
 	}
-	second := NonStateStash(dir, nsItemDir, nsAgent)
-	if len(second) != 0 {
-		t.Errorf("second run should be a no-op (tree already clean); got %v", second)
+	if !strings.Contains(gitPorcelain(t, dir), "M  scripts/foo.py") {
+		t.Errorf("feature-branch staged WIP must remain staged")
+	}
+}
+
+func TestClearStagedNonState_NoopFlatLayout(t *testing.T) {
+	dir := t.TempDir()
+	initGitRepo(t, dir)
+
+	// Flat layout (Paths.Root "."): item files at the repo root must NOT be
+	// treated as residue — the gate fail-opens, so this no-ops.
+	commitFile(t, dir, "issues/I-5.md", "id: I-5\n")
+	if err := os.WriteFile(filepath.Join(dir, "issues/I-5.md"), []byte("id: I-5 edited\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, dir, "add", "issues/I-5.md")
+
+	if cleared := ClearStagedNonState(dir, ".", nsAgent); cleared != nil {
+		t.Errorf("flat layout must be a strict no-op; got %v", cleared)
+	}
+}
+
+func TestClearStagedNonState_NoopWhenClean(t *testing.T) {
+	dir := t.TempDir()
+	initGitRepo(t, dir)
+	if cleared := ClearStagedNonState(dir, nsItemDir, nsAgent); cleared != nil {
+		t.Errorf("expected nil on clean tree; got %v", cleared)
+	}
+}
+
+func TestClearStagedNonState_Idempotent(t *testing.T) {
+	dir := t.TempDir()
+	initGitRepo(t, dir)
+	commitFile(t, dir, "scripts/foo.py", "base\n")
+	if err := os.WriteFile(filepath.Join(dir, "scripts/foo.py"), []byte("staged\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, dir, "add", "scripts/foo.py")
+
+	first := ClearStagedNonState(dir, nsItemDir, nsAgent)
+	if len(first) != 1 {
+		t.Fatalf("first run should un-stage 1 file; got %v", first)
+	}
+	second := ClearStagedNonState(dir, nsItemDir, nsAgent)
+	if second != nil {
+		t.Errorf("second run should be a no-op (nothing staged); got %v", second)
 	}
 }
 
@@ -286,6 +310,8 @@ func TestOrphanList_ShowsNonStateResidue(t *testing.T) {
 	dir := t.TempDir()
 	initGitRepo(t, dir)
 
+	// OrphanList still surfaces any legacy st-nonstate-residue stashes (left by
+	// the earlier stash-based cut) alongside st-orphan stashes, for cleanup.
 	fakeOutput := `stash@{0}: On main: st-orphan: agent-state/tasks/T-001.md owned-by:agent-b dropped-by:agent-i date:2026-06-14
 stash@{1}: On main: st-nonstate-residue: scripts/foo.py dropped-by:agent-a date:2026-06-26
 stash@{2}: On main: WIP on main: unrelated`
@@ -311,10 +337,10 @@ stash@{2}: On main: WIP on main: unrelated`
 	output := string(buf[:n])
 
 	if !strings.Contains(output, "st-nonstate-residue: scripts/foo.py") {
-		t.Errorf("expected non-state residue stash in list output; got:\n%s", output)
+		t.Errorf("expected non-state residue stash listed; got:\n%s", output)
 	}
 	if !strings.Contains(output, "st-orphan: agent-state/tasks/T-001.md") {
-		t.Errorf("expected orphan stash still listed; got:\n%s", output)
+		t.Errorf("expected orphan stash listed; got:\n%s", output)
 	}
 	if strings.Contains(output, "WIP on main: unrelated") {
 		t.Errorf("unrelated stash should be filtered; got:\n%s", output)
