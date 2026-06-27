@@ -9,17 +9,6 @@ import (
 	"github.com/theraprac/agent-state/internal/store"
 )
 
-// nonStateResidue is one parkable unit. specs holds every pathspec that must be
-// stashed together to leave the tree clean — for a rename that is BOTH the new
-// path and the old (staged-deleted) path, so the index deletion does not linger
-// and re-block the gate.
-type nonStateResidue struct {
-	path    string // primary path, used in the stash label
-	specs   []string
-	rename  bool   // staged rename of two non-state paths — unstage before stashing
-	oldPath string // rename source (exists at HEAD) — used to restore on stash failure
-}
-
 // NonStateStash parks uncommitted NON-state residue (scripts/, docs/, etc.)
 // left in the SHARED theraprac-workspace main checkout by a peer, so it cannot
 // silently block the next agent's state sync (I-1594). Two failure modes it
@@ -41,7 +30,14 @@ type nonStateResidue struct {
 //
 // Path classification reuses the gate's own store.IsManagedStatePath so the set
 // of "non-state" paths stashed here is identical to the set checkNonStateGate
-// blocks on — no classifier drift (I-1594 review findings #2/#5/#6/#8).
+// blocks on — no classifier drift.
+//
+// Staged RENAMES are deliberately NOT auto-parked. Clearing a staged rename
+// safely requires mutating the index/working tree (the deleted old side cannot
+// be named as a stash pathspec), and a half-cleared rename risks either leaving
+// the gate blocked or committing an agent-state deletion. A staged non-state
+// rename in the shared main checkout is rare; the gate flags BOTH rename sides,
+// so it is surfaced for the operator to resolve rather than auto-mutated here.
 //
 // Nothing is deleted — every parked file is recoverable via `git stash` /
 // `st orphan list`. Best-effort: any git error logs to stderr and processing
@@ -50,7 +46,7 @@ func NonStateStash(workspaceRoot, itemsPrefix, agentID string) []string {
 	// Branch guard: only the shared main checkout. symbolic-ref returns
 	// refs/heads/<branch> on a branch, non-zero on detached HEAD. A detached
 	// HEAD (mid-rebase/merge) deliberately no-ops — never mutate a checkout
-	// that is mid-operation (I-1594 review finding #7: fail-safe).
+	// that is mid-operation (fail-safe).
 	refOut, refErr := execGitOrphan(workspaceRoot, "symbolic-ref", "-q", "HEAD")
 	if refErr != nil {
 		return nil
@@ -63,7 +59,7 @@ func NonStateStash(workspaceRoot, itemsPrefix, agentID string) []string {
 	// Flat layout (items root == git toplevel, Paths.Root "." or ""): the gate
 	// fail-opens (no items-vs-non-items surface to enforce), so there is no
 	// non-state residue to clear — mirror that and no-op, rather than treating
-	// agent-state item files as residue (I-1594 review finding #5).
+	// agent-state item files as residue.
 	itemsPrefix = strings.TrimSpace(itemsPrefix)
 	if itemsPrefix == "" || itemsPrefix == "." || itemsPrefix == "./" {
 		return nil
@@ -82,7 +78,7 @@ func NonStateStash(workspaceRoot, itemsPrefix, agentID string) []string {
 		return nil
 	}
 
-	var items []nonStateResidue
+	var residues []string // non-state, non-rename paths to park
 	seen := make(map[string]bool)
 	tokens := strings.Split(string(out), "\x00")
 	for i := 0; i < len(tokens); i++ {
@@ -92,83 +88,39 @@ func NonStateStash(workspaceRoot, itemsPrefix, agentID string) []string {
 		}
 		code := tok[:2]
 		path := tok[3:]
-		// Rename/copy: the OLD path is the next token (no XY prefix).
-		isRename := code[0] == 'R' || code[0] == 'C'
-		oldPath := ""
-		if isRename && i+1 < len(tokens) {
-			oldPath = tokens[i+1]
-			i++ // consume the old-path token
+		// Rename/copy: the OLD path is the next NUL token (no XY prefix).
+		// Consume it to keep parsing aligned, then skip the whole entry — see
+		// the "Staged RENAMES are deliberately NOT auto-parked" note above.
+		if code[0] == 'R' || code[0] == 'C' {
+			if i+1 < len(tokens) {
+				i++
+			}
+			continue
 		}
 		if path == "" || seen[path] {
 			continue
 		}
-
-		if isRename {
-			newManaged := store.IsManagedStatePath(path, itemsPrefix)
-			oldManaged := oldPath != "" && store.IsManagedStatePath(oldPath, itemsPrefix)
-			// A cross-boundary rename — exactly one side under agent-state — is
-			// hazardous to auto-clear: clearing only the non-state side leaves
-			// the managed side as a staged deletion/addition that st sync would
-			// commit, deleting an agent-state item (finding #1) or leaving the
-			// gate blocked (finding #2). Only auto-park renames where BOTH sides
-			// are non-state; leave any rename touching agent-state for the gate
-			// to flag and the operator / OrphanStash to resolve. Mark both sides
-			// seen so neither is reprocessed.
-			seen[path] = true
-			if oldPath != "" {
-				seen[oldPath] = true
-			}
-			if newManaged || oldManaged {
-				continue
-			}
-			specs := []string{path}
-			if oldPath != "" {
-				specs = append(specs, oldPath)
-			}
-			items = append(items, nonStateResidue{path: path, specs: specs, rename: true, oldPath: oldPath})
-			continue
-		}
-
-		// Non-rename: leave agent-state (.as/ + itemsPrefix) for OrphanStash's
-		// ownership-aware handling — identical rule to the gate.
+		// Leave agent-state (.as/ + itemsPrefix) for OrphanStash's ownership-
+		// aware handling — identical rule to the gate.
 		if store.IsManagedStatePath(path, itemsPrefix) {
 			continue
 		}
 		seen[path] = true
-		items = append(items, nonStateResidue{path: path, specs: []string{path}})
+		residues = append(residues, path)
 	}
 
 	today := time.Now().UTC().Format("2006-01-02")
 	var stashed []string
-	for _, r := range items {
+	for _, p := range residues {
 		label := fmt.Sprintf("st-nonstate-residue: %s dropped-by:%s date:%s",
-			r.path, agentID, today)
-		// A staged rename cannot be stashed by naming the deleted old path as a
-		// pathspec ("did not match any files"). Unstage the rename first so it
-		// decomposes into a worktree deletion (old) + untracked file (new),
-		// which `git stash push -u -- <paths>` then captures uniformly, leaving
-		// the index clean (finding #3).
-		if r.rename {
-			if _, rErr := execGitOrphanCapture(workspaceRoot, append([]string{"reset", "-q", "--"}, r.specs...)...); rErr != nil {
-				fmt.Fprintf(os.Stderr, "nonstate-stash: failed to unstage rename %s: %v\n", r.path, rErr)
-				continue
-			}
-		}
+			p, agentID, today)
 		// -u captures untracked paths (failure-mode B); harmless for tracked.
-		args := append([]string{"stash", "push", "-u", "-m", label, "--"}, r.specs...)
-		if _, stashErr := execGitOrphanCapture(workspaceRoot, args...); stashErr != nil {
-			fmt.Fprintf(os.Stderr, "nonstate-stash: failed to stash %s: %v\n", r.path, stashErr)
-			// If this was a rename, the reset above already removed the old
-			// committed file from the working tree (decomposed into a ` D`
-			// deletion the gate skips). The stash failed, so restore the old
-			// file from HEAD rather than leave it silently missing (finding #4);
-			// the untracked new path stays on disk and is re-seen next run.
-			if r.rename && r.oldPath != "" {
-				_, _ = execGitOrphanCapture(workspaceRoot, "checkout", "-q", "HEAD", "--", r.oldPath)
-			}
+		if _, stashErr := execGitOrphanCapture(workspaceRoot, "stash", "push", "-u",
+			"-m", label, "--", p); stashErr != nil {
+			fmt.Fprintf(os.Stderr, "nonstate-stash: failed to stash %s: %v\n", p, stashErr)
 			continue
 		}
-		stashed = append(stashed, r.path)
+		stashed = append(stashed, p)
 	}
 
 	if len(stashed) > 0 {
@@ -178,8 +130,8 @@ func NonStateStash(workspaceRoot, itemsPrefix, agentID string) []string {
 		}
 		// Each file is parked in its OWN git stash. Do NOT print stash@{N} refs
 		// here — every push shifts earlier stashes down, so a ref captured at
-		// push time is stale by the end (finding #4). `st orphan list` reads the
-		// live stash list and prints the authoritative ref per file.
+		// push time is stale by the end. `st orphan list` reads the live stash
+		// list and prints the authoritative ref per file.
 		fmt.Printf("  each is parked in its own git stash labeled 'st-nonstate-residue: <path>'\n")
 		fmt.Printf("  recover: st orphan list --workspace %q   (then git -C %q stash apply <ref>)\n", workspaceRoot, workspaceRoot)
 	}

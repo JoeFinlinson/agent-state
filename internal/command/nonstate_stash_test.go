@@ -159,12 +159,14 @@ func TestNonStateStash_LeavesGitignoredAlone(t *testing.T) {
 	}
 }
 
-func TestNonStateStash_StagedRenameClearsBothSides(t *testing.T) {
+func TestNonStateStash_RenameLeftAlone(t *testing.T) {
 	dir := t.TempDir()
 	initGitRepo(t, dir)
 
-	// Commit a tracked non-state file, then stage a rename of it. The staged
-	// deletion of the old path must not linger after stashing (finding #3).
+	// A staged non-state rename is deliberately NOT auto-parked — clearing it
+	// safely needs index/worktree mutation, it is rare, and the gate flags both
+	// sides so it surfaces for the operator. The rename must be left intact
+	// (not half-cleared into a lingering staged deletion).
 	addUntrackedFile(t, dir, "scripts/old.py", "x\n")
 	mustGit(t, dir, "add", "scripts/old.py")
 	mustGit(t, dir, "commit", "-m", "add old.py")
@@ -176,11 +178,11 @@ func TestNonStateStash_StagedRenameClearsBothSides(t *testing.T) {
 	}
 
 	stashed := NonStateStash(dir, nsItemDir, nsAgent)
-	if len(stashed) != 1 {
-		t.Fatalf("expected 1 residue entry for the rename; got %v", stashed)
+	if len(stashed) != 0 {
+		t.Fatalf("staged rename must not be auto-parked; got %v", stashed)
 	}
-	if got := gitPorcelain(t, dir); got != "" {
-		t.Errorf("tree must be fully clean after stashing a rename (no lingering staged deletion); got %q", got)
+	if got := gitPorcelain(t, dir); got != before {
+		t.Errorf("rename must be left fully intact; before=%q after=%q", before, got)
 	}
 }
 
