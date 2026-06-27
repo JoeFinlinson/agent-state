@@ -2182,3 +2182,78 @@ func gitRun(t *testing.T, dir string, args ...string) {
 		t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
 }
+
+// TestGitSync_StagesDotAsInNestedLayout_I1622 is the I-1622 regression guard:
+// in a NESTED layout (paths.root: agent-state), `.as/` (epics/sprints/queue/
+// stacks) is a SIBLING of ItemDir at the git toplevel. Before the fix, GitSync's
+// ItemDir-cwd-scoped `git add -u -- .` never reached it, so a `.as/epics.yaml`
+// mutation was silently dropped from sync while "Synced." still printed (the
+// Inv-1 honest-sync violation found live on 2026-06-27). This test fails without
+// the toplevel `.as/` staging in GitSync.
+func TestGitSync_StagesDotAsInNestedLayout_I1622(t *testing.T) {
+	top := t.TempDir()
+	itemsRoot := filepath.Join(top, "agent-state")
+	for _, d := range []string{"tasks", "issues", "archive"} {
+		os.MkdirAll(filepath.Join(itemsRoot, d), 0755)
+	}
+	asDir := filepath.Join(top, ".as")
+	os.MkdirAll(asDir, 0755)
+	// Nested config: items live under agent-state/, .as/ stays at the toplevel.
+	os.WriteFile(filepath.Join(asDir, "config.yaml"),
+		[]byte("paths:\n  root: agent-state\n"), 0644)
+	// A tracked canonical .as/ state file (the kind that was going unpersisted).
+	os.WriteFile(filepath.Join(asDir, "epics.yaml"),
+		[]byte("epics: []\nsprints: []\n"), 0644)
+	// An item under ItemDir so the ItemDir staging path also has content.
+	writeItem(t, filepath.Join(itemsRoot, "tasks", "T-001-first-task.md"), `id: T-001
+type: task
+status: queued
+created: 2026-03-25T10:00:00-06:00
+last_touched: 2026-03-25T10:00:00-06:00
+
+title: First task
+`)
+
+	initGitRepo(t, top)
+	gitBareRemote(t, top)
+
+	cfg, err := config.Load(top)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	cfg.Git = &config.GitConfig{AutoCommit: true, AutoPush: true}
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// Sanity: nested layout (ItemDir is a subdir of the toplevel).
+	if filepath.Clean(cfg.ItemDir()) == filepath.Clean(top) {
+		t.Fatalf("expected nested layout, but ItemDir == toplevel (%s)", top)
+	}
+
+	// Mutate the canonical .as/epics.yaml in the working tree — exactly what
+	// `st sprint add` / `st epic create` do. This lives OUTSIDE ItemDir.
+	const marker = "test-epic-i1622"
+	os.WriteFile(filepath.Join(asDir, "epics.yaml"),
+		[]byte("epics:\n  - id: "+marker+"\n    title: T\n    status: active\nsprints: []\n"), 0644)
+
+	if err := s.GitSync("st sprint add: i1622 test"); err != nil {
+		t.Fatalf("GitSync: %v", err)
+	}
+
+	// The fix's contract: the .as/epics.yaml change must have been staged,
+	// committed onto main, and pushed — so origin/main now carries it.
+	run := func(args ...string) string {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = top
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return string(out)
+	}
+	blob := run("show", "refs/remotes/origin/main:.as/epics.yaml")
+	if !strings.Contains(blob, marker) {
+		t.Errorf("origin/main:.as/epics.yaml is missing the mutation %q — GitSync did not stage/commit/push sibling .as/ state (I-1622). Got:\n%s", marker, blob)
+	}
+}

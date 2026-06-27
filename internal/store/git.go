@@ -696,6 +696,29 @@ func (s *Store) GitSync(message string, newPaths ...string) error {
 		}
 	}
 
+	// I-1622: `.as/` (epics, sprints, queue, stacks) is canonical shared state
+	// that lives at the git TOPLEVEL — a SIBLING of ItemDir in a nested layout
+	// (paths.root: agent-state), which the ItemDir-cwd-scoped `git add -u -- .`
+	// above can NEVER reach. Without this, every epic/sprint/queue/stack mutation
+	// is silently dropped from sync while "Synced." still prints (Inv 1 honest-
+	// sync violation, proven 2026-06-27: origin/main:.as/epics.yaml frozen at the
+	// 2026-06-06 flat-layout era). Stage tracked-modified `.as/` anchored at the
+	// toplevel so it flows through commitStagedOntoMain → push → verifyPushLanded.
+	// `-u` ignores untracked, preserving I-442/I-1472 peer-WIP + session-junk
+	// protection; the non-state gate allowlists `.as/`, so this never trips it.
+	// Skipped in flat layout (toplevel == root), where `add -u -- .` already
+	// covered `.as/`.
+	if top, e := gitOutput(root, "rev-parse", "--show-toplevel"); e == nil {
+		top = strings.TrimSpace(top)
+		if filepath.Clean(top) != filepath.Clean(root) {
+			if _, statErr := os.Stat(filepath.Join(top, ".as")); statErr == nil {
+				if err := gitCmd(top, "add", "-u", "--", ".as"); err != nil {
+					return fmt.Errorf("git add .as: %w", err)
+				}
+			}
+		}
+	}
+
 	// Check if there's anything STAGED to commit. `git status
 	// --porcelain` would also show untracked files (e.g.
 	// `.st-git.lock`, peer agents' WIP) which we intentionally don't
