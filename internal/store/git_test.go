@@ -2325,3 +2325,76 @@ title: First task
 		t.Fatalf("GitSync must not hard-fail when .as/ has no canonical files (PR #300 finding 1), got: %v", err)
 	}
 }
+
+// TestGitSync_StagesDotAsDeletion_I1622 guards PR #300 finding 6: deleting a
+// canonical .as/ file (e.g. retiring queue.yaml) must sync the DELETION to
+// origin/main. The os.Stat-then-skip first cut dropped deletions; `git add -A`
+// over the existing-or-tracked filter records them.
+func TestGitSync_StagesDotAsDeletion_I1622(t *testing.T) {
+	top := t.TempDir()
+	itemsRoot := filepath.Join(top, "agent-state")
+	for _, d := range []string{"tasks", "issues", "archive"} {
+		os.MkdirAll(filepath.Join(itemsRoot, d), 0755)
+	}
+	asDir := filepath.Join(top, ".as")
+	os.MkdirAll(asDir, 0755)
+	os.WriteFile(filepath.Join(asDir, "config.yaml"), []byte("paths:\n  root: agent-state\n"), 0644)
+	os.WriteFile(filepath.Join(asDir, "queue.yaml"), []byte("queue: [X]\n"), 0644)
+	writeItem(t, filepath.Join(itemsRoot, "tasks", "T-001-first-task.md"), "id: T-001\ntype: task\nstatus: queued\ncreated: 2026-03-25T10:00:00-06:00\nlast_touched: 2026-03-25T10:00:00-06:00\n\ntitle: First task\n")
+	initGitRepo(t, top)
+	gitBareRemote(t, top)
+
+	cfg, err := config.Load(top)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	cfg.Git = &config.GitConfig{AutoCommit: true, AutoPush: true}
+	s, _ := New(cfg)
+
+	// Retire the canonical queue.yaml.
+	if err := os.Remove(filepath.Join(asDir, "queue.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.GitSync("st: retire queue.yaml"); err != nil {
+		t.Fatalf("GitSync: %v", err)
+	}
+	run := func(args ...string) (string, error) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = top
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+	if out, _ := run("ls-tree", "refs/remotes/origin/main", ".as/queue.yaml"); strings.TrimSpace(out) != "" {
+		t.Errorf("origin/main still has .as/queue.yaml — deletion was not synced (PR #300 finding 6): %q", out)
+	}
+}
+
+// TestGitSync_FlatLayout_StagesUntrackedNewCanonical_I1622 guards PR #300
+// finding 1: in a FLAT layout, the ItemDir `git add -u -- .` reaches .as/ but
+// `-u` ignores untracked-NEW files, so a first-ever canonical file was dropped.
+// The canonical-staging block now runs in flat layout too.
+func TestGitSync_FlatLayout_StagesUntrackedNewCanonical_I1622(t *testing.T) {
+	root, _ := setupTestDir(t)
+	asDir := filepath.Join(root, ".as")
+	os.MkdirAll(asDir, 0755)
+	os.WriteFile(filepath.Join(asDir, "config.yaml"), []byte("paths:\n  root: .\n"), 0644)
+	initGitRepo(t, root)
+	gitBareRemote(t, root)
+
+	s := gitSyncStore(t, root)
+	dirtyItem(t, s) // something for the ItemDir path to stage
+
+	// First-ever (untracked) canonical queue.yaml.
+	const marker = "flat-new-i1622"
+	os.WriteFile(filepath.Join(asDir, "queue.yaml"), []byte("queue: ["+marker+"]\n"), 0644)
+
+	if err := s.GitSync("st queue add: flat"); err != nil {
+		t.Fatalf("GitSync: %v", err)
+	}
+	cmd := exec.Command("git", "show", "refs/remotes/origin/main:.as/queue.yaml")
+	cmd.Dir = root
+	out, _ := cmd.CombinedOutput()
+	if !strings.Contains(string(out), marker) {
+		t.Errorf("origin/main:.as/queue.yaml missing %q — untracked-new canonical file dropped in flat layout (PR #300 finding 1). Got:\n%s", marker, out)
+	}
+}
