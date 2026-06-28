@@ -2146,25 +2146,30 @@ func TestResolveSuiteWorkdir(t *testing.T) {
 		Repos:   []string{"theraprac-api"},
 	}
 
-	// (a) sibling-repo suite: always returns cfg.Root() regardless of worktree
 	wtBase := filepath.Join(cfg.Root(), "worktrees", "T-003")
 	wsDir := filepath.Join(wtBase, "theraprac-workspace")
 	if err := os.MkdirAll(wsDir, 0755); err != nil {
 		t.Fatalf("create workspace worktree dir: %v", err)
 	}
-	siblingCmd := "cd ../theraprac-api && make test-unit"
-	if got := resolveSuiteWorkdir(cfg, "T-003", siblingCmd); got != cfg.Root() {
-		t.Errorf("sibling-repo suite: got %q, want cfg.Root() %q", got, cfg.Root())
+
+	// (a) any suite when worktree workspace exists: returns worktree workspace path.
+	// Post-rewriteSuiteForWorktree, sibling-repo suites use absolute `cd /path`
+	// so the CWD returned here is irrelevant for them — they navigate themselves.
+	if got := resolveSuiteWorkdir(cfg, "T-003"); got != wsDir {
+		t.Errorf("suite with worktree: got %q, want %q", got, wsDir)
 	}
 
-	// (b) workspace-scope suite with active worktree: returns worktree workspace path
-	wsCmd := "bash claude-config/hooks/run-changed-hook-tests.sh"
-	if got := resolveSuiteWorkdir(cfg, "T-003", wsCmd); got != wsDir {
-		t.Errorf("workspace-scope suite with worktree: got %q, want %q", got, wsDir)
+	// (b) no worktree on disk (item T-999 dir absent): falls back to cfg.Root()
+	if got := resolveSuiteWorkdir(cfg, "T-999"); got != cfg.Root() {
+		t.Errorf("no worktree: got %q, want cfg.Root() %q", got, cfg.Root())
 	}
 
-	// (c) workspace-scope suite with no worktree: falls back to cfg.Root()
-	if got := resolveSuiteWorkdir(cfg, "T-999", wsCmd); got != cfg.Root() {
-		t.Errorf("workspace-scope suite no worktree: got %q, want cfg.Root() %q", got, cfg.Root())
+	// (c) worktree configured but workspace subdir absent: falls back to cfg.Root()
+	wtBaseNoWs := filepath.Join(cfg.Root(), "worktrees", "T-004")
+	if err := os.MkdirAll(wtBaseNoWs, 0755); err != nil {
+		t.Fatalf("create worktree base without workspace: %v", err)
+	}
+	if got := resolveSuiteWorkdir(cfg, "T-004"); got != cfg.Root() {
+		t.Errorf("worktree base exists but no workspace subdir: got %q, want cfg.Root() %q", got, cfg.Root())
 	}
 }

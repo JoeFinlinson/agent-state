@@ -399,11 +399,9 @@ func testRunMode(s *store.Store, cfg *config.Config, id, suite, suiteCmd, sha st
 
 	start := time.Now()
 
-	// I-1634: workspace-scope suites (hook_test / workspace_test) have no
-	// "cd ../" prefix so they inherit the CWD. Run them from the item's
-	// feature-branch theraprac-workspace worktree checkout, not cfg.Root()
-	// (which stays on main and produces a vacuous diff vs origin/main).
-	suiteWorkdir := resolveSuiteWorkdir(cfg, id, cmd)
+	// I-1634: workspace-scope suites inherit the CWD; run them from the item's
+	// theraprac-workspace worktree checkout so the hook diff is vs feature branch.
+	suiteWorkdir := resolveSuiteWorkdir(cfg, id)
 
 	// Execute suite command. Stream output to stderr so the user (and
 	// activity tracker) sees progress.
@@ -1028,17 +1026,13 @@ func rewriteSuiteForWorktree(cfg *config.Config, itemID, suiteCmd string) string
 }
 
 // resolveSuiteWorkdir picks the working directory for running a suite command.
-// Sibling-repo suites (those containing "cd ../") are always run from cfg.Root()
-// because rewriteSuiteForWorktree has already replaced the relative cd with an
-// absolute worktree path, making the CWD irrelevant. Workspace-scope suites (no
-// "cd ../", e.g. hook_test / workspace_test) inherit the CWD directly, so they
-// must run from the item's feature-branch theraprac-workspace checkout rather than
-// the main clone — otherwise run-changed-hook-tests.sh diffs origin/main..HEAD on
-// a clean main checkout and reports a vacuous pass. I-1634.
-func resolveSuiteWorkdir(cfg *config.Config, id, suiteCmd string) string {
-	if strings.Contains(suiteCmd, "cd ../") {
-		return cfg.Root()
-	}
+// cmd arrives post-rewriteSuiteForWorktree, so sibling-repo suites already
+// contain an absolute `cd /path/to/repo` and are unaffected by CWD. Workspace-
+// scope suites (hook_test / workspace_test) have no `cd` at all and inherit the
+// CWD directly — they must run from the item's theraprac-workspace worktree
+// checkout so run-changed-hook-tests.sh diffs origin/main..HEAD against the
+// feature branch, not the always-clean main checkout. I-1634.
+func resolveSuiteWorkdir(cfg *config.Config, id string) string {
 	wtBase := cfg.WorktreeForItem(id)
 	if wtBase == "" {
 		return cfg.Root()
