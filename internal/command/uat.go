@@ -155,6 +155,36 @@ func UAT(s *store.Store, cfg *config.Config, id string, opts UATOpts) int {
 	// Upload report to evidence backend
 	uploadUATReport(cfg, id, item, results, opts)
 
+	// I-1486: record a UAT verification marker so `st close <id> done` can
+	// require that acceptance_criteria were actually evaluated and passed. Close
+	// runs post-merge — when the item's worktree is usually pruned — so it CANNOT
+	// reliably re-run the AC itself; it trusts this marker, which `st uat` (the
+	// delivery-loop step that runs every AC before merge) writes here. The marker
+	// is keyed only on the AC results (not the cross-cutting checks) so it
+	// reflects exactly "acceptance_criteria passed". Overwritten on every run, so
+	// a later failing run clears a stale pass.
+	acFail := 0
+	for _, r := range acResults {
+		if !r.Pending && !r.Skipped && !r.Passed {
+			acFail++
+		}
+	}
+	uatMarker := "pass"
+	if acFail > 0 {
+		uatMarker = fmt.Sprintf("fail: %d acceptance_criteria failing", acFail)
+	}
+	uatVal := fmt.Sprintf("%s %s", uatMarker, time.Now().UTC().Format(time.RFC3339))
+	if err := s.Mutate(id, func(it *model.Item) error {
+		it.SetNested("testing_evidence", "uat", uatVal)
+		return nil
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not record UAT marker for %s: %v\n", id, err)
+	} else {
+		_ = changelog.Append(cfg, id, changelog.Entry{
+			Op: "uat", Field: "testing_evidence.uat", NewValue: uatVal,
+		})
+	}
+
 	if autoFail > 0 {
 		return 1
 	}

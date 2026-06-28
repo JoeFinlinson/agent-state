@@ -36,16 +36,13 @@ type CloseOpts struct {
 	// measured work time AND a non-zero token total, even under --force). A
 	// non-empty reason closes the item anyway and records a changelog entry.
 	AllowMissingCapture string
-	// I-1486: acceptance-criteria close gate. A non-force `done` close requires
-	// all `cmd:` acceptance_criteria to pass.
+	// I-1486: acceptance-criteria close gate. A non-force `done` close requires a
+	// passing `st uat` marker (testing_evidence.uat == pass), which st uat writes
+	// after evaluating every acceptance criterion before merge.
 	//   - SkipACRequested + SkipAC reason: audit-logged bypass (empty reason
 	//     rejected). SkipACRequested is set from cmd.Flags().Changed("skip-ac").
-	//   - NoAC: permit closing an item with zero `cmd:` AC.
-	//   - ACRunCmd: injectable AC runner for tests; nil = worktree-scoped runner.
 	SkipAC          string
 	SkipACRequested bool
-	NoAC            bool
-	ACRunCmd        func(string) ([]byte, int, error)
 }
 
 // webE2EScopeSkipped reports whether the web_e2e scope suite was
@@ -292,12 +289,13 @@ func Close(s *store.Store, cfg *config.Config, id, resolution string, opts Close
 			return 1
 		}
 
-		// I-1486: acceptance-criteria gate. A verified `done` close must have all
-		// `cmd:` acceptance_criteria actually pass — done-state was previously
-		// self-attested. Only `done` is gated (archived is administrative, like
-		// the capture gate); --force bypasses via the outer condition.
+		// I-1486: acceptance-criteria gate. A verified `done` close requires a
+		// passing `st uat` marker (st uat evaluated every AC before merge) —
+		// done-state was previously self-attested. Only `done` is gated (archived
+		// is administrative, like the capture gate); --force bypasses via the
+		// outer condition.
 		if captureRequired(resolution) {
-			if msg := closeACCheck(item, cfg, opts); msg != "" {
+			if msg := closeACCheck(item, opts); msg != "" {
 				fmt.Fprintln(os.Stderr, msg)
 				return 1
 			}
@@ -570,6 +568,14 @@ func Close(s *store.Store, cfg *config.Config, id, resolution string, opts Close
 		}); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: %s closed with --allow-missing-capture but the audit entry failed to write: %v\n", id, err)
 		}
+	}
+
+	// I-1486: audit a --skip-ac bypass AFTER the close commits (so a close that
+	// failed a later gate leaves no phantom skip record). Only when the AC gate
+	// actually applied (done, non-force) and the override was used. Recorded to
+	// .as/close-ac-skip.log (the logEvidenceSkip pattern), not the changelog.
+	if !opts.Force && captureRequired(resolution) && opts.SkipACRequested && strings.TrimSpace(opts.SkipAC) != "" {
+		logACSkip(cfg, id, opts.SkipAC)
 	}
 
 	fmt.Printf("Closed %s — %s (%s)\n", id, item.Title, resolution)

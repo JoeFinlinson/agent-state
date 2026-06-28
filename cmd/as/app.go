@@ -1451,7 +1451,6 @@ in-flight, run 'st release' against the active items first.
 			skipTier2, _ := cmd.Flags().GetBool("skip-tier2-revalidation")
 			allowMissingCapture, _ := cmd.Flags().GetString("allow-missing-capture")
 			skipAC, _ := cmd.Flags().GetString("skip-ac")
-			noAC, _ := cmd.Flags().GetBool("no-ac")
 			resolution := ""
 			if len(args) > 1 {
 				resolution = args[1]
@@ -1463,7 +1462,6 @@ in-flight, run 'st release' against the active items first.
 				AllowMissingCapture:   allowMissingCapture,
 				SkipAC:                skipAC,
 				SkipACRequested:       cmd.Flags().Changed("skip-ac"),
-				NoAC:                  noAC,
 			})
 		},
 	}
@@ -1471,8 +1469,7 @@ in-flight, run 'st release' against the active items first.
 	closeCmd.Flags().Bool("force", false, "bypass the evidence/Tier-2/post-merge gate checks (does NOT bypass the I-1614 capture gate — use --allow-missing-capture for that)")
 	closeCmd.Flags().Bool("skip-tier2-revalidation", false, "skip close-time recomputation of applicable scope suites (use when worktree is absent or push gate already enforced)")
 	closeCmd.Flags().String("allow-missing-capture", "", "I-1614: close despite missing token/work-time capture, recording an audited reason (NOT bypassed by --force; the only escape for a legitimately untracked item)")
-	closeCmd.Flags().String("skip-ac", "", "I-1486: close despite acceptance_criteria not passing, recording an audited reason (the AC gate runs every `cmd:` AC at close; empty reason rejected)")
-	closeCmd.Flags().Bool("no-ac", false, "I-1486: permit a `done` close of an item that has zero `cmd:` acceptance_criteria (records that there is nothing automatically verifiable)")
+	closeCmd.Flags().String("skip-ac", "", "I-1486: close despite no verified `st uat` pass, recording an audited reason (a done close otherwise requires the testing_evidence.uat=pass marker st uat writes; empty reason rejected)")
 	root.AddCommand(closeCmd)
 
 	// I-1599: reverse of close — return a terminal item to active.

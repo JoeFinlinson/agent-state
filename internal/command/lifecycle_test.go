@@ -120,7 +120,7 @@ func TestFullLifecycle(t *testing.T) {
 	}
 
 	// === Step 7: Close T-006 to unblock T-005 ===
-	code = Close(s, cfg, "T-006", "done", CloseOpts{AllowMissingCapture: "test: capture gate not under test", NoAC: true, })
+	code = Close(s, cfg, "T-006", "done", CloseOpts{AllowMissingCapture: "test: capture gate not under test", SkipAC: "test: AC gate not under test", SkipACRequested: true, })
 	if code != 0 {
 		t.Fatalf("Close T-006 returned %d", code)
 	}
@@ -194,15 +194,16 @@ func TestFullLifecycle(t *testing.T) {
 	}
 
 	// === Step 13: Close T-005 ===
-	// I-1614: seed real capture so the close passes the capture gate WITHOUT the
-	// --allow-missing-capture override (which would add an extra changelog entry
-	// the count assertion below does not expect).
+	// I-1614/I-1486: seed real capture AND a uat=pass marker so the close passes
+	// both gates WITHOUT any override flag (which would add an extra changelog
+	// entry the count assertion below does not expect).
 	_ = s.Mutate("T-005", func(it *model.Item) error {
 		it.SetNested("time_tracking", "accumulated_seconds", "60")
 		it.SetNested("time_tracking", "reg_input_tokens", "100")
+		it.SetNested("testing_evidence", "uat", "pass 2026-06-28T00:00:00Z")
 		return nil
 	})
-	code = Close(s, cfg, "T-005", "done", CloseOpts{NoAC: true}) // I-1486: item has no cmd AC
+	code = Close(s, cfg, "T-005", "done", CloseOpts{})
 	if code != 0 {
 		t.Fatalf("Close T-005 returned %d", code)
 	}
@@ -271,7 +272,7 @@ func TestLifecycleIssueWithPriority(t *testing.T) {
 	}
 
 	// Close as resolved
-	code = Close(s, cfg, "I-002", "done", CloseOpts{AllowMissingCapture: "test: capture gate not under test", NoAC: true, })
+	code = Close(s, cfg, "I-002", "done", CloseOpts{AllowMissingCapture: "test: capture gate not under test", SkipAC: "test: AC gate not under test", SkipACRequested: true, })
 	if code != 0 {
 		t.Fatalf("Close issue returned %d", code)
 	}
