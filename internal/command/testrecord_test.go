@@ -2173,3 +2173,95 @@ func TestResolveSuiteWorkdir(t *testing.T) {
 		t.Errorf("worktree base exists but no workspace subdir: got %q, want cfg.Root() %q", got, cfg.Root())
 	}
 }
+
+func TestWorkspaceSuiteCheckoutGuard(t *testing.T) {
+	// I-1615: guard converts hollow-pass to hard failure when the worktree has
+	// hook changes that run-changed-hook-tests.sh should have caught.
+	const hollowPass = "workspace_test: no claude-config/hooks/*.sh changes detected; pass"
+
+	// setupGitWS initialises a fake theraprac-workspace git repo inside the
+	// legacy worktree location for itemID. If hookFile is non-empty it commits
+	// that file on a feature branch so git diff vs origin/main shows the change.
+	setupGitWS := func(t *testing.T, itemID, hookFile string) *config.Config {
+		t.Helper()
+		_, cfg := setupPRTestEnv(t)
+		cfg.Worktree = &config.WorktreeConfig{Enabled: true, BaseDir: "worktrees"}
+		wsDir := filepath.Join(cfg.Root(), "worktrees", itemID, "theraprac-workspace")
+		if err := os.MkdirAll(wsDir, 0755); err != nil {
+			t.Fatalf("mkdirall %s: %v", wsDir, err)
+		}
+		bare := t.TempDir()
+		runGitTest(t, bare, "init", "--bare")
+		runGitTest(t, wsDir, "init")
+		runGitTest(t, wsDir, "config", "user.email", "test@test.com")
+		runGitTest(t, wsDir, "config", "user.name", "Test")
+		runGitTest(t, wsDir, "remote", "add", "origin", bare)
+		// initial commit → becomes origin/main
+		if err := os.WriteFile(filepath.Join(wsDir, "README"), []byte("init\n"), 0644); err != nil {
+			t.Fatalf("write README: %v", err)
+		}
+		runGitTest(t, wsDir, "add", "README")
+		runGitTest(t, wsDir, "commit", "-m", "init")
+		runGitTest(t, wsDir, "push", "origin", "HEAD:main")
+		runGitTest(t, wsDir, "fetch", "origin")
+		// switch to feature branch (diverges from origin/main)
+		runGitTest(t, wsDir, "checkout", "-b", "feature")
+		if hookFile != "" {
+			hDir := filepath.Join(wsDir, filepath.Dir(hookFile))
+			if err := os.MkdirAll(hDir, 0755); err != nil {
+				t.Fatalf("mkdir hook dir: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(wsDir, hookFile), []byte("#!/bin/bash\n"), 0644); err != nil {
+				t.Fatalf("write hook: %v", err)
+			}
+			runGitTest(t, wsDir, "add", hookFile)
+			runGitTest(t, wsDir, "commit", "-m", "add hook")
+		}
+		return cfg
+	}
+
+	t.Run("no_marker_passes", func(t *testing.T) {
+		_, cfg := setupPRTestEnv(t)
+		if err := workspaceSuiteCheckoutGuard(cfg, "T-001", []byte("workspace_test: ran=1 skipped=0 failed=0")); err != nil {
+			t.Fatalf("no hollow-pass marker: expected nil, got %v", err)
+		}
+	})
+
+	t.Run("marker_no_worktree_dir_passes", func(t *testing.T) {
+		// Worktree config present but item dir does not exist on disk.
+		_, cfg := setupPRTestEnv(t)
+		cfg.Worktree = &config.WorktreeConfig{Enabled: true, BaseDir: "worktrees"}
+		if err := workspaceSuiteCheckoutGuard(cfg, "T-999", []byte(hollowPass)); err != nil {
+			t.Fatalf("missing worktree dir: expected nil, got %v", err)
+		}
+	})
+
+	t.Run("marker_worktree_no_git_passes", func(t *testing.T) {
+		// Worktree workspace dir exists but has no .git → git fails → guard is fail-safe.
+		_, cfg := setupPRTestEnv(t)
+		cfg.Worktree = &config.WorktreeConfig{Enabled: true, BaseDir: "worktrees"}
+		wsDir := filepath.Join(cfg.Root(), "worktrees", "T-003", "theraprac-workspace")
+		if err := os.MkdirAll(wsDir, 0755); err != nil {
+			t.Fatalf("mkdirall: %v", err)
+		}
+		if err := workspaceSuiteCheckoutGuard(cfg, "T-003", []byte(hollowPass)); err != nil {
+			t.Fatalf("no .git (git fails): expected nil, got %v", err)
+		}
+	})
+
+	t.Run("marker_git_no_hook_changes_passes", func(t *testing.T) {
+		// Real git repo with origin/main but no hook changes on the feature branch.
+		cfg := setupGitWS(t, "T-003", "")
+		if err := workspaceSuiteCheckoutGuard(cfg, "T-003", []byte(hollowPass)); err != nil {
+			t.Fatalf("no hook changes: expected nil, got %v", err)
+		}
+	})
+
+	t.Run("marker_git_hook_changed_fails", func(t *testing.T) {
+		// Hook file added on feature branch → hollow pass is wrong → guard fails.
+		cfg := setupGitWS(t, "T-003", "claude-config/hooks/my-guard.sh")
+		if err := workspaceSuiteCheckoutGuard(cfg, "T-003", []byte(hollowPass)); err == nil {
+			t.Fatal("hook changed on feature branch: expected non-nil error, got nil")
+		}
+	})
+}

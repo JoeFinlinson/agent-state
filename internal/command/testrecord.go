@@ -421,6 +421,16 @@ func testRunMode(s *store.Store, cfg *config.Config, id, suite, suiteCmd, sha st
 		return 1
 	}
 
+	// I-1615: hollow-pass guard — if the suite exited 0 with "no hooks detected"
+	// but the worktree actually has hook changes, the suite diffed the wrong
+	// checkout. Convert to a hard failure so the hollow pass is surfaced.
+	if exitCode == 0 {
+		if guardErr := workspaceSuiteCheckoutGuard(cfg, id, output); guardErr != nil {
+			fmt.Fprintf(os.Stderr, "workspace_test guard: %v\n", guardErr)
+			exitCode = 1
+		}
+	}
+
 	now := time.Now()
 	status := "pass"
 	if exitCode != 0 {
@@ -1042,6 +1052,43 @@ func resolveSuiteWorkdir(cfg *config.Config, id string) string {
 		return wsDir
 	}
 	return cfg.Root()
+}
+
+// workspaceSuiteCheckoutGuard detects a hollow pass in hook_test / workspace_test.
+// If the suite exits 0 with the "no hooks detected" marker but the item's
+// theraprac-workspace worktree has actual hook changes vs origin/main, the suite
+// diffed the wrong checkout — convert that to a hard failure. Fail-safe: returns
+// nil on any git error or missing worktree so normal runs are never blocked. I-1615.
+func workspaceSuiteCheckoutGuard(cfg *config.Config, id string, output []byte) error {
+	const marker = "workspace_test: no claude-config/hooks/*.sh changes detected"
+	if !bytes.Contains(output, []byte(marker)) {
+		return nil
+	}
+	wtBase := cfg.WorktreeForItem(id)
+	if wtBase == "" {
+		return nil
+	}
+	wsDir := filepath.Join(wtBase, workspaceRepo)
+	if _, err := os.Stat(wsDir); err != nil {
+		return nil
+	}
+	out, err := runGit(wsDir, "diff", "--name-only", "--merge-base", "origin/main", "HEAD")
+	if err != nil {
+		return nil // offline / detached — don't false-alarm
+	}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "claude-config/hooks/") &&
+			strings.HasSuffix(line, ".sh") &&
+			!strings.HasSuffix(line, "_test.sh") &&
+			!strings.HasSuffix(line, ".test.sh") {
+			return fmt.Errorf(
+				"hollow pass: hook_test reported no changes but %s is modified on the feature branch — suite ran against the wrong checkout (I-1615)",
+				line,
+			)
+		}
+	}
+	return nil
 }
 
 // worktreeRepoOnSameCommit returns true when the worktree repo and the main
