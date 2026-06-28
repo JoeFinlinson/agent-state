@@ -155,6 +155,57 @@ func UAT(s *store.Store, cfg *config.Config, id string, opts UATOpts) int {
 	// Upload report to evidence backend
 	uploadUATReport(cfg, id, item, results, opts)
 
+	// I-1486: record a UAT verification marker so `st close <id> done` can
+	// require that acceptance_criteria were actually evaluated and passed. Close
+	// runs post-merge — when the item's worktree is usually pruned — so it CANNOT
+	// reliably re-run the AC itself; it trusts this marker, which `st uat` (the
+	// delivery-loop step that runs every AC before merge) writes here.
+	//
+	// The marker records `pass` ONLY when there is genuine verification (review):
+	//   - at least one AC was actually verified (a cmd/auto criterion that
+	//     passed) — so a zero-AC or all-prose item is NOT a free pass;
+	//   - NO acceptance criterion is Pending (prose/manual "needs rewrite") —
+	//     an un-verifiable AC means the item is not machine-verified;
+	//   - the whole UAT run is clean (autoFail==0) — so the marker can never
+	//     read `pass` while `st uat` itself exits non-zero.
+	// Otherwise it records `fail: <reason>`. Overwritten every run, so a later
+	// failing run clears a stale pass.
+	acVerified, acPending, acFail := 0, 0, 0
+	for _, r := range acResults {
+		switch {
+		case r.Skipped:
+			// skipped AC don't count either way
+		case r.Pending:
+			acPending++
+		case r.Passed:
+			acVerified++
+		default:
+			acFail++
+		}
+	}
+	var uatMarker string
+	switch {
+	case autoFail > 0:
+		uatMarker = fmt.Sprintf("fail: %d check(s) failing", autoFail)
+	case acPending > 0:
+		uatMarker = fmt.Sprintf("fail: %d acceptance_criteria not machine-verifiable (rewrite as cmd:/suite AC or close --skip-ac)", acPending)
+	case acVerified == 0:
+		uatMarker = "fail: no machine-verifiable acceptance_criteria to verify (add a cmd:/suite AC or close --skip-ac)"
+	default:
+		uatMarker = "pass"
+	}
+	uatVal := fmt.Sprintf("%s %s", uatMarker, time.Now().UTC().Format(time.RFC3339))
+	if err := s.Mutate(id, func(it *model.Item) error {
+		it.SetNested("testing_evidence", "uat", uatVal)
+		return nil
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not record UAT marker for %s: %v\n", id, err)
+	} else {
+		_ = changelog.Append(cfg, id, changelog.Entry{
+			Op: "uat", Field: "testing_evidence.uat", NewValue: uatVal,
+		})
+	}
+
 	if autoFail > 0 {
 		return 1
 	}

@@ -36,6 +36,13 @@ type CloseOpts struct {
 	// measured work time AND a non-zero token total, even under --force). A
 	// non-empty reason closes the item anyway and records a changelog entry.
 	AllowMissingCapture string
+	// I-1486: acceptance-criteria close gate. A non-force `done` close requires a
+	// passing `st uat` marker (testing_evidence.uat == pass), which st uat writes
+	// after evaluating every acceptance criterion before merge.
+	//   - SkipACRequested + SkipAC reason: audit-logged bypass (empty reason
+	//     rejected). SkipACRequested is set from cmd.Flags().Changed("skip-ac").
+	SkipAC          string
+	SkipACRequested bool
 }
 
 // webE2EScopeSkipped reports whether the web_e2e scope suite was
@@ -280,6 +287,18 @@ func Close(s *store.Store, cfg *config.Config, id, resolution string, opts Close
 			fmt.Fprintf(os.Stderr, "gate %q failed: %s\n", failure.Gate, failure.Message)
 			fmt.Fprintln(os.Stderr, "use --force to bypass gates")
 			return 1
+		}
+
+		// I-1486: acceptance-criteria gate. A verified `done` close requires a
+		// passing `st uat` marker (st uat evaluated every AC before merge) —
+		// done-state was previously self-attested. Only `done` is gated (archived
+		// is administrative, like the capture gate); --force bypasses via the
+		// outer condition.
+		if captureRequired(resolution) {
+			if msg := closeACCheck(item, opts); msg != "" {
+				fmt.Fprintln(os.Stderr, msg)
+				return 1
+			}
 		}
 	}
 
@@ -548,6 +567,21 @@ func Close(s *store.Store, cfg *config.Config, id, resolution string, opts Close
 			Reason: "closed with missing token/work-time capture via --allow-missing-capture: " + strings.TrimSpace(opts.AllowMissingCapture),
 		}); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: %s closed with --allow-missing-capture but the audit entry failed to write: %v\n", id, err)
+		}
+	}
+
+	// I-1486: audit an AC-gate bypass AFTER the close commits (so a close that
+	// failed a later gate leaves no phantom record). Only when the item was NOT
+	// actually uat-verified — a real bypass — recorded to .as/close-ac-skip.log
+	// (the logEvidenceSkip pattern). Covers both --skip-ac and --force closes of
+	// a `done` item lacking a passing st uat marker, so no unverified `done`
+	// close is silent.
+	if captureRequired(resolution) && !uatMarkerPasses(item) {
+		switch {
+		case opts.SkipACRequested && strings.TrimSpace(opts.SkipAC) != "":
+			logACSkip(cfg, id, "--skip-ac: "+strings.TrimSpace(opts.SkipAC))
+		case opts.Force:
+			logACSkip(cfg, id, "--force: closed done without a verified st uat pass")
 		}
 	}
 
