@@ -1392,11 +1392,12 @@ in-flight, run 'st release' against the active items first.
 			addToSprint, _ := cmd.Flags().GetBool("add-to-sprint")
 			ackDrift, _ := cmd.Flags().GetString("ack-drift")
 			escalate, _ := cmd.Flags().GetString("escalate")
+			takeover, _ := cmd.Flags().GetString("takeover")
 			inline, _ := cmd.Flags().GetBool("inline")
 			exitCode = command.Start(appStore, appCfg, args[0], command.StartOpts{
 				Slug: slug, Repos: repos, NoPush: noPush, Force: force,
 				AddToSprint: addToSprint, AckDrift: ackDrift,
-				Escalate: escalate, Inline: inline,
+				Escalate: escalate, Takeover: takeover, Inline: inline,
 			})
 		},
 	}
@@ -1407,6 +1408,7 @@ in-flight, run 'st release' against the active items first.
 	startCmd.Flags().Bool("add-to-sprint", false, "resolve the I-681 sprint-inheritance gate by adding this item to the active sprint of an in-progress item it blocks")
 	startCmd.Flags().String("ack-drift", "", "operator-supplied one-line note acknowledging plan drift surfaced by the I-711 freshness gate; proceeds activation despite drift findings")
 	startCmd.Flags().String("escalate", "", "override the resolved model tier (haiku|sonnet|opus); logs a start_escalate changelog entry with the original tier")
+	startCmd.Flags().String("takeover", "", "claim an item currently assigned to a peer, recording an audited start_takeover entry with this reason (per rule 10a, coordinate first). Bypasses ONLY the peer-assignment guard — a still-live peer session claim still blocks.")
 	startCmd.Flags().Bool("inline", false, "no-op synonym; DISPATCH line is always printed (kept for wrapper-hook compatibility)")
 	root.AddCommand(startCmd)
 

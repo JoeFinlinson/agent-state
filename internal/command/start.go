@@ -116,6 +116,18 @@ type StartOpts struct {
 	// Stale forces re-prep.
 	AckDrift string
 
+	// I-1633: Takeover carries the caller's reason for claiming an item
+	// currently assigned to a different agent. Empty (or whitespace-only) =
+	// no takeover: the peer-assignment guard refuses. A non-empty reason
+	// bypasses ONLY the assignment guard — the live-session claim guards
+	// (the pre-flight at ClaimedBy/isSessionLive and the in-Mutate
+	// compare-and-claim) stay intact, so --takeover resolves a stale or
+	// handed-off assignment but never steals from a still-live session. An
+	// audited `start_takeover` entry is written post-Mutate (matching the
+	// --force / --ack-drift ordering) so a takeover that loses a later claim
+	// race leaves no misleading audit.
+	Takeover string
+
 	// Escalate overrides the resolved model tier (can go up or down).
 	// Logged to changelog as start_escalate with the original tier.
 	Escalate string
@@ -191,12 +203,24 @@ func Start(s *store.Store, cfg *config.Config, id string, opts StartOpts) int {
 	// Track the sprint-inheritance bypass for post-Mutate audit.
 	forceBypassedSprint := false
 
-	// Check: not assigned to another agent
+	// Check: not assigned to another agent.
+	// I-1633: a peer assignment refuses by default. --takeover "<reason>"
+	// (non-empty after trim) bypasses ONLY this assignment guard — the
+	// live-session claim guards below stay intact — and records an audited
+	// start_takeover entry post-Mutate. takeoverFrom carries the prior owner
+	// for that audit.
 	identity := cfg.Identity()
 	agentID := identity.ID
+	takeoverFrom := ""
 	if item.AssignedTo != "" && item.AssignedTo != agentID {
-		fmt.Fprintf(os.Stderr, "%s is assigned to %s — use `st release %s` first\n", id, item.AssignedTo, id)
-		return 1
+		if strings.TrimSpace(opts.Takeover) == "" {
+			fmt.Fprintf(os.Stderr, "%s is assigned to %s (a peer) — not yours to start.\n", id, item.AssignedTo)
+			fmt.Fprintf(os.Stderr, "Per operating rule 10a, coordinate first: `st mail %s --kind request --body \"...\"`\n", item.AssignedTo)
+			fmt.Fprintf(os.Stderr, "If %s has handed it off (or their session is gone), take it over with an audited reason:\n", item.AssignedTo)
+			fmt.Fprintf(os.Stderr, "  st start %s --takeover \"<why>\"\n", id)
+			return 1
+		}
+		takeoverFrom = item.AssignedTo
 	}
 
 	// Check: dependencies resolved
@@ -477,6 +501,20 @@ func Start(s *store.Store, cfg *config.Config, id string, opts StartOpts) int {
 		_ = changelog.Append(cfg, id, changelog.Entry{
 			Op:     "start_ack_drift",
 			Reason: "bypassed I-711 freshness drift gate via --ack-drift: " + opts.AckDrift,
+		})
+	}
+
+	// I-1633: record a --takeover of a peer's assignment, only after the
+	// start (and its in-Mutate claim race) succeeded — a takeover that lost
+	// the claim race writes no audit. Captures the prior owner so a handoff
+	// is auditable and distinguishable from a blunt `st release`.
+	if takeoverFrom != "" {
+		_ = changelog.Append(cfg, id, changelog.Entry{
+			Op:       "start_takeover",
+			Field:    "assigned_to",
+			OldValue: takeoverFrom,
+			NewValue: agentID,
+			Reason:   "took over peer assignment via --takeover: " + strings.TrimSpace(opts.Takeover),
 		})
 	}
 
