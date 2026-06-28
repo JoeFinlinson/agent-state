@@ -424,9 +424,13 @@ func testRunMode(s *store.Store, cfg *config.Config, id, suite, suiteCmd, sha st
 	// I-1615: hollow-pass guard — if the suite exited 0 with "no hooks detected"
 	// but the worktree actually has hook changes, the suite diffed the wrong
 	// checkout. Convert to a hard failure so the hollow pass is surfaced.
+	// Append the guard message to output so evidence/local-log are consistent
+	// with the fail status (otherwise they show the original "pass" text).
 	if exitCode == 0 {
 		if guardErr := workspaceSuiteCheckoutGuard(cfg, id, output); guardErr != nil {
-			fmt.Fprintf(os.Stderr, "workspace_test guard: %v\n", guardErr)
+			msg := fmt.Sprintf("workspace_test guard: %v\n", guardErr)
+			fmt.Fprint(os.Stderr, msg)
+			output = append(output, []byte(msg)...)
 			exitCode = 1
 		}
 	}
@@ -1076,17 +1080,21 @@ func workspaceSuiteCheckoutGuard(cfg *config.Config, id string, output []byte) e
 	if err != nil {
 		return nil // offline / detached — don't false-alarm
 	}
+	var changed []string
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "claude-config/hooks/") &&
 			strings.HasSuffix(line, ".sh") &&
 			!strings.HasSuffix(line, "_test.sh") &&
 			!strings.HasSuffix(line, ".test.sh") {
-			return fmt.Errorf(
-				"hollow pass: hook_test reported no changes but %s is modified on the feature branch — suite ran against the wrong checkout (I-1615)",
-				line,
-			)
+			changed = append(changed, line)
 		}
+	}
+	if len(changed) > 0 {
+		return fmt.Errorf(
+			"hollow pass: hook_test reported no changes but %s modified on the feature branch — suite ran against the wrong checkout (I-1615)",
+			strings.Join(changed, ", "),
+		)
 	}
 	return nil
 }

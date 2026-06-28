@@ -2180,9 +2180,9 @@ func TestWorkspaceSuiteCheckoutGuard(t *testing.T) {
 	const hollowPass = "workspace_test: no claude-config/hooks/*.sh changes detected; pass"
 
 	// setupGitWS initialises a fake theraprac-workspace git repo inside the
-	// legacy worktree location for itemID. If hookFile is non-empty it commits
-	// that file on a feature branch so git diff vs origin/main shows the change.
-	setupGitWS := func(t *testing.T, itemID, hookFile string) *config.Config {
+	// legacy worktree location for itemID. hookFiles are committed on a feature
+	// branch so git diff vs origin/main shows them.
+	setupGitWS := func(t *testing.T, itemID string, hookFiles ...string) *config.Config {
 		t.Helper()
 		_, cfg := setupPRTestEnv(t)
 		cfg.Worktree = &config.WorktreeConfig{Enabled: true, BaseDir: "worktrees"}
@@ -2206,16 +2206,18 @@ func TestWorkspaceSuiteCheckoutGuard(t *testing.T) {
 		runGitTest(t, wsDir, "fetch", "origin")
 		// switch to feature branch (diverges from origin/main)
 		runGitTest(t, wsDir, "checkout", "-b", "feature")
-		if hookFile != "" {
-			hDir := filepath.Join(wsDir, filepath.Dir(hookFile))
-			if err := os.MkdirAll(hDir, 0755); err != nil {
-				t.Fatalf("mkdir hook dir: %v", err)
+		if len(hookFiles) > 0 {
+			for _, hookFile := range hookFiles {
+				hDir := filepath.Join(wsDir, filepath.Dir(hookFile))
+				if err := os.MkdirAll(hDir, 0755); err != nil {
+					t.Fatalf("mkdir hook dir: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(wsDir, hookFile), []byte("#!/bin/bash\n"), 0644); err != nil {
+					t.Fatalf("write hook: %v", err)
+				}
+				runGitTest(t, wsDir, "add", hookFile)
 			}
-			if err := os.WriteFile(filepath.Join(wsDir, hookFile), []byte("#!/bin/bash\n"), 0644); err != nil {
-				t.Fatalf("write hook: %v", err)
-			}
-			runGitTest(t, wsDir, "add", hookFile)
-			runGitTest(t, wsDir, "commit", "-m", "add hook")
+			runGitTest(t, wsDir, "commit", "-m", "add hooks")
 		}
 		return cfg
 	}
@@ -2251,7 +2253,7 @@ func TestWorkspaceSuiteCheckoutGuard(t *testing.T) {
 
 	t.Run("marker_git_no_hook_changes_passes", func(t *testing.T) {
 		// Real git repo with origin/main but no hook changes on the feature branch.
-		cfg := setupGitWS(t, "T-003", "")
+		cfg := setupGitWS(t, "T-003")
 		if err := workspaceSuiteCheckoutGuard(cfg, "T-003", []byte(hollowPass)); err != nil {
 			t.Fatalf("no hook changes: expected nil, got %v", err)
 		}
@@ -2262,6 +2264,22 @@ func TestWorkspaceSuiteCheckoutGuard(t *testing.T) {
 		cfg := setupGitWS(t, "T-003", "claude-config/hooks/my-guard.sh")
 		if err := workspaceSuiteCheckoutGuard(cfg, "T-003", []byte(hollowPass)); err == nil {
 			t.Fatal("hook changed on feature branch: expected non-nil error, got nil")
+		}
+	})
+
+	t.Run("marker_git_multiple_hooks_all_named", func(t *testing.T) {
+		// Multiple hooks changed → all are named in the error (not just the first).
+		cfg := setupGitWS(t, "T-003",
+			"claude-config/hooks/foo.sh",
+			"claude-config/hooks/bar.sh",
+		)
+		err := workspaceSuiteCheckoutGuard(cfg, "T-003", []byte(hollowPass))
+		if err == nil {
+			t.Fatal("expected non-nil error for multiple changed hooks, got nil")
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, "foo.sh") || !strings.Contains(msg, "bar.sh") {
+			t.Errorf("expected both hooks in error message, got: %s", msg)
 		}
 	})
 }
