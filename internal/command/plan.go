@@ -109,6 +109,30 @@ func PlanApprove(s *store.Store, cfg *config.Config, id string, opts PlanApprove
 		// defensively (gives a stuck-uncommitted approval a second chance to
 		// land in git), and return 0. Audit fields are deliberately NOT
 		// re-written — the original approver/timestamp belong to the first call.
+		//
+		// I-1649: also run AC replacement so a follow-up `st plan approve`
+		// after an interactive-prep accept refreshes stale ACs. The Mutate
+		// error is ignored — an idempotent re-run must not fail closed when
+		// the only difference is AC freshness.
+		if p, _ := plan.Load(cfg.PlansDir(), id); p != nil && len(p.ACs) > 0 {
+			_ = s.Mutate(id, func(it *model.Item) error {
+				seen := make(map[string]struct{}, len(p.ACs))
+				deduped := make([]string, 0, len(p.ACs))
+				for _, ac := range p.ACs {
+					if _, exists := seen[ac]; !exists {
+						seen[ac] = struct{}{}
+						deduped = append(deduped, ac)
+					}
+				}
+				it.AcceptanceCriteria = deduped
+				prefixed := make([]string, len(deduped))
+				for i, ac := range deduped {
+					prefixed[i] = "- " + ac
+				}
+				it.Doc.ReplaceList("acceptance_criteria", prefixed)
+				return nil
+			})
+		}
 		fmt.Fprintf(os.Stderr,
 			"%s plan is already approved (by %s at %s) — no-op (idempotent re-run)\n",
 			id, fallback(item.PlanApprovedBy, "?"), fallback(item.PlanApprovedAt, "?"))
