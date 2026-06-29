@@ -2,7 +2,6 @@ package command
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -10,35 +9,24 @@ import (
 	"github.com/theraprac/agent-state/internal/model"
 )
 
-// gitInTest runs git in dir and fails the test on error.
-func gitInTest(t *testing.T, dir string, args ...string) string {
-	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
-	}
-	return string(out)
-}
-
 // seedRepoLevelWithMain creates a git repo whose HEAD equals origin/main
 // (no commits ahead) — reviewedRepoSHA reports hasDiff=false for it.
+// Uses the shared gitOutput helper (close_dedup_test.go).
 func seedRepoLevelWithMain(t *testing.T, dir string) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	gitInTest(t, dir, "init", "-q")
-	gitInTest(t, dir, "config", "user.email", "t@t.test")
-	gitInTest(t, dir, "config", "user.name", "test")
+	gitOutput(t, dir, "init", "-q")
+	gitOutput(t, dir, "config", "user.email", "t@t.test")
+	gitOutput(t, dir, "config", "user.name", "test")
 	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("base\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	gitInTest(t, dir, "add", "-A")
-	gitInTest(t, dir, "commit", "-q", "-m", "base")
+	gitOutput(t, dir, "add", "-A")
+	gitOutput(t, dir, "commit", "-q", "-m", "base")
 	// Point origin/main at HEAD — no real remote needed.
-	gitInTest(t, dir, "update-ref", "refs/remotes/origin/main", "HEAD")
+	gitOutput(t, dir, "update-ref", "refs/remotes/origin/main", "HEAD")
 }
 
 // seedRepoAheadOfMain creates a git repo with one commit ahead of origin/main —
@@ -49,9 +37,9 @@ func seedRepoAheadOfMain(t *testing.T, dir string) string {
 	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("base\nchange\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	gitInTest(t, dir, "add", "-A")
-	gitInTest(t, dir, "commit", "-q", "-m", "item change")
-	sha := gitInTest(t, dir, "rev-parse", "HEAD")
+	gitOutput(t, dir, "add", "-A")
+	gitOutput(t, dir, "commit", "-q", "-m", "item change")
+	sha := gitOutput(t, dir, "rev-parse", "HEAD")
 	short := sha
 	if len(short) > 7 {
 		short = short[:7]

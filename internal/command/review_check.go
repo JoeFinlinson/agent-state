@@ -93,16 +93,10 @@ func ReviewCheck(s *store.Store, cfg *config.Config, id string, opts ReviewCheck
 // it with "." when no worktree repo dir is found, so tests can exercise the
 // SHA-mismatch path.
 func resolveCurrentSHA(cfg *config.Config, id string, opts ReviewCheckOpts) string {
-	// Route the injected rev-parse-only GitHeadSHA through a full gitFn shim so
-	// reviewedRepoSHA's diff/log commands still hit real git in production
-	// (GitHeadSHA is nil there) while tests can stub HEAD resolution.
-	gitFn := func(dir string, args ...string) (string, error) {
-		if opts.GitHeadSHA != nil && len(args) > 0 && args[0] == "rev-parse" {
-			return opts.GitHeadSHA(dir)
-		}
-		return runGit(dir, args...)
-	}
-
+	// The worktree loop runs against real git repos (production has nil
+	// GitHeadSHA; the regression test seeds real repos), so reviewedRepoSHA gets
+	// runGit directly. GitHeadSHA only stubs the no-worktree fallback below —
+	// review-check has no full-git injection seam (unlike review's RunGit).
 	if cfg.Worktree != nil && len(cfg.Worktree.Repos) > 0 {
 		firstExisting := ""
 		for _, repo := range cfg.Worktree.Repos {
@@ -113,7 +107,7 @@ func resolveCurrentSHA(cfg *config.Config, id string, opts ReviewCheckOpts) stri
 			if _, err := os.Stat(dir); err != nil {
 				continue
 			}
-			sha, _, hasDiff := reviewedRepoSHA(dir, gitFn)
+			sha, _, hasDiff := reviewedRepoSHA(dir, runGit)
 			if sha == "" {
 				continue
 			}
