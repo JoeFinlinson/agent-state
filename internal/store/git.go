@@ -1724,10 +1724,10 @@ func matchesItemID(base, id string) bool {
 func containsConflictMarkers(content string) bool {
 	hasOpen, hasClose := false, false
 	for _, line := range strings.Split(content, "\n") {
-		if !hasOpen && len(line) >= 7 && strings.HasPrefix(line, "<<<<<<<") {
+		if !hasOpen && strings.HasPrefix(line, "<<<<<<<") {
 			hasOpen = true
 		}
-		if !hasClose && len(line) >= 7 && strings.HasPrefix(line, ">>>>>>>") {
+		if !hasClose && strings.HasPrefix(line, ">>>>>>>") {
 			hasClose = true
 		}
 		if hasOpen && hasClose {
