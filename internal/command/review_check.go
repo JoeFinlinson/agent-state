@@ -46,10 +46,21 @@ func ReviewCheck(s *store.Store, cfg *config.Config, id string, opts ReviewCheck
 	verdict := parts[0]
 	recordedSHA := parts[1]
 
+	// item.Doc is non-nil here: a nil Doc leaves evField empty, triggering the
+	// early return above before we reach this point.
+	usedSkips := false
 	if verdict != "pass" {
-		fmt.Fprintf(os.Stderr, "%s: review did not pass (verdict=%s, SHA=%s) — re-run `st review %s`\n",
-			id, verdict, recordedSHA, id)
-		return 1
+		// Check for operator-approved review_skips before failing.
+		// HasFieldContent distinguishes a field with actual content from an
+		// explicit empty value (review_skips: ""), which must not bypass the gate.
+		if !item.Doc.HasFieldContent("review_skips") {
+			fmt.Fprintf(os.Stderr, "%s: review did not pass (verdict=%s, SHA=%s) — re-run `st review %s`\n",
+				id, verdict, recordedSHA, id)
+			return 1
+		}
+		usedSkips = true
+		fmt.Printf("%s: review verdict=%s but review_skips recorded — operator-approved skips applied (SHA=%s)\n",
+			id, verdict, recordedSHA)
 	}
 
 	// Validate SHA against current HEAD in the primary worktree repo.
@@ -61,7 +72,11 @@ func ReviewCheck(s *store.Store, cfg *config.Config, id string, opts ReviewCheck
 		return 1
 	}
 
-	fmt.Printf("%s: review_evidence OK (pass %s)\n", id, recordedSHA)
+	if usedSkips {
+		fmt.Printf("%s: review_evidence OK (verdict=fail, skips applied, SHA=%s)\n", id, recordedSHA)
+	} else {
+		fmt.Printf("%s: review_evidence OK (pass %s)\n", id, recordedSHA)
+	}
 	return 0
 }
 

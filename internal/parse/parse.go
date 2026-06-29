@@ -576,6 +576,9 @@ func storeNestedScalar(item *model.Item, parent, key, val string) {
 }
 
 func storeMultiline(item *model.Item, key, nestKey, content string) {
+	if key == "review_skips" {
+		return // stored in item.Doc raw lines; no typed model.Item field
+	}
 	// Trim trailing newlines
 	content = strings.TrimRight(content, "\n")
 
