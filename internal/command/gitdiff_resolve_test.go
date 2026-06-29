@@ -62,7 +62,9 @@ func TestResolveItemWorktreeExactRepoMatch(t *testing.T) {
 	}
 
 	// "theraprac-as" contains the string "as" but is not an exact match.
-	dir := filepath.Join(wtBase, "I-985", "theraprac-as")
+	// Must seed under the TARGET item's dir (I-986) so the itemID guard
+	// allows descent and repoDirNameMatches is actually reached.
+	dir := filepath.Join(wtBase, "I-986", "theraprac-as")
 	if err := os.MkdirAll(filepath.Join(dir, ".git"), 0755); err != nil {
 		t.Fatalf("mkdir theraprac-as: %v", err)
 	}
