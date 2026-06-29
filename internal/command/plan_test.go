@@ -623,12 +623,34 @@ func TestPlanApproveReplacesExistingACs(t *testing.T) {
 		t.Fatalf("approve: %d", code)
 	}
 
-	item, _ = s.Get("T-001")
-	if len(item.AcceptanceCriteria) != 1 {
-		t.Fatalf("expected 1 AC after approve; got %d: %v", len(item.AcceptanceCriteria), item.AcceptanceCriteria)
+	// Load sidecar ACs to use as the expected value — avoids hard-coding the
+	// fixture string so the test stays correct if setupTestEnv's sidecar changes.
+	fixturePlan, err := plan.Load(cfg.PlansDir(), "T-001")
+	if err != nil {
+		t.Fatalf("loading fixture sidecar: %v", err)
 	}
-	if item.AcceptanceCriteria[0] != "cmd: go test ./..." {
-		t.Errorf("AC should be the sidecar value; got %q", item.AcceptanceCriteria[0])
+	if len(fixturePlan.ACs) == 0 {
+		t.Fatal("fixture sidecar has no ACs to assert against")
+	}
+
+	item, _ = s.Get("T-001")
+	if len(item.AcceptanceCriteria) != len(fixturePlan.ACs) {
+		t.Fatalf("expected %d AC(s) after approve; got %d: %v", len(fixturePlan.ACs), len(item.AcceptanceCriteria), item.AcceptanceCriteria)
+	}
+	if item.AcceptanceCriteria[0] != fixturePlan.ACs[0] {
+		t.Errorf("AC should be the sidecar value %q; got %q", fixturePlan.ACs[0], item.AcceptanceCriteria[0])
+	}
+
+	// Reload from disk to verify the on-disk format is correct (not just in-memory).
+	// This catches the ReplaceList "- " prefix bug where in-memory looks right
+	// but the serialised YAML is malformed.
+	s2, _ := reloadStore(t, cfg)
+	item2, _ := s2.Get("T-001")
+	if len(item2.AcceptanceCriteria) != len(fixturePlan.ACs) {
+		t.Fatalf("disk reload: expected %d AC(s); got %d: %v", len(fixturePlan.ACs), len(item2.AcceptanceCriteria), item2.AcceptanceCriteria)
+	}
+	if item2.AcceptanceCriteria[0] != fixturePlan.ACs[0] {
+		t.Errorf("disk reload: AC should be %q; got %q", fixturePlan.ACs[0], item2.AcceptanceCriteria[0])
 	}
 }
 

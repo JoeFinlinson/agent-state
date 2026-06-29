@@ -270,7 +270,7 @@ func PlanApprove(s *store.Store, cfg *config.Config, id string, opts PlanApprove
 		// truth. Dedup so N identical lines from repeated writes collapse.
 		if len(draftACs) > 0 {
 			seen := make(map[string]struct{}, len(draftACs))
-			deduped := draftACs[:0:len(draftACs)]
+			deduped := make([]string, 0, len(draftACs))
 			for _, ac := range draftACs {
 				if _, exists := seen[ac]; !exists {
 					seen[ac] = struct{}{}
@@ -278,7 +278,13 @@ func PlanApprove(s *store.Store, cfg *config.Config, id string, opts PlanApprove
 				}
 			}
 			it.AcceptanceCriteria = deduped
-			it.Doc.ReplaceList("acceptance_criteria", deduped)
+			// ReplaceList expects "- " prefixed raw strings; model layer (parseList)
+			// strips that prefix on read. Mirrors the same pattern in uat.go.
+			prefixed := make([]string, len(deduped))
+			for i, ac := range deduped {
+				prefixed[i] = "- " + ac
+			}
+			it.Doc.ReplaceList("acceptance_criteria", prefixed)
 		}
 		return nil
 	}); err != nil {
