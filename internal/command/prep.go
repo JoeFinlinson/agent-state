@@ -798,22 +798,7 @@ func prepItem(s *store.Store, cfg *config.Config, itemID string, item *model.Ite
 				// The old len==0 guard left stale ACs from prior prep runs untouched,
 				// making a subsequent `st plan approve` idempotent-guard return 0 without
 				// ever applying the sidecar's canonical AC list.
-				if len(capturedACs) > 0 {
-					seen := make(map[string]struct{}, len(capturedACs))
-					deduped := make([]string, 0, len(capturedACs))
-					for _, ac := range capturedACs {
-						if _, exists := seen[ac]; !exists {
-							seen[ac] = struct{}{}
-							deduped = append(deduped, ac)
-						}
-					}
-					item.AcceptanceCriteria = deduped
-					prefixed := make([]string, len(deduped))
-					for i, ac := range deduped {
-						prefixed[i] = "- " + ac
-					}
-					item.Doc.ReplaceList("acceptance_criteria", prefixed)
-				}
+				applyACs(item, capturedACs)
 				// I-512: append the sidecar path to linked_plans, idempotent
 				// against re-Accept on a previously rejected plan.
 				if sidecarRel != "" {

@@ -798,3 +798,44 @@ func TestPlanApproveIdempotentGuardRefreshesStaleACs(t *testing.T) {
 		t.Errorf("disk reload: AC should be %q; got %q", fixturePlan.ACs[0], item2.AcceptanceCriteria[0])
 	}
 }
+
+// applyACs is the shared dedup helper used by PlanApprove, the idempotent guard,
+// and prep.go's Accept path. These tests guard its contract so a format change in
+// one site doesn't silently diverge from the others.
+func TestApplyACs_DedupsAndPrefixes(t *testing.T) {
+	s, _ := setupTestEnv(t)
+	item, _ := s.Get("T-001")
+
+	applyACs(item, []string{"cmd: echo a", "cmd: echo b", "cmd: echo a"})
+
+	if len(item.AcceptanceCriteria) != 2 {
+		t.Fatalf("expected 2 deduped ACs; got %d: %v", len(item.AcceptanceCriteria), item.AcceptanceCriteria)
+	}
+	if item.AcceptanceCriteria[0] != "cmd: echo a" || item.AcceptanceCriteria[1] != "cmd: echo b" {
+		t.Errorf("unexpected ACs: %v", item.AcceptanceCriteria)
+	}
+}
+
+func TestApplyACs_EmptyInputIsNoop(t *testing.T) {
+	s, _ := setupTestEnv(t)
+	item, _ := s.Get("T-001")
+	before := append([]string(nil), item.AcceptanceCriteria...)
+
+	applyACs(item, nil)
+
+	if len(item.AcceptanceCriteria) != len(before) {
+		t.Errorf("applyACs(nil) must not modify AcceptanceCriteria; before=%v after=%v", before, item.AcceptanceCriteria)
+	}
+}
+
+func TestApplyACs_ReplacesExistingNonEmpty(t *testing.T) {
+	s, _ := setupTestEnv(t)
+	item, _ := s.Get("T-001")
+	item.AcceptanceCriteria = []string{"cmd: stale"}
+
+	applyACs(item, []string{"cmd: fresh"})
+
+	if len(item.AcceptanceCriteria) != 1 || item.AcceptanceCriteria[0] != "cmd: fresh" {
+		t.Errorf("applyACs must replace non-empty ACs; got %v", item.AcceptanceCriteria)
+	}
+}
