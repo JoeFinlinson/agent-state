@@ -1313,12 +1313,12 @@ func (s *Store) replayCommitOnFetchedMain(root string) error {
 	// 4. Detect overlap: did the peer's commits between localParent and
 	//    originHead also change any of our changed files? If so, refuse
 	//    to overwrite — surface ErrPushDiverged with both refs.
-	overlapOut, err := gitOutput(root, "diff", "--name-only", localParent, originHead)
+	overlapOut, err := gitOutput(root, "diff", "--name-only", "-z", localParent, originHead)
 	if err != nil {
 		return fmt.Errorf("diff %s %s: %w", localParent, originHead, err)
 	}
 	peerChanged := make(map[string]bool)
-	for _, line := range strings.Split(strings.TrimSpace(overlapOut), "\n") {
+	for _, line := range strings.Split(overlapOut, "\x00") {
 		if line == "" {
 			continue
 		}
