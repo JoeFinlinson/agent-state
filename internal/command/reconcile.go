@@ -215,16 +215,27 @@ func reconcileEpicStatus(s *store.Store, cfg *config.Config, opts ReconcileOpts)
 	_ = s
 	r, err := registry.Load(cfg.EpicsPath())
 	if err != nil {
+		// Surface the skip — a silent no-op would let epic-status drift persist
+		// across reconcile runs with no operator signal (I-1641 review).
+		fmt.Fprintf(os.Stderr, "  warning: epic-status heal skipped — cannot load registry: %v\n", err)
 		return 0
 	}
 	healed := r.ReconcileEpicStatuses()
+	if len(healed) == 0 {
+		return 0
+	}
 	for _, id := range healed {
 		fmt.Printf("  %s: reactivated (has active sprint)\n", id)
 	}
-	if len(healed) > 0 && !opts.DryRun {
-		if err := r.Save(cfg.EpicsPath()); err != nil {
-			fmt.Fprintf(os.Stderr, "  error saving registry after epic-status heal: %v\n", err)
-		}
+	if opts.DryRun {
+		return len(healed)
+	}
+	// Persist BEFORE counting the heal as applied: if Save fails the on-disk
+	// status is unchanged, so reporting it as a healed update would itself be a
+	// lie — the exact failure mode this phase exists to prevent (I-1641 review).
+	if err := r.Save(cfg.EpicsPath()); err != nil {
+		fmt.Fprintf(os.Stderr, "  error: epic-status heal computed %d fix(es) but registry Save failed — NOT applied: %v\n", len(healed), err)
+		return 0
 	}
 	return len(healed)
 }

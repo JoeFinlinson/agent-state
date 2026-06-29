@@ -329,6 +329,14 @@ func SprintCreate(cfg *config.Config, epicID, title string, opts SprintCreateOpt
 		return 1
 	}
 
+	// Capture the parent epic's prior status so we can surface the I-1641
+	// reactivation side effect — AddSprint silently flips an archived/completed
+	// epic to active, and a silent state change violates the operator profile.
+	prevEpicStatus := ""
+	if e, ok := r.GetEpic(epicID); ok {
+		prevEpicStatus = e.Status
+	}
+
 	s, err := r.AddSprint(epicID, title)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
@@ -353,6 +361,9 @@ func SprintCreate(cfg *config.Config, epicID, title string, opts SprintCreateOpt
 	}
 
 	fmt.Printf("Created sprint %s — %s (epic: %s)\n", s.ID, s.Title, s.Epic)
+	if prevEpicStatus == "archived" || prevEpicStatus == "completed" {
+		fmt.Printf("  note: epic %s was %s — reactivated to active (now holds an active sprint)\n", epicID, prevEpicStatus)
+	}
 	return 0
 }
 

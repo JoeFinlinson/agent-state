@@ -739,8 +739,14 @@ func (r *Registry) ReconcileEpicStatuses() []string {
 		if e.Status != "archived" && e.Status != "completed" {
 			continue
 		}
-		for _, sp := range r.SprintsForEpic(e.ID) {
-			if sp.Status != "archived" && sp.Status != "completed" {
+		// Existence check only — iterate r.Sprints directly rather than
+		// SprintsForEpic, which would allocate a slice and sort it by sequence
+		// for a result we discard on the first match (I-1641 review). Note: a
+		// legitimately-archived epic always has all sprints archived/completed
+		// (ArchiveEpic enforces that invariant), so this only fires for the
+		// AddSprint-into-archived-epic path or manual data edits.
+		for _, sp := range r.Sprints {
+			if sp.Epic == e.ID && sp.Status != "archived" && sp.Status != "completed" {
 				r.Epics[i].Status = "active"
 				healed = append(healed, e.ID)
 				break

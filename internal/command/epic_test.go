@@ -120,6 +120,30 @@ func TestSprintCreateWithDescription(t *testing.T) {
 	t.Error("sprint with description not found after Load")
 }
 
+// I-1641: SprintCreate on an archived epic reactivates the epic (the AddSprint
+// write-time fix) and the change persists to disk.
+func TestSprintCreateReactivatesArchivedEpic(t *testing.T) {
+	_, cfg := setupTestEnv(t)
+	r, _ := registry.Load(cfg.EpicsPath())
+	e := r.AddEpic("Archived Epic", "")
+	r.Epics[0].Status = "archived"
+	r.Save(cfg.EpicsPath())
+
+	code := SprintCreate(cfg, e.ID, "Revives It", SprintCreateOpts{})
+	if code != 0 {
+		t.Fatalf("SprintCreate returned %d, want 0", code)
+	}
+
+	r2, _ := registry.Load(cfg.EpicsPath())
+	got, ok := r2.GetEpic(e.ID)
+	if !ok {
+		t.Fatal("epic vanished")
+	}
+	if got.Status != "active" {
+		t.Errorf("epic status after SprintCreate = %q, want active", got.Status)
+	}
+}
+
 func TestSprintListEmpty(t *testing.T) {
 	_, cfg := setupTestEnv(t)
 	code := SprintList(cfg, "")
