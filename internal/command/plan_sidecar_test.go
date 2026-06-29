@@ -86,7 +86,7 @@ func TestPlanApproveSkipsSidecarCheckForIdea(t *testing.T) {
 // TestPlanCheckClosesGateOnSidecarDeletion — the hook surface
 // must close when a sidecar is deleted post-approval. Approves
 // T-001 (clean fixture sidecar present), deletes the sidecar,
-// calls PlanCheck → exit 1.
+// calls PlanCheck → exit 3 (approved but substance now failing, I-897).
 func TestPlanCheckClosesGateOnSidecarDeletion(t *testing.T) {
 	t.Setenv("AS_AGENT_ID", "")
 	s, cfg := setupTestEnv(t)

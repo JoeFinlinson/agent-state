@@ -468,7 +468,7 @@ func PlanCheck(s *store.Store, cfg *config.Config, id string) int {
 		return 1
 	}
 	if !item.PlanApproved {
-		fmt.Printf("not approved\n")
+		fmt.Fprintf(os.Stderr, "not approved\n")
 		return 1
 	}
 	// I-897: all substance failures below return 3 (approved but failing)

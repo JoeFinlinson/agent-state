@@ -3215,7 +3215,7 @@ pending re-approval.
 	}
 	planCheckCmd := &cobra.Command{
 		Use:   "check <id>",
-		Short: "Print plan-approval state and exit 0 if approved, 1 otherwise (for hook integration)",
+		Short: "Print plan-approval state: exit 0 approved, 1 never-approved, 3 approved-but-substance-failing (for hook integration)",
 		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			exitCode = command.PlanCheck(appStore, appCfg, args[0])
