@@ -3,6 +3,7 @@ package command
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/theraprac/agent-state/internal/config"
@@ -105,6 +106,122 @@ func TestTryAutoFinishWorktreeRetainsWhenCleanupFails(t *testing.T) {
 	// can run `st finish --force` against it.
 	if _, err := os.Stat(wtDir); os.IsNotExist(err) {
 		t.Errorf("retention path removed wtDir; should be preserved for force-finish")
+	}
+}
+
+// TestTryAutoFinishWorktreeCleanAfterSquashMerge — I-1665: after a squash merge
+// the remote branch is deleted and git remote prune removes the local tracking
+// ref, so `git log @{u}..HEAD` fails. The upstream tracking config (remote=origin)
+// still exists in .git/config. TryAutoFinishWorktree must distinguish this from
+// "no upstream configured" (I-1469) and auto-finish rather than retain.
+func TestTryAutoFinishWorktreeCleanAfterSquashMerge(t *testing.T) {
+	_, cfg := setupTestEnv(t)
+
+	// parentDir holds main repo clones — set as absolute ParentDir so
+	// resolveRepoDir can locate the main repo for git worktree remove.
+	parentDir := t.TempDir()
+	cfg.Worktree = &config.WorktreeConfig{
+		Enabled:   true,
+		BaseDir:   "worktrees",
+		ParentDir: parentDir,
+		Repos:     []string{"repo-a"},
+	}
+
+	// --- Set up bare remote ---
+	remoteDir := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "--bare", "-b", "main"},
+	} {
+		if out, err := runGit(remoteDir, args...); err != nil {
+			t.Fatalf("git %v in remote: %v\n%s", args, err, out)
+		}
+	}
+
+	// --- Set up main repo-a with initial commit ---
+	mainRepoDir := filepath.Join(parentDir, "repo-a")
+	if err := os.MkdirAll(mainRepoDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll mainRepoDir: %v", err)
+	}
+	for _, args := range [][]string{
+		{"init", "-b", "main"},
+		{"config", "user.email", "test@test"},
+		{"config", "user.name", "Test"},
+	} {
+		if out, err := runGit(mainRepoDir, args...); err != nil {
+			t.Fatalf("git %v in main: %v\n%s", args, err, out)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(mainRepoDir, "init.txt"), []byte("init"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	for _, args := range [][]string{
+		{"add", "init.txt"},
+		{"commit", "-m", "initial"},
+		{"remote", "add", "origin", remoteDir},
+		{"push", "-u", "origin", "main"},
+	} {
+		if out, err := runGit(mainRepoDir, args...); err != nil {
+			t.Fatalf("git %v in main: %v\n%s", args, err, out)
+		}
+	}
+
+	// --- Provision worktree at worktrees/T-001/repo-a (legacy path via cfg.Root) ---
+	wtDir := filepath.Join(cfg.Root(), "worktrees", "T-001")
+	if err := os.MkdirAll(wtDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll wtDir: %v", err)
+	}
+	repoDir := filepath.Join(wtDir, "repo-a")
+	if out, err := runGit(mainRepoDir, "worktree", "add", "-b", "fix/T-001", repoDir); err != nil {
+		t.Fatalf("git worktree add: %v\n%s", err, out)
+	}
+	for _, args := range [][]string{
+		{"config", "user.email", "test@test"},
+		{"config", "user.name", "Test"},
+	} {
+		if out, err := runGit(repoDir, args...); err != nil {
+			t.Fatalf("git %v in worktree: %v\n%s", args, err, out)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "work.txt"), []byte("work"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	for _, args := range [][]string{
+		{"add", "work.txt"},
+		{"commit", "-m", "feature work"},
+		{"push", "-u", "origin", "fix/T-001"},
+	} {
+		if out, err := runGit(repoDir, args...); err != nil {
+			t.Fatalf("git %v in worktree: %v\n%s", args, err, out)
+		}
+	}
+
+	// --- Simulate squash merge + remote branch deletion ---
+	// Delete the remote branch (as `gh pr merge --squash --delete-branch` does).
+	if out, err := runGit(remoteDir, "branch", "-D", "fix/T-001"); err != nil {
+		t.Fatalf("delete remote branch: %v\n%s", err, out)
+	}
+	// Prune the local remote-tracking ref (as `git fetch --prune` or `git remote prune` would).
+	if out, err := runGit(repoDir, "remote", "prune", "origin"); err != nil {
+		t.Fatalf("remote prune: %v\n%s", err, out)
+	}
+	// At this point: `git log @{u}..HEAD` fails (tracking ref gone),
+	// but `git config --get branch.fix/T-001.remote` = "origin" (still configured).
+
+	cleaned, retained := TryAutoFinishWorktree(cfg, "T-001")
+	if !cleaned {
+		t.Error("squash-merge path: got cleaned=false, want true — remote branch deleted post-merge should auto-finish")
+	}
+	if retained {
+		t.Error("squash-merge path: got retained=true, want false")
+	}
+	if _, err := os.Stat(wtDir); !os.IsNotExist(err) {
+		t.Errorf("squash-merge path: wtDir still exists after auto-finish; want removed")
+	}
+	// Verify the local feature branch was removed from the main repo.
+	// git branch -d fails for squash-merged branches (no merge ancestry);
+	// the -D fallback must clean it up (I-1665).
+	if out, err := runGit(mainRepoDir, "branch", "--list", "fix/T-001"); err != nil || strings.TrimSpace(out) != "" {
+		t.Errorf("squash-merge path: local branch fix/T-001 still exists in main repo after auto-finish (branch -D fallback failed); out=%q err=%v", strings.TrimSpace(out), err)
 	}
 }
 
