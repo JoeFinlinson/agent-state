@@ -20,9 +20,11 @@ const (
 )
 
 // blastRadiusPaths contains path fragments that unconditionally route to "high"
-// regardless of diff size (from CLAUDE.md rule 5 + I-147 SBAR).
+// regardless of diff size (mirrors CLAUDE.md rule 5).
 var blastRadiusPaths = []string{
 	"internal/auth/",
+	"internal/payment/",
+	"internal/billing/",
 	"db/changelog/",
 	"claude-config/hooks/",
 	".github/workflows/",
@@ -57,7 +59,11 @@ func ReviewDepth(s *store.Store, cfg *config.Config, id string, opts ReviewDepth
 	var totalFiles, totalLines int
 	var changedPaths []string
 
-	for _, repo := range worktreeRepos(cfg) {
+	var repos []string
+	if cfg != nil && cfg.Worktree != nil {
+		repos = cfg.Worktree.Repos
+	}
+	for _, repo := range repos {
 		dir := resolveRepoDirForItem(cfg, id, repo)
 		if dir == "" || dir == repo {
 			continue
@@ -66,18 +72,31 @@ func ReviewDepth(s *store.Store, cfg *config.Config, id string, opts ReviewDepth
 			continue
 		}
 
-		statOut, err := gitFn(dir, "diff", "--stat", "origin/main...HEAD")
+		// Determine which ref range to diff. Prefer origin/main...HEAD; fall back
+		// to HEAD^...HEAD only for genuine orphan branches (commits exist but no
+		// common ancestor with origin/main). When no commits are ahead of
+		// origin/main the repo has no item-specific changes — skip it.
+		statRef := "origin/main...HEAD"
+		statOut, err := gitFn(dir, "diff", "--stat", statRef)
 		if err != nil || strings.TrimSpace(statOut) == "" {
-			statOut, err = gitFn(dir, "diff", "--stat", "HEAD^...HEAD")
+			commitsAhead, caErr := gitFn(dir, "log", "--oneline", "origin/main..HEAD")
+			if caErr == nil && strings.TrimSpace(commitsAhead) == "" {
+				continue
+			}
+			statRef = "HEAD^...HEAD"
+			statOut, err = gitFn(dir, "diff", "--stat", statRef)
 			if err != nil {
 				continue
 			}
 		}
+
 		files, lines := parseDiffStat(statOut)
 		totalFiles += files
 		totalLines += lines
 
-		namesOut, err := gitFn(dir, "diff", "--name-only", "origin/main...HEAD")
+		// Use the same ref range for path collection so blast-radius detection
+		// is consistent with the stat (fixes the orphan-branch case).
+		namesOut, err := gitFn(dir, "diff", "--name-only", statRef)
 		if err == nil {
 			for _, p := range strings.Split(strings.TrimSpace(namesOut), "\n") {
 				if p != "" {
@@ -87,18 +106,14 @@ func ReviewDepth(s *store.Store, cfg *config.Config, id string, opts ReviewDepth
 		}
 	}
 
+	if totalFiles == 0 && len(changedPaths) == 0 {
+		fmt.Fprintf(os.Stderr, "review-depth: %s: no diff found across worktree repos — defaulting to 'high' (safe fallback)\n", id)
+		fmt.Println("high")
+		return 0
+	}
+
 	fmt.Println(computeDepth(totalFiles, totalLines, changedPaths))
 	return 0
-}
-
-// worktreeRepos returns the list of repo aliases from the worktree config.
-func worktreeRepos(cfg *config.Config) []string {
-	if cfg == nil || cfg.Worktree == nil {
-		return nil
-	}
-	out := make([]string, len(cfg.Worktree.Repos))
-	copy(out, cfg.Worktree.Repos)
-	return out
 }
 
 // computeDepth applies the bucketing logic. Pure function for testability.
@@ -121,7 +136,7 @@ func hasBlastRadiusPath(paths []string) bool {
 	for _, p := range paths {
 		pl := strings.ToLower(p)
 		for _, frag := range blastRadiusPaths {
-			if strings.Contains(pl, strings.ToLower(frag)) {
+			if strings.Contains(pl, frag) {
 				return true
 			}
 		}

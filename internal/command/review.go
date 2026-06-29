@@ -206,8 +206,11 @@ func collectItemDiff(cfg *config.Config, id string, opts ReviewOpts) (diff, sha 
 		// the last commit on main (a peer's unrelated work).
 		diffOut, gitErr := gitFn(dir, "diff", "origin/main...HEAD")
 		if gitErr != nil || strings.TrimSpace(diffOut) == "" {
-			commitsAhead, _ := gitFn(dir, "log", "--oneline", "origin/main..HEAD")
-			if strings.TrimSpace(commitsAhead) == "" {
+			// Only skip when the log succeeds and confirms zero commits ahead.
+			// If the log itself errors (e.g. origin/main not fetched on a fresh
+			// clone), fall through to HEAD^...HEAD as before this guard.
+			commitsAhead, caErr := gitFn(dir, "log", "--oneline", "origin/main..HEAD")
+			if caErr == nil && strings.TrimSpace(commitsAhead) == "" {
 				continue
 			}
 			diffOut, gitErr = gitFn(dir, "diff", "HEAD^...HEAD")

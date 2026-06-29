@@ -53,7 +53,6 @@ func TestComputeDepth_SmallReturnsLow(t *testing.T) {
 }
 
 func TestComputeDepth_ExactSmallBoundaryReturnsLow(t *testing.T) {
-	// exactly at the small thresholds (3 files, 50 lines) → still "low"
 	got := computeDepth(3, 50, []string{"cmd/as/app.go"})
 	if got != "low" {
 		t.Errorf("got %q, want %q", got, "low")
@@ -74,45 +73,30 @@ func TestComputeDepth_LargeFileCountReturnsHigh(t *testing.T) {
 	}
 }
 
-func TestComputeDepth_BlastRadiusDBReturnsHigh(t *testing.T) {
-	got := computeDepth(1, 10, []string{"db/changelog/001-init.sql"})
-	if got != "high" {
-		t.Errorf("got %q, want %q", got, "high")
+// TestComputeDepth_BlastRadius covers all blast-radius path fragments in a
+// single table so adding a new entry to blastRadiusPaths automatically
+// requires a corresponding test case.
+func TestComputeDepth_BlastRadius(t *testing.T) {
+	cases := []struct {
+		name string
+		path string
+	}{
+		{"auth", "internal/auth/middleware.go"},
+		{"payment", "internal/payment/stripe.go"},
+		{"billing", "internal/billing/invoice.go"},
+		{"db_changelog", "db/changelog/V1__init.sql"},
+		{"hooks", "claude-config/hooks/pre-pr.sh"},
+		{"workflows", ".github/workflows/ci.yml"},
+		{"infra", "theraprac-infra/terraform/main.tf"},
+		{"ansible", "ansible/roles/app/tasks/main.yml"},
 	}
-}
-
-func TestComputeDepth_BlastRadiusAuthReturnsHigh(t *testing.T) {
-	got := computeDepth(1, 5, []string{"internal/auth/middleware.go"})
-	if got != "high" {
-		t.Errorf("got %q, want %q", got, "high")
-	}
-}
-
-func TestComputeDepth_BlastRadiusHooksReturnsHigh(t *testing.T) {
-	got := computeDepth(1, 8, []string{"claude-config/hooks/pre-pr.sh"})
-	if got != "high" {
-		t.Errorf("got %q, want %q", got, "high")
-	}
-}
-
-func TestComputeDepth_BlastRadiusWorkflowsReturnsHigh(t *testing.T) {
-	got := computeDepth(1, 5, []string{".github/workflows/ci.yml"})
-	if got != "high" {
-		t.Errorf("got %q, want %q", got, "high")
-	}
-}
-
-func TestComputeDepth_BlastRadiusInfraReturnsHigh(t *testing.T) {
-	got := computeDepth(2, 20, []string{"theraprac-infra/terraform/main.tf"})
-	if got != "high" {
-		t.Errorf("got %q, want %q", got, "high")
-	}
-}
-
-func TestComputeDepth_BlastRadiusAnsibleReturnsHigh(t *testing.T) {
-	got := computeDepth(1, 5, []string{"ansible/roles/app/tasks/main.yml"})
-	if got != "high" {
-		t.Errorf("got %q, want %q", got, "high")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := computeDepth(1, 5, []string{tc.path})
+			if got != "high" {
+				t.Errorf("path %q: got %q, want %q", tc.path, got, "high")
+			}
+		})
 	}
 }
 
@@ -124,7 +108,6 @@ func TestComputeDepth_MediumReturns(t *testing.T) {
 }
 
 func TestComputeDepth_JustOverSmallCeilingReturnsMedium(t *testing.T) {
-	// 51 lines, 3 files — one line over the small ceiling
 	got := computeDepth(3, 51, []string{"internal/command/foo.go"})
 	if got != "medium" {
 		t.Errorf("got %q, want %q", got, "medium")
