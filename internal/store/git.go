@@ -914,6 +914,91 @@ func (s *Store) GitSync(message string, newPaths ...string) error {
 	return nil
 }
 
+// overlayEntry represents one changed path from a git --raw -z diff stream.
+// Shared by commitStagedOntoMain and replayCommitOnFetchedMain.
+type overlayEntry struct{ mode, sha, status, path string }
+
+// parseRawZEntries parses a NUL-delimited `git diff --raw -z` stream:
+//
+//	:<srcmode> <dstmode> <srcsha> <dstsha> <status>\0<path>\0…
+//
+// It is safe for paths that contain spaces or non-ASCII bytes.
+func parseRawZEntries(raw string) []overlayEntry {
+	tokens := strings.Split(raw, "\x00")
+	var entries []overlayEntry
+	for i := 0; i+1 < len(tokens); i += 2 {
+		meta, path := tokens[i], tokens[i+1]
+		if meta == "" || path == "" {
+			continue
+		}
+		f := strings.Fields(strings.TrimPrefix(meta, ":")) // [srcmode dstmode srcsha dstsha status]
+		if len(f) < 5 {
+			continue
+		}
+		entries = append(entries, overlayEntry{mode: f[1], sha: f[3], status: f[4], path: path})
+	}
+	return entries
+}
+
+// buildOverlayTree seeds a temp index from baseSHA's tree, overlays each
+// entry (D → force-remove, others → cacheinfo at their exact mode/sha), and
+// write-trees. Returns the resulting tree hash and unchanged=true when it is
+// identical to baseSHA's tree (no-op commit guard). The temp index lives
+// inside the real git-dir so it survives nested layouts where agent-state/
+// is a subdir of the toplevel.
+func buildOverlayTree(toplevel, baseSHA string, entries []overlayEntry) (tree string, unchanged bool, err error) {
+	gitDirOut, err := gitOutput(toplevel, "rev-parse", "--git-dir")
+	if err != nil {
+		return "", false, fmt.Errorf("rev-parse --git-dir: %w", err)
+	}
+	gitDir := strings.TrimSpace(gitDirOut)
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(toplevel, gitDir)
+	}
+	tmpIdx, err := os.CreateTemp(gitDir, "index.overlay-*")
+	if err != nil {
+		return "", false, fmt.Errorf("create temp index: %w", err)
+	}
+	tmpIdxPath := tmpIdx.Name()
+	tmpIdx.Close()
+	defer os.Remove(tmpIdxPath)
+	env := []string{"GIT_INDEX_FILE=" + tmpIdxPath}
+
+	if err := gitCmdEnv(toplevel, env, "read-tree", baseSHA); err != nil {
+		return "", false, fmt.Errorf("read-tree %s into temp index: %w", baseSHA, err)
+	}
+	for _, e := range entries {
+		// Deletion (status D / dstmode 000000 / null dstsha): remove from the
+		// temp index. --force-remove (not --remove): the staged index already
+		// says "deleted", so the commit must drop it regardless of whether the
+		// file still exists on disk.
+		if e.status == "D" || e.mode == "000000" || strings.Trim(e.sha, "0") == "" {
+			if err := gitCmdEnv(toplevel, env, "update-index", "--force-remove", "--", e.path); err != nil {
+				return "", false, fmt.Errorf("update-index --force-remove %q: %w", e.path, err)
+			}
+			continue
+		}
+		if err := gitCmdEnv(toplevel, env, "update-index", "--add", "--cacheinfo",
+			e.mode+","+e.sha+","+e.path); err != nil {
+			return "", false, fmt.Errorf("update-index %q: %w", e.path, err)
+		}
+	}
+	treeOut, err := gitOutputEnv(toplevel, env, "write-tree")
+	if err != nil {
+		return "", false, fmt.Errorf("write-tree: %w", err)
+	}
+	tree = strings.TrimSpace(treeOut)
+
+	baseTreeOut, err := gitOutput(toplevel, "rev-parse", baseSHA+"^{tree}")
+	if err != nil {
+		return "", false, fmt.Errorf("rev-parse %s^{tree}: %w", baseSHA, err)
+	}
+	if strings.TrimSpace(baseTreeOut) == tree {
+		return tree, true, nil
+	}
+	return tree, false, nil
+}
+
 // commitStagedOntoMain builds a commit containing the currently-staged
 // agent-state changes on top of refs/heads/main and advances that ref —
 // without ever touching the working-tree HEAD/index. It is the I-1313 fix
@@ -979,84 +1064,22 @@ func (s *Store) commitStagedOntoMain(root, message string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("diff --cached --raw: %w", err)
 	}
-	type stagedEntry struct{ mode, sha, status, path string }
-	var entries []stagedEntry
-	// -z stream alternates meta\0path\0meta\0path\0…
-	rawTokens := strings.Split(rawOut, "\x00")
-	for i := 0; i+1 < len(rawTokens); i += 2 {
-		meta, path := rawTokens[i], rawTokens[i+1]
-		if meta == "" || path == "" {
-			continue
-		}
-		f := strings.Fields(strings.TrimPrefix(meta, ":")) // [srcmode dstmode srcsha dstsha status]
-		if len(f) < 5 {
-			continue
-		}
-		entries = append(entries, stagedEntry{mode: f[1], sha: f[3], status: f[4], path: path})
-	}
+	entries := parseRawZEntries(rawOut)
 	if len(entries) == 0 {
 		return baseSHA, nil
 	}
 
-	// Temp index seeded from base's tree, so we overlay onto main's content
-	// (not HEAD's). Place it inside the REAL git dir.
-	gitDirOut, err := gitOutput(toplevel, "rev-parse", "--git-dir")
+	// Overlay the staged entries onto main's tree via a temp index. The helper
+	// resolves the real git-dir from toplevel so it works in nested layouts.
+	tree, unchanged, err := buildOverlayTree(toplevel, baseSHA, entries)
 	if err != nil {
-		return "", fmt.Errorf("rev-parse --git-dir: %w", err)
+		return "", err
 	}
-	gitDir := strings.TrimSpace(gitDirOut)
-	if !filepath.IsAbs(gitDir) {
-		gitDir = filepath.Join(toplevel, gitDir)
-	}
-	tmpIdx, err := os.CreateTemp(gitDir, "index.stcommit-*")
-	if err != nil {
-		return "", fmt.Errorf("create temp index: %w", err)
-	}
-	tmpIdxPath := tmpIdx.Name()
-	tmpIdx.Close()
-	defer os.Remove(tmpIdxPath)
-	env := []string{"GIT_INDEX_FILE=" + tmpIdxPath}
-
-	if err := gitCmdEnv(toplevel, env, "read-tree", baseSHA); err != nil {
-		return "", fmt.Errorf("read-tree %s into temp index: %w", baseSHA, err)
-	}
-
-	for _, e := range entries {
-		// Deletion (status D / dstmode 000000 / null dstsha): remove from the
-		// temp index. --force-remove (not --remove): the staged index already
-		// says "deleted", so the commit must drop it regardless of whether the
-		// file still exists on disk. Plain --remove only drops MISSING files, so
-		// a staged deletion of a still-present file (e.g. I-1451's live
-		// .st-git.lock) would be silently ignored and survive in the tree.
-		if e.status == "D" || e.mode == "000000" || strings.Trim(e.sha, "0") == "" {
-			if err := gitCmdEnv(toplevel, env, "update-index", "--force-remove", "--", e.path); err != nil {
-				return "", fmt.Errorf("update-index --force-remove %q: %w", e.path, err)
-			}
-			continue
-		}
-		// Overlay the already-staged blob at its exact mode (preserves the
-		// executable bit and symlinks — no re-hash needed).
-		if err := gitCmdEnv(toplevel, env, "update-index", "--add", "--cacheinfo",
-			e.mode+","+e.sha+","+e.path); err != nil {
-			return "", fmt.Errorf("update-index %q: %w", e.path, err)
-		}
-	}
-
-	treeOut, err := gitOutputEnv(toplevel, env, "write-tree")
-	if err != nil {
-		return "", fmt.Errorf("write-tree: %w", err)
-	}
-	tree := strings.TrimSpace(treeOut)
-
 	// If the overlaid tree is identical to main's tree, the working-tree
 	// agent-state already matches main (e.g. a re-sync on a feature branch
 	// whose change was committed to main on a prior sync). Skip the commit
 	// so we don't accumulate empty commits on main.
-	baseTreeOut, err := gitOutput(toplevel, "rev-parse", baseSHA+"^{tree}")
-	if err != nil {
-		return "", fmt.Errorf("rev-parse %s^{tree}: %w", baseSHA, err)
-	}
-	if strings.TrimSpace(baseTreeOut) == tree {
+	if unchanged {
 		return baseSHA, nil
 	}
 
@@ -1229,6 +1252,16 @@ func (s *Store) replayCommitOnFetchedMain(root string) error {
 		return fmt.Errorf("fetch origin main: %w", err)
 	}
 
+	// All path-sensitive plumbing runs against the git TOPLEVEL so that
+	// nested layouts (where root = agent-state/ subdir) work correctly.
+	// filepath.Join(root, rel) would double-prefix paths in nested layout;
+	// anchoring to toplevel is the I-1313/I-1315 fix for this class of bug.
+	toplevelOut, err := gitOutput(root, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return fmt.Errorf("rev-parse --show-toplevel: %w", err)
+	}
+	toplevel := strings.TrimSpace(toplevelOut)
+
 	// 2. Identify our local commit and its parent.
 	headOut, err := gitOutput(root, "rev-parse", "refs/heads/main")
 	if err != nil {
@@ -1257,21 +1290,24 @@ func (s *Store) replayCommitOnFetchedMain(root string) error {
 		return ErrPushRejectedButOriginUnchanged
 	}
 
-	// 3. List the files we changed in our local commit. Empty list ⇒
-	//    nothing to replay; treat as a no-op success.
-	changedOut, err := gitOutput(root, "diff-tree", "--no-commit-id", "--name-only", "-r", localHead)
+	// 3. Get the exact file entries (with modes and blob SHAs) from our
+	//    local commit. diff-tree --raw -z gives us the already-hashed blob
+	//    and the exact mode (executable bit, symlinks) so we can overlay
+	//    without re-hashing from disk — which would fail in nested layout
+	//    because filepath.Join(root, rel) double-prefixes paths.
+	rawOut, err := gitOutput(root, "diff-tree", "--raw", "-z", "-r", "--no-renames", "--no-abbrev",
+		localParent, localHead)
 	if err != nil {
-		return fmt.Errorf("diff-tree %s: %w", localHead, err)
+		return fmt.Errorf("diff-tree %s..%s: %w", localParent, localHead, err)
 	}
-	var changed []string
-	for _, line := range strings.Split(strings.TrimSpace(changedOut), "\n") {
-		if line == "" {
-			continue
-		}
-		changed = append(changed, line)
-	}
-	if len(changed) == 0 {
+	entries := parseRawZEntries(rawOut)
+	if len(entries) == 0 {
 		return nil
+	}
+	// Name-only list for overlap detection below.
+	changed := make([]string, 0, len(entries))
+	for _, e := range entries {
+		changed = append(changed, e.path)
 	}
 
 	// 4. Detect overlap: did the peer's commits between localParent and
@@ -1295,59 +1331,25 @@ func (s *Store) replayCommitOnFetchedMain(root string) error {
 		}
 	}
 
-	// 5. Build the new tree in a temp index — start from origin/main's
-	//    tree, overlay each of our changed files (or remove if deleted).
+	// 5. Build the new tree: start from origin/main's tree, overlay our
+	//    changed entries (with exact modes/SHAs from the local commit).
 	commitMsg, err := gitOutput(root, "log", "-1", "--format=%B", localHead)
 	if err != nil {
 		return fmt.Errorf("read commit message: %w", err)
 	}
 
-	tmpIdx, err := os.CreateTemp(filepath.Join(root, ".git"), "index.replay-*")
+	tree, unchanged, err := buildOverlayTree(toplevel, originHead, entries)
 	if err != nil {
-		return fmt.Errorf("create temp index: %w", err)
+		return fmt.Errorf("build overlay tree: %w", err)
 	}
-	tmpIdxPath := tmpIdx.Name()
-	tmpIdx.Close()
-	defer os.Remove(tmpIdxPath)
-
-	env := []string{"GIT_INDEX_FILE=" + tmpIdxPath}
-
-	if err := gitCmdEnv(root, env, "read-tree", originHead); err != nil {
-		return fmt.Errorf("read-tree origin/main into temp index: %w", err)
-	}
-
-	for _, rel := range changed {
-		abs := filepath.Join(root, rel)
-		if _, statErr := os.Stat(abs); statErr != nil {
-			if os.IsNotExist(statErr) {
-				// File was deleted in our commit — remove from temp index.
-				if err := gitCmdEnv(root, env, "update-index", "--remove", "--", rel); err != nil {
-					return fmt.Errorf("update-index --remove %q: %w", rel, err)
-				}
-				continue
-			}
-			return fmt.Errorf("stat %q: %w", abs, statErr)
+	if unchanged {
+		// Our changes are already present in origin/main's tree — fast-forward
+		// local main without creating an empty commit.
+		if err := gitCmdQuiet(root, "update-ref", "refs/heads/main", originHead, localHead); err != nil {
+			return fmt.Errorf("update-ref refs/heads/main (ff to origin): %w", err)
 		}
-		// Hash the working-tree blob and stage it at rel in the temp index.
-		// `--path <rel>` makes git apply .gitattributes (text=auto, smudge/clean
-		// filters) the same way `git add` would, so the replayed tree's blob
-		// hash matches what a normal commit would produce.
-		blobOut, err := gitOutput(root, "hash-object", "-w", "--path", rel, "--", abs)
-		if err != nil {
-			return fmt.Errorf("hash-object %q: %w", abs, err)
-		}
-		blob := strings.TrimSpace(blobOut)
-		if err := gitCmdEnv(root, env, "update-index", "--add", "--cacheinfo",
-			"100644,"+blob+","+rel); err != nil {
-			return fmt.Errorf("update-index %q: %w", rel, err)
-		}
+		return nil
 	}
-
-	treeOut, err := gitOutputEnv(root, env, "write-tree")
-	if err != nil {
-		return fmt.Errorf("write-tree: %w", err)
-	}
-	tree := strings.TrimSpace(treeOut)
 
 	// 6. Create the new commit on top of origin/main and advance our
 	//    local main ref. Old non-FF commit is dropped — its tree

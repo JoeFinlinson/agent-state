@@ -2518,3 +2518,93 @@ func TestGitSyncAllowsCleanState(t *testing.T) {
 		t.Error("main did not advance — commit was not made for clean content")
 	}
 }
+
+// TestReplay_NestedLayout_PreservesChangedFiles is the I-1315 regression guard.
+//
+// In a nested layout (paths.root: agent-state), the old replayCommitOnFetchedMain
+// used filepath.Join(root, rel) to locate blobs on disk. Because diff-tree emits
+// toplevel-relative paths (e.g. "agent-state/tasks/T-002-our.md"), joining them
+// onto root = "…/agent-state" double-prefixes to "…/agent-state/agent-state/…" —
+// a path that doesn't exist — causing os.Stat to return IsNotExist, which the code
+// interpreted as "file was deleted", and it removed the entry from the temp index
+// instead of adding it. The fix uses diff-tree --raw -z to obtain blob SHAs and
+// modes directly from the commit (no filesystem access) and delegates overlay
+// construction to buildOverlayTree, which is anchored to the git toplevel.
+func TestReplay_NestedLayout_PreservesChangedFiles(t *testing.T) {
+	// Set up nested layout: workspace/ = git toplevel, agent-state/ = root.
+	workspace, asDir := setupI807Workspace(t, false)
+	root := filepath.Join(workspace, "agent-state")
+
+	// Commit a base file so there's real tree content to overlay onto.
+	// Use T-900 to avoid colliding with T-001 written by setupI807Workspace.
+	baseFile := filepath.Join(root, "tasks", "T-900-base.md")
+	if err := os.WriteFile(baseFile, []byte("id: T-900\nstatus: queued\n"), 0644); err != nil {
+		t.Fatalf("write T-900: %v", err)
+	}
+	gitRun(t, workspace, "add", "-A")
+	gitRun(t, workspace, "commit", "-m", "base state")
+
+	// Seed bare remote from this base commit.
+	bare := gitBareRemote(t, workspace)
+
+	// Make our unshared local commit: add T-002.
+	ourFile := filepath.Join(root, "tasks", "T-002-our.md")
+	if err := os.WriteFile(ourFile, []byte("id: T-002\nstatus: active\n"), 0644); err != nil {
+		t.Fatalf("write T-002: %v", err)
+	}
+	gitRun(t, workspace, "add", "-A")
+	gitRun(t, workspace, "commit", "-m", "our: add T-002")
+	// Do NOT push — this is the unshared local commit that will be replayed.
+
+	// Simulate a peer pushing a non-overlapping commit to origin/main.
+	peer := t.TempDir()
+	gitRun(t, peer, "clone", bare, ".")
+	gitRun(t, peer, "config", "user.email", "peer@test.com")
+	gitRun(t, peer, "config", "user.name", "Peer")
+	peerFile := filepath.Join(peer, "agent-state", "tasks", "T-003-peer.md")
+	if err := os.MkdirAll(filepath.Dir(peerFile), 0755); err != nil {
+		t.Fatalf("mkdir peer dir: %v", err)
+	}
+	if err := os.WriteFile(peerFile, []byte("id: T-003\nstatus: queued\n"), 0644); err != nil {
+		t.Fatalf("write T-003: %v", err)
+	}
+	gitRun(t, peer, "add", "-A")
+	gitRun(t, peer, "commit", "-m", "peer: add T-003")
+	gitRun(t, peer, "push", "origin", "main")
+
+	// Load the store with nested layout config.
+	cfg, err := config.LoadFrom(filepath.Join(asDir, "config.yaml"))
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.Git = &config.GitConfig{AutoCommit: true, AutoPush: false}
+	s, storeErr := New(cfg)
+	if storeErr != nil {
+		t.Fatalf("New store: %v", storeErr)
+	}
+
+	// replayCommitOnFetchedMain must succeed: fetch origin, detect no overlap
+	// between T-002 (ours) and T-003 (peer's), and replay our commit on top of
+	// the peer's commit.
+	if err := s.replayCommitOnFetchedMain(root); err != nil {
+		t.Fatalf("replayCommitOnFetchedMain: %v", err)
+	}
+
+	// Our file must survive in the replayed commit (was silently dropped before the fix).
+	ourContent, err := gitOutput(workspace, "show", "refs/heads/main:agent-state/tasks/T-002-our.md")
+	if err != nil {
+		t.Fatalf("T-002-our.md not found in refs/heads/main after replay (was silently dropped): %v", err)
+	}
+	if !strings.Contains(ourContent, "T-002") {
+		t.Errorf("T-002 content mangled in replay: %q", ourContent)
+	}
+
+	// Peer's file must also be present (we replayed on top of origin/main).
+	peerContent, err := gitOutput(workspace, "show", "refs/heads/main:agent-state/tasks/T-003-peer.md")
+	if err != nil {
+		t.Fatalf("T-003-peer.md not found in refs/heads/main after replay: %v", err)
+	}
+	if !strings.Contains(peerContent, "T-003") {
+		t.Errorf("T-003 content mangled in replay: %q", peerContent)
+	}
+}
