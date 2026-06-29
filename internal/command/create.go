@@ -456,6 +456,8 @@ func Create(s *store.Store, cfg *config.Config, itemType, title string, opts Cre
 	// I-588: spawn the Claude sub-agent self-review on task/issue creates.
 	// Always runs even when autoSync returns a gate error — the item is on
 	// disk and still needs review regardless of git-sync outcome (I-821).
+	// I-1612: the review also checks title quality (a dimension not covered by
+	// SBAR semantic validation) so it must run unconditionally on every create.
 	runItemReview(s, cfg, id, item, opts.Engine)
 
 	if syncErr != nil {
