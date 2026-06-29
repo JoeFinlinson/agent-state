@@ -295,8 +295,20 @@ func TryAutoFinishWorktree(cfg *config.Config, id string) (cleaned bool, retaine
 		}
 		out, upErr := gitOutputDir(repoDir, "log", "--oneline", "@{u}..HEAD")
 		if upErr != nil {
-			fmt.Printf("  worktree %s/%s retained — cannot verify commits are pushed (no upstream configured); run `st finish %s --force` if safe\n", id, repo, id)
-			return false, true
+			// @{u} unreachable. Distinguish two cases:
+			// (a) No upstream ever configured (I-1469): retain conservatively to
+			//     protect local-only commits that were never published.
+			// (b) Upstream was configured but remote branch was deleted after a
+			//     squash merge (I-1665): safe to auto-finish — work is on main.
+			branchName, _ := gitOutputDir(repoDir, "rev-parse", "--abbrev-ref", "HEAD")
+			branchName = strings.TrimSpace(branchName)
+			remoteName, remErr := gitOutputDir(repoDir, "config", "--get", "branch."+branchName+".remote")
+			if remErr != nil || strings.TrimSpace(remoteName) == "" {
+				// (a) No upstream configured — retain conservatively (I-1469).
+				fmt.Printf("  worktree %s/%s retained — cannot verify commits are pushed (no upstream configured); run `st finish %s --force` if safe\n", id, repo, id)
+				return false, true
+			}
+			// (b) Remote configured; branch gone post-squash-merge — proceed to clean.
 		} else if strings.TrimSpace(out) != "" {
 			fmt.Printf("  worktree %s/%s retained — unpushed commits; run `st finish %s --force` after pushing\n", id, repo, id)
 			return false, true
