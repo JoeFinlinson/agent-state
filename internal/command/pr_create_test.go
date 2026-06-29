@@ -182,6 +182,10 @@ func TestParsePRNumberFromCreateOutput(t *testing.T) {
 		{"https://github.com/TheraPrac/theraprac-api/pull/42\n", 42},
 		{"Warning: 3 uncommitted changes\nhttps://github.com/TheraPrac/theraprac-web/pull/1007\n", 1007},
 		{"https://github.com/o/r/pull/5", 5},
+		// An earlier numeric /pull/<n> notice precedes the created-PR URL → keep the LAST.
+		{"note: linked to https://github.com/o/r/pull/11\nhttps://github.com/o/r/pull/99\n", 99},
+		// The "Create a pull request … /pull/new/<branch>" hint is skipped ("new" ≠ int).
+		{"remote: Create a pull request for 'x' https://github.com/o/r/pull/new/x\nhttps://github.com/o/r/pull/7\n", 7},
 		{"no url here", 0},
 		{"", 0},
 	}

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/theraprac/agent-state/internal/config"
+	"github.com/theraprac/agent-state/internal/model"
 	"github.com/theraprac/agent-state/internal/store"
 )
 
@@ -72,11 +73,8 @@ func PRCreate(s *store.Store, cfg *config.Config, id string, opts PRCreateOpts) 
 	// Gate the non-draft path so routing through st never bypasses the two
 	// PreToolUse guards that protect raw `gh pr create`.
 	if !opts.Draft {
-		if v, _ := getNestedField(item, "testing_evidence", "live_acceptance"); strings.TrimSpace(v) == "" {
-			fmt.Fprintf(os.Stderr,
-				"%s: no testing_evidence.live_acceptance — exercise the binary against real deps before opening a PR (CLAUDE.md #15). Record with `st test %s live_acceptance --run` (or `--skip \"<reason>\"`), or use --draft to iterate.\n",
-				id, id)
-			return 1
+		if rc := liveAcceptanceCheck(item, id); rc != 0 {
+			return rc
 		}
 		if rc := ReviewCheck(s, cfg, id, ReviewCheckOpts{GitHeadSHA: opts.GitHeadSHA}); rc != 0 {
 			// ReviewCheck already printed the specific reason.
@@ -143,16 +141,21 @@ func PRCreate(s *store.Store, cfg *config.Config, id string, opts PRCreateOpts) 
 		return 1
 	}
 
+	// From here on the PR EXISTS on GitHub (gh succeeded). Any later failure must
+	// NOT read as a create failure — surface that the PR is live and the exact
+	// command to finish recording, so a re-run of `st pr create` doesn't just hit
+	// "a PR already exists" with no breadcrumb (self-diagnosing per operator profile).
+	prURL := strings.TrimSpace(out)
 	prNum := parsePRNumberFromCreateOutput(out)
 	if prNum == 0 {
-		fmt.Fprintf(os.Stderr, "%s: PR opened but could not parse its number from gh output:\n%s\nRecord it manually: st pr %s --repo %s --pr <N>\n", id, out, id, opts.Repo)
+		fmt.Fprintf(os.Stderr, "%s: PR was OPENED (%s) but its number could not be parsed from gh output — the PR EXISTS; finish recording with: st pr %s --repo %s --pr <N>\n", id, prURL, id, opts.Repo)
 		return 1
 	}
 
-	fmt.Printf("%s: opened PR %s#%d (%s)\n", id, slug, prNum, strings.TrimSpace(out))
+	fmt.Printf("%s: opened PR %s#%d (%s)\n", id, slug, prNum, prURL)
 
 	// Record the manifest + advance the delivery stage to pr_open (reuse st pr).
-	return PR(s, cfg, id, PROpts{
+	if rc := PR(s, cfg, id, PROpts{
 		Repo:          opts.Repo,
 		PRNumber:      prNum,
 		GitNameStatus: opts.GitNameStatus,
@@ -160,13 +163,37 @@ func PRCreate(s *store.Store, cfg *config.Config, id string, opts PRCreateOpts) 
 		GitHeadSHA:    opts.GitHeadSHA,
 		GitBlobHash:   opts.GitBlobHash,
 		FileExists:    opts.FileExists,
-	})
+	}); rc != 0 {
+		fmt.Fprintf(os.Stderr, "%s: PR %s#%d was OPENED but recording its manifest failed (see above). The PR EXISTS — finish recording with: st pr %s --repo %s --pr %d\n", id, slug, prNum, id, opts.Repo, prNum)
+		return rc
+	}
+	return 0
+}
+
+// liveAcceptanceCheck mirrors pre-pr-live-acceptance-guard.sh: the item must
+// carry a testing_evidence.live_acceptance entry (any value — pass/fail/skip).
+// Returns 0 on pass, 1 on fail (with the same guidance the hook prints). Kept as
+// a helper so the Go side is single-sourced (parallel to ReviewCheck) and phase
+// 2b's blocking guard can reuse it.
+func liveAcceptanceCheck(item *model.Item, id string) int {
+	if v, _ := getNestedField(item, "testing_evidence", "live_acceptance"); strings.TrimSpace(v) != "" {
+		return 0
+	}
+	fmt.Fprintf(os.Stderr,
+		"%s: no testing_evidence.live_acceptance — exercise the binary against real deps before opening a PR (CLAUDE.md #15). Record with `st test %s live_acceptance --run` (or `--skip \"<reason>\"`), or use --draft to iterate.\n",
+		id, id)
+	return 1
 }
 
 // parsePRNumberFromCreateOutput extracts the PR number from `gh pr create`'s
-// output, which prints the new PR's URL (…/pull/<n>) — typically the last line.
+// output, which prints the new PR's URL (…/pull/<n>) as the FINAL line. We keep
+// the LAST numeric /pull/<n> match (not the first): gh may emit an earlier
+// numeric /pull/<n> reference (a linked/superseded-PR notice, a body echo) before
+// the created-PR URL, and the created URL is always last. (The "Create a pull
+// request … /pull/new/<branch>" hint is naturally skipped — "new" fails Atoi.)
 // Reuses the same /pull/<n> URL shape parsed elsewhere (reconcile.go).
 func parsePRNumberFromCreateOutput(out string) int {
+	result := 0
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.Contains(line, "/pull/") {
@@ -174,9 +201,9 @@ func parsePRNumberFromCreateOutput(out string) int {
 		}
 		if _, _, prStr := parsePRURL(line); prStr != "" {
 			if n, err := strconv.Atoi(prStr); err == nil {
-				return n
+				result = n
 			}
 		}
 	}
-	return 0
+	return result
 }
