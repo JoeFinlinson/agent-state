@@ -863,9 +863,11 @@ func prepItem(s *store.Store, cfg *config.Config, itemID string, item *model.Ite
 		item, _ = s.Get(itemID)
 
 		// Update ACs from item if changed; sanitize to strip backtick
-		// wrapping and non-cmd: prose (I-895, I-1052).
-		if len(item.AcceptanceCriteria) > 0 {
-			p.ACs = plan.PrepareACs(item.AcceptanceCriteria)
+		// wrapping and non-cmd: prose (I-895, I-1052). Only replace if
+		// the cleaned result is non-empty — if all entries are prose,
+		// preserve the existing p.ACs loaded from the plan text.
+		if cleaned := plan.PrepareACs(item.AcceptanceCriteria); len(cleaned) > 0 {
+			p.ACs = cleaned
 		}
 		if item.Summary != "" && p.Approach == "" {
 			p.Approach = item.Summary

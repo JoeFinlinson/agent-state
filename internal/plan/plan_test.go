@@ -671,6 +671,11 @@ func TestPrepareACs(t *testing.T) {
 			if len(got) != len(tc.want) {
 				t.Fatalf("got %v, want %v", got, tc.want)
 			}
+			// Enforce nil vs empty-slice distinction: callers that guard on
+			// p.ACs != nil (rather than len > 0) depend on nil meaning "never set".
+			if tc.want == nil && got != nil {
+				t.Errorf("expected nil, got empty slice %v", got)
+			}
 			for i, w := range tc.want {
 				if got[i] != w {
 					t.Errorf("[%d] got %q, want %q", i, got[i], w)
