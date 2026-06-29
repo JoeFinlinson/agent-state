@@ -2420,6 +2420,27 @@ Note: "aged" is not a valid reason — goals are dropped by deliberate decision,
 		},
 	})
 
+	// T-421: goal breakdown — top-N items per active goal ranked by weight.
+	goalBreakdownCmd := &cobra.Command{
+		Use:   "breakdown",
+		Short: "Show top items per active goal ranked by strategic weight",
+		Long: `For each active goal (highest weight first), show the top-N workable items
+ranked by the same scoring algorithm as st recommend.
+
+Use --json for a machine-readable format compatible with the T-348 TUI contract.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			topF, _ := cmd.Flags().GetInt("top")
+			jsonF, _ := cmd.Flags().GetBool("json")
+			exitCode = command.GoalBreakdown(appStore, appCfg, command.GoalBreakdownOpts{
+				Top:  topF,
+				JSON: jsonF,
+			})
+		},
+	}
+	goalBreakdownCmd.Flags().Int("top", 3, "max items to show per goal")
+	goalBreakdownCmd.Flags().Bool("json", false, "machine-readable JSON output")
+	goalCmd.AddCommand(goalBreakdownCmd)
+
 	// T-413: goal review — active-goal health + orphan queue reconciliation.
 	goalReviewCmd := &cobra.Command{
 		Use:   "review",
