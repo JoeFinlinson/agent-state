@@ -2160,7 +2160,12 @@ Example:
 		Short: "Mark a heuristic as superseded (by 1-based index or timestamp prefix)",
 		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
-			reason, _ := cmd.Flags().GetString("reason")
+			reason, err := cmd.Flags().GetString("reason")
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "st heuristic retire: %v\n", err)
+				exitCode = 1
+				return
+			}
 			exitCode = command.Heuristic_Retire(appCfg, args[0], reason)
 		},
 	}
