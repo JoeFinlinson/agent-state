@@ -108,7 +108,21 @@ func GoalCreate(s *store.Store, cfg *config.Config, title string, weight int, op
 		return 1
 	}
 
+	// Print machine-parseable confirmation before autoSync (I-797 ordering —
+	// consumers polling output for "Created" must see it before git latency).
 	fmt.Printf("Created goal %s — %s (weight %d, status draft)\n", createdGoal.ID, title, weight)
+
+	// I-1715: GitSync's `git add -u` only stages modifications to already-tracked
+	// files, never new untracked ones (I-442). Pass the new goal's path explicitly
+	// so it is committed and pushed immediately — without this, the goal file sits
+	// untracked until some unrelated later command's autoSync happens to sweep it
+	// up, and a peer's `st reconcile` running in that window silently drops the
+	// orphaned index entry, destroying the goal (observed live 2026-07-01, G-023).
+	newPath, _ := s.Path(createdGoal.ID)
+	if syncErr := autoSync(s, fmt.Sprintf("st goal create: %s — %s", createdGoal.ID, title), newPath); syncErr != nil {
+		return 1
+	}
+
 	return 0
 }
 
@@ -185,6 +199,16 @@ func GoalActivate(s *store.Store, cfg *config.Config, id string) int {
 	}
 
 	fmt.Printf("%s activated (active weight: %d/100)\n", id, finalSum)
+
+	// I-1715: draft->active stays within the same "goals" directory (see
+	// config.go DirectoryMap), so this is a same-path modification that a later
+	// unrelated command's `git add -u` would eventually catch — but syncing
+	// immediately closes the window where the status flip sits unpersisted.
+	path, _ := s.Path(id)
+	if syncErr := autoSync(s, fmt.Sprintf("st goal activate: %s", id), path); syncErr != nil {
+		return 1
+	}
+
 	return 0
 }
 
@@ -312,6 +336,16 @@ func GoalMarkMet(s *store.Store, cfg *config.Config, id string, opts GoalMarkMet
 	} else if len(cleared) > 0 {
 		fmt.Printf("cleared goal focus for: %s\n", strings.Join(cleared, ", "))
 	}
+
+	// I-1715: met moves the file goals/ -> archive/ (config.go DirectoryMap), so
+	// this is a rename, not a same-path modification — `git add -u` stages the
+	// deletion of the old tracked path but never picks up the new untracked one.
+	// Pass the post-Move path explicitly, same as the create-path (I-442) fix.
+	path, _ := s.Path(id)
+	if syncErr := autoSync(s, fmt.Sprintf("st goal mark-met: %s", id), path); syncErr != nil {
+		return 1
+	}
+
 	return 0
 }
 
@@ -365,6 +399,15 @@ func GoalDrop(s *store.Store, cfg *config.Config, id, reason string) int {
 	} else if len(cleared) > 0 {
 		fmt.Printf("cleared goal focus for: %s\n", strings.Join(cleared, ", "))
 	}
+
+	// I-1715: dropped moves the file goals/ -> archive/ (config.go DirectoryMap),
+	// so this is a rename, not a same-path modification — same explicit-path
+	// requirement as GoalMarkMet above.
+	path, _ := s.Path(id)
+	if syncErr := autoSync(s, fmt.Sprintf("st goal drop: %s (%s)", id, reason), path); syncErr != nil {
+		return 1
+	}
+
 	return 0
 }
 
